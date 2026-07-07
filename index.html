@@ -6,11 +6,7 @@
 <title>FableCut — Video Editor</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/icons/favicon-32.png" sizes="32x32" type="image/png">
-<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-<link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#0e0e10">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="FableCut">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -21,7 +17,6 @@
     <div class="logo"><span class="logo-mark">▶</span> Fable<b>Cut</b></div>
     <div class="topbar-center" id="projectName">Untitled Project</div>
     <div class="topbar-right">
-      <button class="btn ghost hidden" id="btnInstall" title="Install FableCut as a desktop app">⬇ Install app</button>
       <button class="btn ghost" id="btnHelp" title="Keyboard shortcuts">?</button>
       <button class="btn primary" id="btnExport">⬇ Export</button>
     </div>
@@ -173,30 +168,5 @@
 <div id="toast"></div>
 
 <script src="app.js"></script>
-<script>
-/* ── PWA: service worker + install-as-app prompt ── */
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () =>
-    navigator.serviceWorker.register("/sw.js").catch(() => {}));
-}
-let deferredInstall = null;
-const installBtn = document.getElementById("btnInstall");
-window.addEventListener("beforeinstallprompt", (e) => {
-  e.preventDefault();
-  deferredInstall = e;
-  if (installBtn) installBtn.classList.remove("hidden");
-});
-if (installBtn) installBtn.addEventListener("click", async () => {
-  if (!deferredInstall) return;
-  deferredInstall.prompt();
-  await deferredInstall.userChoice;
-  deferredInstall = null;
-  installBtn.classList.add("hidden");
-});
-window.addEventListener("appinstalled", () => {
-  deferredInstall = null;
-  if (installBtn) installBtn.classList.add("hidden");
-});
-</script>
 </body>
 </html>

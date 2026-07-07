@@ -34,7 +34,6 @@ try { HAS_FFMPEG = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status
 const MIME = {
   ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8", ".json": "application/json",
-  ".webmanifest": "application/manifest+json",
   ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
   ".mkv": "video/x-matroska", ".m4v": "video/mp4",
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
