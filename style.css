@@ -129,6 +129,10 @@ body {
 /* ── Inspector ── */
 .inspector-body { flex: 1; overflow-y: auto; padding: 10px; }
 .inspector-empty { margin: auto; text-align: center; color: var(--dim); padding-top: 40px; }
+.insp-multi {
+  margin-bottom: 12px; padding: 7px 9px; border-radius: 6px; font-size: 11px;
+  color: #cfd0ff; background: #7b6cff1c; border: 1px solid #7b6cff44;
+}
 .insp-section { margin-bottom: 14px; }
 .insp-section h3 {
   font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--dim);
@@ -181,7 +185,14 @@ input[type=range] { accent-color: var(--accent); height: 18px; }
   box-shadow: 0 1px 3px #0006;
 }
 .clip:active { cursor: grabbing; }
-.clip.selected { outline: 2px solid #fff; outline-offset: -1px; box-shadow: 0 0 0 3px #7b6cff55; }
+.clip.selected { outline: 2px solid #b9baff; outline-offset: -1px; box-shadow: 0 0 0 3px #7b6cff55; }
+.clip.selected.primary { outline-color: #fff; }
+
+/* rubber-band selection box drawn while dragging on empty timeline area */
+.marquee {
+  position: absolute; z-index: 5; pointer-events: none;
+  border: 1px solid #7b6cffcc; background: #7b6cff22; border-radius: 2px;
+}
 .clip .clip-label {
   position: absolute; inset: 0; padding: 3px 8px; font-size: 11px; font-weight: 600; color: #fff;
   text-shadow: 0 1px 2px #000c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;

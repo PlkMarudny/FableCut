@@ -64,7 +64,9 @@ function onFsChange() {
   clearTimeout(debounce);
   debounce = setTimeout(broadcast, 150);
 }
-try { fs.watch(PROJECT_FILE, onFsChange); } catch {}
+/* watch the directory, not the file — atomic tmp+rename writes would detach a
+   direct file watcher on Windows */
+try { fs.watch(ROOT, (ev, f) => { if (f === "project.json") onFsChange(); }); } catch {}
 try { fs.watch(MEDIA_DIR, onFsChange); } catch {}
 for (const d of LIBRARY_SUBDIRS) {
   try { fs.watch(path.join(LIBRARY_DIR, d), onFsChange); } catch {}
@@ -189,7 +191,19 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
       const data = JSON.parse(body.toString("utf8")); // validate JSON
-      fs.writeFileSync(PROJECT_FILE, JSON.stringify(data, null, 2));
+      /* Optimistic concurrency: a write whose revision isn't newer than what's
+         on disk was based on a stale read (someone else — the UI or an external
+         tool — saved in between). Reject it instead of clobbering their work.
+         ?force=1 skips the check for deliberate overwrites. */
+      let cur = {};
+      try { cur = JSON.parse(fs.readFileSync(PROJECT_FILE, "utf8").replace(new RegExp("^\\uFEFF"), "")); } catch {}
+      if ((data.revision || 0) <= (cur.revision || 0) && url.searchParams.get("force") !== "1") {
+        sendJSON(res, 409, { error: "stale revision — project changed since it was read", revision: cur.revision || 0 });
+        return;
+      }
+      const tmp = PROJECT_FILE + ".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+      fs.renameSync(tmp, PROJECT_FILE);
       sendJSON(res, 200, { ok: true, revision: data.revision });
     } catch (e) { sendJSON(res, 400, { error: String(e) }); }
     return;

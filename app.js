@@ -99,7 +99,9 @@ const project = {
 };
 const state = {
   time: 0, playing: false, pps: 60, snap: true,
-  selId: null, connected: false, exporting: false,
+  selId: null,           // primary selection (drives the inspector)
+  selIds: new Set(),     // full multi-selection (includes selId)
+  connected: false, exporting: false,
   rendering: false,      // fast (server/ffmpeg) export in progress
   guides: false,         // safe-area overlay on the monitor
   ffmpeg: false,         // server reports ffmpeg available
@@ -117,7 +119,7 @@ const runtime = {
   googleLoaded: new Set(),
   undo: [], redo: [],
   audio: null,          // {ctx, master, recDest}
-  saveTimer: null, suppressSSE: 0,
+  saveTimer: null, pendingSync: false,
   sfxPreview: null,     // <audio> element for library sound previews
 };
 
@@ -255,7 +257,7 @@ function applyProject(data) {
   els.preview.width = project.width; els.preview.height = project.height;
   els.monitorRes.textContent = `${project.width} × ${project.height} · ${project.fps}fps`;
   syncAspectSel();
-  state.selId = null;
+  pruneSelection(); // keep the selection across external reloads where possible
   state.dirtyTimeline = true;
   renderBin(); renderInspector();
 }
@@ -264,10 +266,17 @@ function scheduleSave() {
   if (!state.connected) return;
   clearTimeout(runtime.saveTimer);
   runtime.saveTimer = setTimeout(async () => {
+    runtime.saveTimer = null;
     project.revision++;
-    runtime.suppressSSE = Date.now();
     const body = JSON.stringify(projectJSON(), null, 2);
-    try { await fetch("/api/project", { method: "PUT", headers: { "Content-Type": "application/json" }, body }); } catch {}
+    try {
+      const res = await fetch("/api/project", { method: "PUT", headers: { "Content-Type": "application/json" }, body });
+      if (res.status === 409) {
+        // an external tool saved a newer revision while this change was pending
+        await syncFromServer(true);
+        toast("Project was updated externally — your last change may need redoing.");
+      }
+    } catch {}
   }, 400);
 }
 function projectJSON() {
@@ -283,22 +292,30 @@ function projectJSON() {
 }
 function listenSSE() {
   const es = new EventSource("/api/events");
-  es.onmessage = async (e) => {
-    if (Date.now() - runtime.suppressSSE < 1500) return; // our own save
-    if (state.gesture || state.exporting) return;
-    try {
-      const res = await fetch("/api/project", { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data || !Array.isArray(data.clips)) return;
-      if (JSON.stringify(data) !== JSON.stringify(projectJSON())) {
-        applyProject(data);
-        await probeMissingMeta();
-      }
-      if (state.binTab !== "project") fetchLibrary(state.binTab).then(renderLibrary);
-      loadLibraryFonts();
-    } catch {}
-  };
+  es.onmessage = () => syncFromServer();
+}
+/* Pull the server's project if it moved past our revision (an external tool —
+   e.g. Claude — wrote it). Our own saves land at our exact local revision, so
+   they compare equal and are skipped without any timing heuristics. Deferred
+   during gestures/exports and re-run when they end (runtime.pendingSync). */
+async function syncFromServer(force) {
+  if (state.gesture || state.exporting) { runtime.pendingSync = true; return; }
+  runtime.pendingSync = false;
+  if (state.binTab !== "project") fetchLibrary(state.binTab).then(renderLibrary);
+  loadLibraryFonts();
+  try {
+    const res = await fetch("/api/project", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data || !Array.isArray(data.clips)) return;
+    if (!force && (data.revision || 0) === (project.revision || 0)) return; // our own save
+    if (runtime.saveTimer) { // unsaved local edit vs. external write: external wins, tell the user
+      clearTimeout(runtime.saveTimer); runtime.saveTimer = null;
+      toast("Project was updated externally — your last change may need redoing.");
+    }
+    applyProject(data);
+    await probeMissingMeta();
+  } catch {}
 }
 /* Fill in duration/size for media entries added externally without metadata */
 async function probeMissingMeta() {
@@ -580,14 +597,14 @@ function undo() {
   if (!runtime.undo.length) return;
   runtime.redo.push(JSON.stringify(project.clips));
   project.clips = JSON.parse(runtime.undo.pop());
-  if (!getClip(state.selId)) state.selId = null;
+  pruneSelection();
   scheduleSave(); renderInspector();
 }
 function redo() {
   if (!runtime.redo.length) return;
   runtime.undo.push(JSON.stringify(project.clips));
   project.clips = JSON.parse(runtime.redo.pop());
-  if (!getClip(state.selId)) state.selId = null;
+  pruneSelection();
   scheduleSave(); renderInspector();
 }
 
@@ -632,17 +649,17 @@ function addAdjust() {
   selectClip(c.id); scheduleSave();
 }
 function deleteSelected() {
-  const c = getClip(state.selId);
-  if (!c) return;
+  const doomed = selectedClips();
+  if (!doomed.length) return;
   pushUndo();
-  releaseClipEl(c.id);
-  project.clips = project.clips.filter((x) => x.id !== c.id);
-  state.selId = null;
+  for (const c of doomed) releaseClipEl(c.id);
+  project.clips = project.clips.filter((x) => !state.selIds.has(x.id));
+  setSelection([]);
   scheduleSave(); renderInspector();
 }
 function splitAtPlayhead() {
   const t = state.time;
-  let targets = getClip(state.selId) ? [getClip(state.selId)] : project.clips;
+  let targets = state.selIds.size ? selectedClips() : project.clips;
   targets = targets.filter((c) => t > c.start + MIN_DUR && t < clipEnd(c) - MIN_DUR);
   if (!targets.length) return;
   pushUndo();
@@ -711,7 +728,8 @@ function rebuildClips() {
     const tr = trackOf(c); if (!tr) continue;
     const row = els.tracks.querySelector(`[data-track="${c.track}"]`);
     const div = document.createElement("div");
-    div.className = `clip c-${c.kind}` + (c.id === state.selId ? " selected" : "");
+    div.className = `clip c-${c.kind}` +
+      (state.selIds.has(c.id) ? " selected" : "") + (c.id === state.selId ? " primary" : "");
     div.dataset.id = c.id;
     div.style.left = c.start * state.pps + "px";
     div.style.width = Math.max(8, c.duration * state.pps) + "px";
@@ -801,13 +819,14 @@ function drawRuler() {
 }
 
 /* ── Snapping ── */
-function snapTime(t, ignoreId) {
+function snapTime(t, ignore) { // ignore: clip id, Set of ids, or null
   if (!state.snap) return t;
+  const ign = ignore instanceof Set ? ignore : new Set(ignore ? [ignore] : []);
   const tol = SNAP_PX / state.pps;
   const cands = [0, state.time];
   for (const mk of project.markers || []) cands.push(mk.t);
   for (const c of project.clips) {
-    if (c.id === ignoreId) continue;
+    if (ign.has(c.id)) continue;
     cands.push(c.start, clipEnd(c));
   }
   let best = t, bd = tol;
@@ -832,22 +851,34 @@ function trackAtEvent(e) {
 }
 
 els.tracksContent.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
   const clipDiv = e.target.closest(".clip");
   if (!clipDiv) {
-    // click on empty track background: seek + deselect
-    selectClip(null);
-    startScrub(e);
+    // empty track background: drag = marquee select, plain click = seek + deselect
+    startMarquee(e);
     return;
   }
   const c = getClip(clipDiv.dataset.id);
   if (!c) return;
-  selectClip(c.id);
+  const additive = e.ctrlKey || e.metaKey || e.shiftKey;
+  if (additive) {
+    selectClip(c.id, { toggle: true });
+    if (!state.selIds.has(c.id)) return; // toggled off — nothing to drag
+  } else if (!state.selIds.has(c.id)) {
+    selectClip(c.id);
+  } else if (state.selId !== c.id) {
+    // grabbing inside an existing multi-selection: keep the group, retarget the inspector
+    state.selId = c.id;
+    state.dirtyTimeline = true;
+    renderInspector();
+  }
   const mode = e.target.classList.contains("handle")
     ? (e.target.classList.contains("l") ? "trim-l" : "trim-r") : "move";
-  startClipGesture(e, c, mode);
+  // a plain click (no drag) on a multi-selection collapses it to that clip on release
+  startClipGesture(e, c, mode, !additive && state.selIds.size > 1);
 });
 
-function startClipGesture(e, c, mode) {
+function startClipGesture(e, c, mode, collapseOnClick) {
   e.preventDefault();
   state.gesture = true;
   const media = getMedia(c.mediaId);
@@ -855,6 +886,10 @@ function startClipGesture(e, c, mode) {
     start: c.start, in: c.in, duration: c.duration, track: c.track,
     keyframes: c.keyframes ? JSON.parse(JSON.stringify(c.keyframes)) : undefined,
   };
+  // moving a clip that belongs to a multi-selection drags the whole group
+  const group = mode === "move" && state.selIds.has(c.id) ? selectedClips() : [c];
+  const groupOrig = new Map(group.map((x) => [x.id, x.start]));
+  const groupIds = new Set(group.map((x) => x.id));
   const t0 = timeAtEvent(e);
   let moved = false;
   const snapshot = JSON.stringify(project.clips);
@@ -864,15 +899,20 @@ function startClipGesture(e, c, mode) {
     if (Math.abs(dt * state.pps) > 3) moved = true;
     if (!moved) return;
     if (mode === "move") {
-      let ns = snapTime(orig.start + dt, c.id);
-      const nsEnd = snapTime(orig.start + orig.duration + dt, c.id);
+      let ns = snapTime(orig.start + dt, groupIds);
+      const nsEnd = snapTime(orig.start + orig.duration + dt, groupIds);
       if (Math.abs(nsEnd - (orig.start + orig.duration + dt)) < Math.abs(ns - (orig.start + dt)))
         ns = nsEnd - orig.duration;
-      c.start = Math.max(0, ns);
-      const tk = trackAtEvent(ev);
-      if (tk) {
-        const trk = TRACKS.find((t) => t.id === tk);
-        if (trk && (c.kind === "audio") === (trk.kind === "audio")) c.track = tk;
+      // one time-delta for the whole group, clamped so nothing crosses 0
+      let d = ns - orig.start;
+      d = Math.max(d, -Math.min(...group.map((x) => groupOrig.get(x.id))));
+      for (const x of group) x.start = groupOrig.get(x.id) + d;
+      if (group.length === 1) {
+        const tk = trackAtEvent(ev);
+        if (tk) {
+          const trk = TRACKS.find((t) => t.id === tk);
+          if (trk && (c.kind === "audio") === (trk.kind === "audio")) c.track = tk;
+        }
       }
     } else if (mode === "trim-l") {
       let ns = snapTime(orig.start + dt, c.id);
@@ -904,7 +944,70 @@ function startClipGesture(e, c, mode) {
       if (runtime.undo.length > 100) runtime.undo.shift();
       runtime.redo.length = 0;
       scheduleSave();
+    } else if (collapseOnClick) {
+      selectClip(c.id);
     }
+    if (runtime.pendingSync) syncFromServer();
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+/* ── Marquee (rubber-band) selection on empty timeline area ──
+   Drag draws a box in tracksContent space and selects every clip it touches
+   (ctrl/cmd/shift keeps the existing selection). A click without drag keeps
+   the old behavior: deselect + seek to the click point. */
+function startMarquee(e) {
+  e.preventDefault();
+  state.gesture = true;
+  const additive = e.ctrlKey || e.metaKey || e.shiftKey;
+  const base = additive ? new Set(state.selIds) : new Set();
+  const rect0 = els.tracksContent.getBoundingClientRect();
+  const x0 = e.clientX - rect0.left, y0 = e.clientY - rect0.top;
+  const rows = new Map(); // track id -> vertical band inside tracksContent
+  for (const row of els.tracks.children)
+    rows.set(row.dataset.track, { top: row.offsetTop, h: row.offsetHeight });
+  let box = null, moved = false;
+
+  const onMove = (ev) => {
+    const r = els.tracksContent.getBoundingClientRect();
+    const x1 = ev.clientX - r.left, y1 = ev.clientY - r.top;
+    if (!moved && Math.hypot(x1 - x0, y1 - y0) < 4) return;
+    moved = true;
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "marquee";
+      els.tracksContent.appendChild(box);
+    }
+    const L = Math.min(x0, x1), T = Math.min(y0, y1);
+    const bw = Math.abs(x1 - x0), bh = Math.abs(y1 - y0);
+    Object.assign(box.style, { left: L + "px", top: T + "px", width: bw + "px", height: bh + "px" });
+    const hits = new Set(base);
+    for (const c of project.clips) {
+      const row = rows.get(c.track);
+      if (!row) continue;
+      const cx0 = c.start * state.pps, cx1 = cx0 + Math.max(8, c.duration * state.pps);
+      if (cx0 < L + bw && cx1 > L && row.top < T + bh && row.top + row.h > T) hits.add(c.id);
+    }
+    state.selIds = hits;
+    // cheap live highlight — no full timeline rebuild per pointermove
+    for (const div of els.tracks.querySelectorAll(".clip"))
+      div.classList.toggle("selected", hits.has(div.dataset.id));
+  };
+  const onUp = (ev) => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    state.gesture = false;
+    if (box) box.remove();
+    if (!moved) {
+      selectClip(null);
+      setTime(timeAtEvent(ev));
+    } else {
+      if (!state.selIds.has(state.selId)) state.selId = [...state.selIds].pop() ?? null;
+      state.dirtyTimeline = true;
+      renderInspector();
+    }
+    if (runtime.pendingSync) syncFromServer();
   };
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
@@ -920,6 +1023,7 @@ function startScrub(e) {
     window.removeEventListener("pointermove", seek);
     window.removeEventListener("pointerup", onUp);
     state.gesture = false;
+    if (runtime.pendingSync) syncFromServer();
   };
   window.addEventListener("pointermove", seek);
   window.addEventListener("pointerup", onUp);
@@ -1006,12 +1110,31 @@ els.timelineScroll.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 /* ═══════════════════════════ SELECTION & INSPECTOR ═══════════════════════ */
-function selectClip(id) {
-  if (state.selId === id) return;
-  state.selId = id;
+function setSelection(ids, primary) {
+  state.selIds = new Set(ids);
+  state.selId = primary !== undefined ? primary : ([...state.selIds].pop() ?? null);
+  if (state.selId && !state.selIds.has(state.selId)) state.selIds.add(state.selId);
   state.dirtyTimeline = true;
   renderInspector();
 }
+/* Plain call replaces the selection; {toggle:true} (ctrl/cmd/shift+click)
+   adds/removes the clip from it. */
+function selectClip(id, opts) {
+  if (opts && opts.toggle && id != null) {
+    const s = new Set(state.selIds);
+    if (s.has(id)) { s.delete(id); setSelection([...s]); }
+    else { s.add(id); setSelection([...s], id); }
+    return;
+  }
+  if (state.selId === id && state.selIds.size <= 1) return;
+  setSelection(id == null ? [] : [id], id ?? null);
+}
+/* Drop selected ids whose clips no longer exist (undo/redo, external reload) */
+function pruneSelection() {
+  state.selIds = new Set([...state.selIds].filter((id) => getClip(id)));
+  if (!state.selIds.has(state.selId)) state.selId = [...state.selIds].pop() ?? null;
+}
+const selectedClips = () => project.clips.filter((c) => state.selIds.has(c.id));
 function renderInspector(lite) {
   const c = getClip(state.selId);
   if (!c) {
@@ -1033,7 +1156,9 @@ function renderInspector(lite) {
     row(k[0].toUpperCase() + k.slice(1),
       `<input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${val}">
        <span class="val" data-val="${k}">${val}${unit}</span>`, k);
-  let html = `<div class="insp-section"><h3>Clip — ${c.kind}</h3>
+  let html = (state.selIds.size > 1
+    ? `<div class="insp-multi">${state.selIds.size} clips selected — drag moves them together, Del deletes all. Fields below edit the primary (white-outlined) clip.</div>`
+    : "") + `<div class="insp-section"><h3>Clip — ${c.kind}</h3>
     ${row("Name", `<input type="text" data-k="name" value="${c.name.replace(/"/g, "&quot;")}">`)}
     ${row("Start (s)", `<input type="number" data-k="start" step="0.01" value="${c.start.toFixed(2)}">`)}
     ${row("Length (s)", `<input type="number" data-k="duration" step="0.01" value="${c.duration.toFixed(2)}">`)}
@@ -2206,6 +2331,7 @@ async function fastExport() {
     state.exporting = false; state.rendering = false;
     els.exportOverlay.classList.add("hidden");
     els.exportNote.textContent = "Rendering your sequence in real time. Keep this tab focused.";
+    if (runtime.pendingSync) syncFromServer();
   }
 }
 
@@ -2255,6 +2381,7 @@ async function startExport() {
 function finishExport(keep) {
   if (!state.exporting) return;
   state.exporting = false;
+  if (runtime.pendingSync) syncFromServer();
   recDiscard = !keep;
   state.playing = false;
   els.btnPlay.textContent = "▶";
@@ -2342,6 +2469,11 @@ window.addEventListener("keydown", (e) => {
   else if (k === "]") trimToPlayhead("out");
   else if (k === "m" || k === "M") toggleMarker();
   else if (k === "n" || k === "N") els.btnSnap.click();
+  else if (k === "Escape") selectClip(null);
+  else if ((e.ctrlKey || e.metaKey) && (k === "a" || k === "A")) {
+    e.preventDefault();
+    setSelection(project.clips.map((c) => c.id));
+  }
   else if (k === "+" || k === "=") setZoom(state.pps * 1.25);
   else if (k === "-") setZoom(state.pps / 1.25);
   else if ((e.ctrlKey || e.metaKey) && (k === "z" || k === "Z")) {

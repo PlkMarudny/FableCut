@@ -20,6 +20,23 @@ Every Claude Code session then has these tools:
 - `fablecut_get_project` / `fablecut_set_project` — read / replace the timeline JSON.
 - `fablecut_import_media` — copy a local file into `./media/` and register it.
 
+**`fablecut_set_project` is conflict-checked.** The MCP server remembers the
+`revision` from the most recent `fablecut_get_project` call. If `project.json`
+has been written by anyone else since that read (e.g. the user dragged a clip in
+the UI), `fablecut_set_project` refuses with a "CONFLICT — not saved" error
+instead of overwriting. Protocol:
+
+1. `fablecut_get_project` → read the document and note its `revision`.
+2. Apply your edits in memory, bump `revision`.
+3. `fablecut_set_project` → if it succeeds you're done.
+4. **On conflict**: call `fablecut_get_project` again to get the latest document,
+   re-apply your intended changes on top of it, bump `revision`, and call
+   `fablecut_set_project` again.
+
+Pass `force: true` to `fablecut_set_project` only when the user explicitly
+asks to overwrite conflicting changes. `fablecut_import_media` only appends a
+new media entry and always merges safely — no conflict check needed.
+
 For Claude Desktop, add to its MCP config:
 `{"mcpServers":{"fablecut":{"command":"node","args":["<path-to>/fablecut/mcp-server.js"]}}}`
 Direct file editing of `project.json` (below) works too and is equivalent.
@@ -42,6 +59,12 @@ Files: `index.html` + `style.css` + `app.js` (editor UI), `server.js` (API + hos
 4. The browser UI (if open) reloads instantly. The user previews/exports from the UI.
 
 Rules:
+- **Prefer `fablecut_set_project`** over direct file writes — it detects conflicts
+  automatically (see the MCP section above). If you do write `project.json`
+  directly, read it **immediately** before writing (never write from a stale read:
+  if the user tweaked something in the UI between your read and write, that write
+  destroys their changes). The UI detects external changes by revision comparison,
+  so a write that does not bump `revision` is invisible to it.
 - Make each edit a single atomic write (read → modify → write once), and bump
   `revision` (integer). Partial multi-step edits can be picked up half-finished.
 - New media entries may omit `duration` — the browser probes it and writes it back.
@@ -260,7 +283,11 @@ glitch (RGB split + jitter) · pop (overshoot scale — stickers/captions).
 ## REST API (alternative to file editing)
 
 - `GET  /api/project` — current project JSON
-- `PUT  /api/project` — replace project JSON (body = full document)
+- `PUT  /api/project` — replace project JSON (body = full document).
+  **Conflict-safe**: if the body's `revision` ≤ the revision currently on disk,
+  the server rejects with **409** and returns `{"error":"…","revision":<current>}`.
+  Append `?force=1` to overwrite unconditionally. Writes are atomic (tmp file +
+  rename), so a crashed write never corrupts the file.
 - `GET  /api/media`   — list files in ./media (name, src, size)
 - `GET  /api/library?dir=sfx|elements|svg|fonts` — list library assets
 - `POST /api/upload?name=foo.mp4` — raw body saved into ./media, returns `{src}`.

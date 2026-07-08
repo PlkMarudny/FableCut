@@ -5,6 +5,38 @@ All notable changes to FableCut are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-09
+
+### Added
+- **Timeline multi-select** — rubber-band marquee (drag on empty track area)
+  selects every clip the box touches. Ctrl/Cmd/Shift+click adds or removes
+  individual clips. Ctrl+A selects all; Esc deselects.
+- **Group move** — dragging any selected clip moves the whole selection by the
+  same time delta (clamped at 0). Vertical track moves remain per-clip.
+- **Batch Delete / Split** — Delete removes all selected clips; S splits every
+  selected clip that sits under the playhead.
+- **Multi-select inspector** — shows an "N clips selected" banner; edits the
+  primary (white-outlined) clip; secondary clips show a lighter outline.
+- **Conflict-safe `PUT /api/project`** — rejects stale writes with **409** when
+  the request body's `revision` ≤ the on-disk revision; response body is
+  `{error, revision}` with the current value. Append `?force=1` to overwrite
+  deliberately. Writes are now atomic (tmp file + rename).
+- **Conflict-safe MCP `fablecut_set_project`** — tracks the revision from the
+  last `fablecut_get_project` and errors with "CONFLICT — not saved" if
+  `project.json` changed on disk since that read. Recovery: re-read, re-apply,
+  save. New optional `force: true` argument bypasses the check.
+
+### Changed
+- Editor UI syncs by exact revision comparison (no timing heuristics); detects
+  external changes even during the previous 1.5 s blind window; defers reloads
+  during drag/export and applies them immediately after; preserves clip
+  selection across external reloads (pruned to clips that still exist); shows a
+  toast ("Project was updated externally…") when an external write supersedes an
+  unsaved local tweak.
+- Selection state survives undo/redo.
+- `CLAUDE.md` and `README.md` updated to document all of the above.
+- MCP server bumped to version **1.2.0**.
+
 ## [1.1.0] - 2026-07-07
 
 ### Added
@@ -47,5 +79,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Three control surfaces for AI agents: **MCP server**, direct `project.json`
   editing, and a **REST API** with live-reload over server-sent events.
 
+[1.2.0]: https://github.com/ronak-create/FableCut/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/ronak-create/FableCut/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ronak-create/FableCut/releases/tag/v1.0.0

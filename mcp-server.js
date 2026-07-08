@@ -27,8 +27,15 @@ function readProject() {
   return JSON.parse(raw);
 }
 function writeProject(doc) {
-  fs.writeFileSync(PROJECT_FILE, JSON.stringify(doc, null, 2));
+  // atomic tmp+rename so the UI's file watcher never sees a half-written doc
+  const tmp = PROJECT_FILE + ".mcp.tmp";
+  fs.writeFileSync(tmp, JSON.stringify(doc, null, 2));
+  fs.renameSync(tmp, PROJECT_FILE);
 }
+/* Optimistic concurrency: revision of project.json when this session last read
+   the full document. If the file has moved past it by write time, someone else
+   (usually the user, in the editor UI) edited in between — refuse to clobber. */
+let lastReadRevision = null;
 function httpOk(url) {
   return new Promise((resolve) => {
     const req = http.get(url, (r) => { r.resume(); resolve(r.statusCode < 500); });
@@ -81,10 +88,13 @@ const TOOLS = [
   },
   {
     name: "fablecut_set_project",
-    description: "Replace the FableCut project JSON. Pass the COMPLETE document (read with fablecut_get_project, modify, send back whole). Revision is auto-bumped; the open editor UI hot-reloads instantly so the user sees the edit live.",
+    description: "Replace the FableCut project JSON. Pass the COMPLETE document (read with fablecut_get_project, modify, send back whole). Revision is auto-bumped; the open editor UI hot-reloads instantly so the user sees the edit live. CONFLICT-SAFE: if the project changed on disk since your last fablecut_get_project (e.g. the user tweaked something in the UI), the call errors instead of overwriting — re-read, re-apply your edit on top of the latest document, and retry.",
     inputSchema: {
       type: "object",
-      properties: { project: { type: "object", description: "The complete project document (see fablecut_docs for schema)" } },
+      properties: {
+        project: { type: "object", description: "The complete project document (see fablecut_docs for schema)" },
+        force: { type: "boolean", description: "Overwrite even if the project changed since it was last read (discards those external/user changes). Only when the user explicitly asks." },
+      },
       required: ["project"],
     },
   },
@@ -126,8 +136,11 @@ async function callTool(name, args) {
     }
     case "fablecut_docs":
       return fs.readFileSync(path.join(ROOT, "CLAUDE.md"), "utf8");
-    case "fablecut_get_project":
-      return JSON.stringify(readProject(), null, 2);
+    case "fablecut_get_project": {
+      const doc = readProject();
+      lastReadRevision = doc.revision || 0;
+      return JSON.stringify(doc, null, 2);
+    }
     case "fablecut_set_project": {
       const doc = args.project;
       if (!doc || typeof doc !== "object") throw new Error("`project` must be an object");
@@ -141,8 +154,23 @@ async function callTool(name, args) {
       }
       let cur = { revision: 0 };
       try { cur = readProject(); } catch {}
-      doc.revision = Math.max((cur.revision || 0) + 1, (doc.revision || 0));
+      const curRev = cur.revision || 0;
+      // strict check when this session read via the tool; otherwise fall back to
+      // the revision baked into the submitted doc (e.g. it was read as a file)
+      const stale = lastReadRevision !== null
+        ? curRev !== lastReadRevision
+        : (doc.revision || 0) < curRev;
+      if (stale && !args.force) {
+        throw new Error(
+          `CONFLICT — not saved. project.json is at revision ${curRev}, but this edit was based on ` +
+          `revision ${lastReadRevision ?? (doc.revision || 0)}: the project changed in between ` +
+          `(the user probably tweaked something in the editor UI). ` +
+          `Call fablecut_get_project, re-apply your edit on top of the latest document, then save again. ` +
+          `Pass force:true only if the user explicitly wants those changes discarded.`);
+      }
+      doc.revision = Math.max(curRev + 1, (doc.revision || 0));
       writeProject(doc);
+      lastReadRevision = doc.revision;
       return `Saved (revision ${doc.revision}). ${doc.clips.length} clip(s). The editor UI (if open at ${BASE}) has hot-reloaded.`;
     }
     case "fablecut_import_media": {
@@ -167,9 +195,14 @@ async function callTool(name, args) {
         duration: kind === "image" ? undefined : ffprobeDuration(target),
       };
       const proj = readProject();
+      // import only appends a media entry (never touches clips), so it merges
+      // into the live document; keep lastReadRevision in step only if it
+      // already was — otherwise a later set_project must still re-read
+      const wasCurrent = lastReadRevision === (proj.revision || 0);
       proj.media.push(entry);
       proj.revision = (proj.revision || 0) + 1;
       writeProject(proj);
+      if (wasCurrent) lastReadRevision = proj.revision;
       return `Imported → ${JSON.stringify(entry)}\n` +
         (entry.duration == null && kind !== "image"
           ? "Note: duration unknown (no ffprobe). The browser UI will probe and fill it in; re-read the project before trimming this media."
@@ -193,7 +226,7 @@ async function handle(msg) {
         result: {
           protocolVersion: params?.protocolVersion || "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "fablecut", version: "1.1.0" },
+          serverInfo: { name: "fablecut", version: "1.2.0" },
         },
       });
     }

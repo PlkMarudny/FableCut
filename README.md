@@ -25,6 +25,11 @@ same time.
 
 **Editing**
 - 4 video tracks + 3 audio tracks, drag/trim/split/snap, undo/redo
+- **Timeline multi-select** — rubber-band marquee (drag on empty track area),
+  <kbd>Ctrl/Cmd/Shift+click</kbd> to add/remove clips, <kbd>Ctrl+A</kbd> to
+  select all, <kbd>Esc</kbd> to deselect. Drag any selected clip to move the
+  whole group; <kbd>Delete</kbd> removes all selected; <kbd>S</kbd> splits all
+  selected at the playhead. Inspector shows an "N clips selected" banner.
 - Beat & cue markers (tap <kbd>M</kbd> on the beat during playback) with edge snapping
 - Real decoded audio waveforms on clips
 - Canvas aspect presets (16:9, 9:16 reels, 4:5, 1:1) + safe-area guides
@@ -109,6 +114,14 @@ Three equivalent control surfaces:
 Example: ask Claude Code *"cut these six clips to the beat markers, add a
 teal-orange grade, put a word-pop caption on top and a whoosh on every cut"* —
 and watch the timeline rebuild itself.
+
+**Conflict-safe concurrent editing**: the UI, the MCP tools, and direct
+`project.json` writes all agree on a `revision` counter. If you edit a clip in
+the UI while an agent is mid-task, the agent's next write is rejected (409 from
+the REST API / a conflict error from `fablecut_set_project`) instead of
+silently overwriting your change. The UI similarly detects when an agent write
+supersedes a not-yet-saved local tweak and tells you with a toast instead of
+dropping it silently.
 
 ## Project layout
 
