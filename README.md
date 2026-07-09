@@ -67,6 +67,15 @@ same time.
   animation at any time). Agents can author their own vector overlays —
   lower-thirds, confetti, sparkles — as plain `.svg` files. Starters included.
 
+**Remake a reference video**
+- Give it a reference edit (a reel you like) and get back an **edit blueprint**:
+  shot boundaries, music beats + BPM, a loudness curve, per-shot energy, the
+  drop — plus the reference's **music track extracted** into your media, ready
+  to rebuild the same idea with your own footage. Zero extra dependencies
+  (ffmpeg does the decoding; onset/tempo detection is plain Node).
+  `node analyze.js ref.mp4`, `POST /api/analyze`, or the
+  `fablecut_analyze_reference` MCP tool.
+
 **Asset library**
 - `library/` folders surface as tabs in the UI: **Elements** (overlay art),
   **Sound FX**, **SVG** — drop files in, the open editor refreshes live
@@ -105,7 +114,14 @@ Three equivalent control surfaces:
    claude mcp add -s user fablecut -- node "<path-to>/fablecut/mcp-server.js"
    ```
    Tools: `fablecut_status` (auto-starts the editor), `fablecut_docs`,
-   `fablecut_get_project`, `fablecut_set_project`, `fablecut_import_media`.
+   `fablecut_get_project`, `fablecut_set_project`, `fablecut_patch_project`,
+   `fablecut_import_media`, `fablecut_analyze_reference`.
+
+   The surface is **token-efficient by design**: agents patch the timeline with
+   small ops (`fablecut_patch_project`) instead of round-tripping the whole
+   document, read a compact one-line-per-clip summary
+   (`fablecut_get_project {compact:true}`), and fetch only the manual sections
+   they need (`fablecut_docs {section:"props"}`).
 2. **The file** — read `project.json`, modify, bump `revision`, write. The UI
    live-reloads.
 3. **REST** — `GET/PUT /api/project`, `POST /api/upload`, `GET /api/library`,
@@ -114,6 +130,11 @@ Three equivalent control surfaces:
 Example: ask Claude Code *"cut these six clips to the beat markers, add a
 teal-orange grade, put a word-pop caption on top and a whoosh on every cut"* —
 and watch the timeline rebuild itself.
+
+Or hand it a reference: *"here's a reel I like — analyze it and remake it with
+my clips, same music"*. The agent calls `fablecut_analyze_reference`, gets the
+blueprint (cuts, beats, BPM, energy, drop, extracted music), and rebuilds the
+structure shot-for-shot with your footage.
 
 **Conflict-safe concurrent editing**: the UI, the MCP tools, and direct
 `project.json` writes all agree on a `revision` counter. If you edit a clip in
@@ -133,9 +154,12 @@ app.js           the editor: timeline UI, compositor, keyframes, text engine,
 index.html       single-page UI
 style.css        dark editor theme
 mcp-server.js    stdio MCP server exposing the editor to AI agents
+analyze.js       reference-video analyzer: shots, beats/BPM, energy, drop,
+                 music extraction (module + CLI)
 CLAUDE.md        the agent manual (schema + recipes) — also served by fablecut_docs
 project.json     your timeline (created on first run; gitignored)
 media/           project footage (gitignored)
+analysis/        cached edit blueprints from /api/analyze (gitignored)
 library/         default assets: elements/ sfx/ svg/ fonts/
 exports/         finished renders (gitignored)
 ```

@@ -16,9 +16,30 @@ Register the MCP server (`mcp-server.js`) once at user scope as `fablecut`:
 Every Claude Code session then has these tools:
 
 - `fablecut_status` — auto-starts the editor server, returns URL + project summary. Call first.
-- `fablecut_docs` — returns this document.
+- `fablecut_docs` — returns this document (`section: "…"` returns only matching `## ` sections).
 - `fablecut_get_project` / `fablecut_set_project` — read / replace the timeline JSON.
+  `fablecut_get_project {compact:true}` returns a one-line-per-clip summary instead.
+- `fablecut_patch_project` — apply targeted ops (add/update/remove clip/media,
+  set project fields) without round-tripping the document. **Prefer this for edits.**
 - `fablecut_import_media` — copy a local file into `./media/` and register it.
+- `fablecut_analyze_reference` — turn a reference video into an edit blueprint
+  (shots, beats, BPM, energy, drop) + extract its music. See "Remake a reference video".
+
+### Token-efficient editing (important for agents)
+
+Editing via full get→modify→set costs thousands of tokens per change. Cheaper:
+
+1. **Plan** from `fablecut_get_project {compact:true}` (≈10× smaller than the JSON)
+   and `fablecut_status` — fetch the full JSON only to inspect exact keyframes.
+2. **Edit** with `fablecut_patch_project` ops — send only what changes, e.g.
+   `{ops:[{op:"updateClip", id:"c_v2", set:{props:{filterPreset:"noir"}}}]}`.
+   It re-reads the latest document internally, so it is merge-safe by design
+   (no CONFLICT dance) and never destroys concurrent UI tweaks.
+3. **Docs**: request `fablecut_docs {section:"props"}` (or "Recipes", "Remake", …)
+   instead of the whole manual; skip it entirely if the schema is already in context.
+4. **Media questions** (duration, fps, size): read them from the registered media
+   entries — don't shell out to ffprobe; the browser probes and writes them back.
+5. Batch related changes into ONE patch call (ops apply in order, one revision bump).
 
 **`fablecut_set_project` is conflict-checked.** The MCP server remembers the
 `revision` from the most recent `fablecut_get_project` call. If `project.json`
@@ -280,6 +301,51 @@ glitch (RGB split + jitter) · pop (overshoot scale — stickers/captions).
 - `bgRemove` and `chromaKey` can combine with all filters; heavy pixel work is
   automatic (only runs when those props are set).
 
+## Remake a reference video (analyze → blueprint → rebuild)
+
+Given a reference edit (a reel/montage the user likes), FableCut can analyze it
+and hand back an **edit blueprint** so the same idea can be rebuilt with
+different footage over the same music.
+
+**Run the analysis** (any of):
+- MCP: `fablecut_analyze_reference {path:"C:\\…\\ref.mp4"}` (absolute path or an
+  existing `/media/...` src; copies the file into `media/` if needed)
+- REST: `POST /api/analyze` body `{"src":"/media/ref.mp4", "threshold":0.3, "music":true}`
+  (GET `/api/analyze?src=/media/ref.mp4` returns the cached result)
+- CLI: `node analyze.js media/ref.mp4` (results also cached in `./analysis/<name>.json`)
+
+**The blueprint** (needs ffmpeg on PATH):
+```jsonc
+{
+  "duration": 21.4, "fps": 30, "width": 1080, "height": 1920,
+  "cuts": [1.8, 3.1, ...],            // detected shot boundaries, seconds
+  "shots": [                           // one entry per shot between cuts
+    { "index": 0, "start": 0, "end": 1.8, "duration": 1.8, "energy": 42 } ],
+  "avgShotLen": 1.4, "cutsPerSecond": 0.7,
+  "beats": [0.51, 1.02, ...],          // music onsets — snap cut points to these
+  "bpm": 118,                          // detected tempo
+  "energy": { "step": 0.5, "values": [12, 30, ...] },  // loudness curve 0–100
+  "drop": 8.5,                         // biggest musical rise — the money moment
+  "music": { "name": "ref-music.m4a", "src": "/media/…", "mediaId": "m_x" }
+}                                      // ^ extracted + registered by the MCP tool
+```
+`threshold` tunes cut sensitivity (default adapts 0.30→0.20→0.12): lower it if
+obvious cuts were missed, raise it if motion is being misread as cuts.
+
+**Rebuild recipe** — the analysis is deterministic; the creative mapping is yours:
+1. `setProject`: copy the reference's `width/height/fps`; write `beats`
+   (or the `cuts`) into `markers` so the user sees the grid.
+2. Music: the extracted track on A1, `in:0, duration:<ref duration>`.
+3. Structure: one clip per `shots[]` entry on V1 at the same `start`/`duration`
+   (hard cuts by default — that's what shot detection saw). Pick source footage
+   whose motion matches each shot's `energy` (calm ≤40, action ≥70), and choose
+   each clip's `in` so something interesting happens inside the window.
+4. The `drop`: put the hero shot there; classic garnish = a speed ramp landing
+   on it, an impact `adjust` layer (shake+rgbSplit), or a whip transition.
+5. Pacing garnish to taste: shots shorter than ~0.6 s read as beat-flashes;
+   `avgShotLen` tells you the reference's overall pace. Captions/grade/SFX per
+   the Recipes section — the blueprint gives structure, not style.
+
 ## REST API (alternative to file editing)
 
 - `GET  /api/project` — current project JSON
@@ -294,6 +360,9 @@ glitch (RGB split + jitter) · pop (overshoot scale — stickers/captions).
   MP4/MOV/M4V uploads are auto-remuxed with `+faststart` (needs ffmpeg on PATH).
   Files copied straight into ./media by external tools skip this — remux big ones
   yourself (`ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4`) or playback stalls.
+- `POST /api/analyze` — body `{src:"/media/ref.mp4", threshold?, music?}`: analyze a
+  reference video into an edit blueprint (see "Remake a reference video"); extracts
+  its music into ./media. `GET /api/analyze?src=…` returns the cached blueprint.
 - `GET  /api/events`  — SSE, emits `change` when project.json, ./media or ./library changes
 - Fast export (used by the UI; browser renders frames, ffmpeg encodes):
   `GET /api/export/ffmpeg` → `{available}` · `POST /api/export/begin` `{fps,name}` → `{id}`

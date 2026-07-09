@@ -5,6 +5,34 @@ All notable changes to FableCut are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-09
+
+### Added
+- **Reference-remake pipeline** — give FableCut a reference video and get back an
+  *edit blueprint* to rebuild the same idea with different footage over the same
+  music. New zero-dependency analyzer (`analyze.js`, needs ffmpeg): shot-boundary
+  detection with adaptive threshold, music beat + BPM detection (onset envelope +
+  autocorrelation, span-refined), a 0.5 s loudness curve, per-shot audio energy,
+  drop detection, and extraction of the reference's music track into `media/`.
+  Exposed as MCP tool `fablecut_analyze_reference`, REST `POST /api/analyze`
+  (cached under `./analysis/`, `GET /api/analyze?src=…`), and CLI
+  `node analyze.js <video>`. New CLAUDE.md section "Remake a reference video"
+  documents the blueprint schema and the rebuild recipe.
+- **Token-efficient agent surface**:
+  - `fablecut_patch_project` — targeted ops (`addClip`, `updateClip`,
+    `removeClip`, `addMedia`, `removeMedia`, `setProject`) applied to the latest
+    on-disk document in one atomic, merge-safe write — no more round-tripping the
+    whole project JSON for a one-prop change.
+  - `fablecut_get_project {compact:true}` — one-line-per-clip timeline summary
+    (non-default props only, keyframe/transition digests), ~10× smaller.
+  - `fablecut_docs {section:"…"}` — fetch only matching `## ` sections of the manual.
+  - `fablecut_status` now caps long media listings.
+  - New CLAUDE.md section "Token-efficient editing" with agent guidance.
+
+### Changed
+- Full `fablecut_get_project` now returns minified JSON (was pretty-printed).
+- MCP server bumped to version **1.3.0**.
+
 ## [1.2.0] - 2026-07-09
 
 ### Added
@@ -79,6 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Three control surfaces for AI agents: **MCP server**, direct `project.json`
   editing, and a **REST API** with live-reload over server-sent events.
 
+[1.3.0]: https://github.com/ronak-create/FableCut/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/ronak-create/FableCut/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/ronak-create/FableCut/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ronak-create/FableCut/releases/tag/v1.0.0

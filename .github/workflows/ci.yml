@@ -20,7 +20,7 @@ jobs:
 
       - name: Syntax-check JavaScript
         run: |
-          for f in server.js app.js mcp-server.js; do
+          for f in server.js app.js mcp-server.js analyze.js; do
             echo "checking $f"
             node --check "$f"
           done

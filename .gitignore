@@ -15,6 +15,7 @@ library/fonts/*
 
 # Local scratch / notes
 out/
+analysis/
 SUGGESTIONS.md
 
 # Misc

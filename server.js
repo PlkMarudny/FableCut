@@ -18,9 +18,12 @@ const path = require("path");
 const os = require("os");
 const { spawn, spawnSync, execFile } = require("child_process");
 
+const { analyze } = require("./analyze");
+
 const ROOT = __dirname;
 const MEDIA_DIR = path.join(ROOT, "media");
 const EXPORTS_DIR = path.join(ROOT, "exports");
+const ANALYSIS_DIR = path.join(ROOT, "analysis");
 const LIBRARY_DIR = path.join(ROOT, "library");
 const LIBRARY_SUBDIRS = ["sfx", "elements", "svg", "fonts"];
 const PROJECT_FILE = path.join(ROOT, "project.json");
@@ -46,6 +49,7 @@ const MIME = {
 
 if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR);
 if (!fs.existsSync(EXPORTS_DIR)) fs.mkdirSync(EXPORTS_DIR);
+if (!fs.existsSync(ANALYSIS_DIR)) fs.mkdirSync(ANALYSIS_DIR);
 for (const d of LIBRARY_SUBDIRS) fs.mkdirSync(path.join(LIBRARY_DIR, d), { recursive: true });
 if (!fs.existsSync(PROJECT_FILE)) {
   fs.writeFileSync(PROJECT_FILE, JSON.stringify({
@@ -314,6 +318,38 @@ const server = http.createServer(async (req, res) => {
       cleanupExport(id);
       sendJSON(res, 200, { ok: true, src: "/exports/" + encodeURIComponent(path.basename(out)) });
     } catch (e) { cleanupExport(id); sendJSON(res, 500, { error: String(e) }); }
+    return;
+  }
+
+  /* API: reference analysis → edit blueprint (shots, beats, BPM, energy, music).
+     POST body {src:"/media/ref.mp4", threshold?, music?} runs the analysis
+     (seconds to ~a minute — decode-bound); GET ?src= returns the cached result. */
+  if (p === "/api/analyze" && req.method === "GET") {
+    const src = decodeURIComponent(url.searchParams.get("src") || "");
+    const f = path.join(ANALYSIS_DIR, path.basename(src, path.extname(src)) + ".json");
+    if (!src || !fs.existsSync(f)) { sendJSON(res, 404, { error: "no cached analysis for that src — POST /api/analyze first" }); return; }
+    try { sendJSON(res, 200, JSON.parse(fs.readFileSync(f, "utf8"))); }
+    catch (e) { sendJSON(res, 500, { error: String(e) }); }
+    return;
+  }
+  if (p === "/api/analyze" && req.method === "POST") {
+    if (!HAS_FFMPEG) { sendJSON(res, 400, { error: "ffmpeg not found on PATH" }); return; }
+    try {
+      const opts = JSON.parse((await readBody(req)).toString("utf8") || "{}");
+      const name = path.basename(decodeURIComponent(opts.src || ""));
+      const file = path.join(MEDIA_DIR, name);
+      if (!name || !fs.existsSync(file)) { sendJSON(res, 404, { error: "src must name an existing file under /media/" }); return; }
+      const bp = await analyze(file, {
+        threshold: opts.threshold,
+        music: opts.music !== false,
+        musicDir: MEDIA_DIR,
+        srcUrl: "/media/" + encodeURIComponent(name),
+      });
+      if (bp.music) bp.music.src = "/media/" + encodeURIComponent(bp.music.name);
+      fs.writeFileSync(path.join(ANALYSIS_DIR, path.basename(name, path.extname(name)) + ".json"),
+        JSON.stringify(bp, null, 2));
+      sendJSON(res, 200, bp);
+    } catch (e) { sendJSON(res, 500, { error: String(e) }); }
     return;
   }
 
