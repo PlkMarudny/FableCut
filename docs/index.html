@@ -65,7 +65,7 @@
   <div class="hero-glow" aria-hidden="true"></div>
   <div class="hero-inner">
     <div class="hero-copy reveal">
-      <h1 class="h-rgb">The browser video editor<br><span class="grad">AI agents can drive.</span></h1>
+      <h1 class="h-rgb">The browser video editor<br><span class="clip-live">AI agents can drive.</span></h1>
       <p class="lede">A Premiere-style editor whose whole timeline is one JSON file. Any agent that writes JSON can edit video.</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/ronak-create/FableCut" rel="noopener">Get it on GitHub</a>
@@ -90,7 +90,7 @@
 <!-- ── Demo ── -->
 <section class="section demo" id="demo">
   <div class="wrap">
-    <div class="head demo-head reveal">
+    <div class="head demo-head reveal zoom">
       <span class="tick"></span>
       <h2>This reel was edited by Claude Code, live.</h2>
       <p class="sub">No timeline dragging, no keyframing by hand. An agent wrote <code class="tag-code">project.json</code> in a real session while the browser reloaded in real time. What you see is the actual output.</p>
@@ -107,9 +107,9 @@
 </section>
 
 <!-- ── Primer: how does an AI edit my video? ── -->
-<section class="section line-top primer" id="primer">
+<section class="section line-top primer editorial" id="primer">
   <div class="wrap">
-    <div class="head reveal">
+    <div class="head reveal zoom">
       <span class="tick"></span>
       <h2>How does an AI actually edit my video?</h2>
       <p class="sub">If you cut video but have never let software do the cutting, here is the whole idea in three steps. No coding required to follow along.</p>
@@ -144,7 +144,7 @@
 <section class="section line-top how" id="how">
   <div class="wrap">
     <div class="how-grid">
-      <div class="how-copy reveal">
+      <div class="how-copy reveal zoom">
         <span class="tick"></span>
         <h2>The project file is the interface.</h2>
         <p class="sub">Most AI video tools hide the edit behind a black-box API. FableCut does the opposite: the timeline is a plain document, and anything that can write it can edit video. A human and an agent can work the same timeline at once.</p>
@@ -180,15 +180,15 @@
 <!-- ── Kinetic marquee: the product's own look, in motion (one per page) ── -->
 <div class="marquee" aria-hidden="true">
   <div class="marquee-track">
-    <span>teal-orange</span><i>&#9670;</i><span>speed ramp</span><i>&#9670;</i><span>chroma key</span><i>&#9670;</i><span>film grain</span><i>&#9670;</i><span>whip-pan</span><i>&#9670;</i><span>noir</span><i>&#9670;</i><span>RGB split</span><i>&#9670;</i><span>glitch</span><i>&#9670;</i><span>neon glow</span><i>&#9670;</i><span>adjustment layers</span><i>&#9670;</i><span>keyframes</span><i>&#9670;</i><span>cinematic</span><i>&#9670;</i>
-    <span>teal-orange</span><i>&#9670;</i><span>speed ramp</span><i>&#9670;</i><span>chroma key</span><i>&#9670;</i><span>film grain</span><i>&#9670;</i><span>whip-pan</span><i>&#9670;</i><span>noir</span><i>&#9670;</i><span>RGB split</span><i>&#9670;</i><span>glitch</span><i>&#9670;</i><span>neon glow</span><i>&#9670;</i><span>adjustment layers</span><i>&#9670;</i><span>keyframes</span><i>&#9670;</i><span>cinematic</span><i>&#9670;</i>
+    <span class="f-anton">teal-orange</span><i>&#9670;</i><span class="f-playfair">speed ramp</span><i>&#9670;</i><span class="f-bebas">chroma key</span><i>&#9670;</i><span class="f-abril">film grain</span><i>&#9670;</i><span class="f-oswald">whip-pan</span><i>&#9670;</i><span class="f-archivo">noir</span><i>&#9670;</i><span class="f-bebas">RGB split</span><i>&#9670;</i><span class="f-anton">glitch</span><i>&#9670;</i><span class="f-playfair">neon glow</span><i>&#9670;</i><span class="f-oswald">adjustment layers</span><i>&#9670;</i><span class="f-abril">keyframes</span><i>&#9670;</i><span class="f-bebas">cinematic</span><i>&#9670;</i>
+    <span class="f-anton">teal-orange</span><i>&#9670;</i><span class="f-playfair">speed ramp</span><i>&#9670;</i><span class="f-bebas">chroma key</span><i>&#9670;</i><span class="f-abril">film grain</span><i>&#9670;</i><span class="f-oswald">whip-pan</span><i>&#9670;</i><span class="f-archivo">noir</span><i>&#9670;</i><span class="f-bebas">RGB split</span><i>&#9670;</i><span class="f-anton">glitch</span><i>&#9670;</i><span class="f-playfair">neon glow</span><i>&#9670;</i><span class="f-oswald">adjustment layers</span><i>&#9670;</i><span class="f-abril">keyframes</span><i>&#9670;</i><span class="f-bebas">cinematic</span><i>&#9670;</i>
   </div>
 </div>
 
 <!-- ── Features bento ── -->
 <section class="section features" id="features">
   <div class="wrap">
-    <div class="head reveal">
+    <div class="head reveal zoom">
       <span class="tick"></span>
       <h2>A real editor, not a toy.</h2>
       <p class="sub">Everything a modern reel needs, drivable by hand or by an agent.</p>
@@ -210,7 +210,7 @@
       <article class="cell cell-tall accent reveal">
         <h3>Kinetic captions</h3>
         <p>Typewriter, word-pop, karaoke, letter-pop, wave and bounce. Neon glow for the short-form look. Any Google Font by name, or drop in your own.</p>
-        <p class="cap-demo grad">FableCut</p>
+        <p class="cap-demo"><span class="cut grad" id="capCut" data-word="FableCut">FableCut</span></p>
       </article>
       <article class="cell reveal">
         <h3>Reference remake</h3>
@@ -231,7 +231,7 @@
 <!-- ── Quick start ── -->
 <section class="section line-top start" id="start">
   <div class="wrap">
-    <div class="head start-head reveal">
+    <div class="head start-head reveal zoom">
       <span class="tick"></span>
       <h2>Up and running in under a minute.</h2>
       <p class="sub">Node 18+ and a Chromium browser. ffmpeg on PATH is optional but recommended for fast export.</p>

@@ -90,6 +90,56 @@
       });
   }
 
+  /* ── FontKit: load any Google Font on demand ──
+     The same "any font by name" idea the editor uses. Core page type is
+     self-hosted; this pulls extra faces for the type-cut showcase. */
+  var FontKit = {
+    _seen: {},
+    load: function (family) {
+      if (this._seen[family]) return this._seen[family];
+      var href = "https://fonts.googleapis.com/css2?family=" +
+        encodeURIComponent(family).replace(/%20/g, "+") + "&display=swap";
+      var link = document.createElement("link");
+      link.rel = "stylesheet"; link.href = href;
+      var p = new Promise(function (res) {
+        link.onload = res; link.onerror = res; setTimeout(res, 2500);
+      }).then(function () {
+        return (document.fonts && document.fonts.load)
+          ? document.fonts.load('1em "' + family + '"').catch(function () {})
+          : null;
+      });
+      document.head.appendChild(link);
+      this._seen[family] = p;
+      return p;
+    }
+  };
+
+  /* ── Speed font-change cut on the caption demo ──
+     Rhythmically swaps typefaces (self-hosted + one loaded live), then
+     settles - a nod to the editor's kinetic captions. */
+  var capCut = document.getElementById("capCut");
+  if (capCut) {
+    var faces = ['"Bebas Neue"', '"Abril Fatface"', '"Oswald"', '"Playfair Display"', '"Archivo Black"', '"Anton"'];
+    FontKit.load("Space Grotesk").then(function () { faces.splice(3, 0, '"Space Grotesk"'); });
+    var runCut = function () {
+      if (reduce) { capCut.style.fontFamily = '"Anton"'; return; }
+      var i = 0, steps = 15;
+      capCut.classList.add("cutting");
+      (function tick() {
+        capCut.style.fontFamily = faces[i % faces.length];
+        i++;
+        if (i < steps) setTimeout(tick, 80 + i * 7);
+        else { capCut.style.fontFamily = '"Anton"'; capCut.classList.remove("cutting"); }
+      })();
+    };
+    if ("IntersectionObserver" in window) {
+      var cutObs = new IntersectionObserver(function (es) {
+        es.forEach(function (e) { if (e.isIntersecting) { runCut(); cutObs.unobserve(e.target); } });
+      }, { threshold: 0.6 });
+      cutObs.observe(capCut);
+    } else { runCut(); }
+  }
+
   /* ── Pointer-driven effects (spotlight, hero tilt, card spotlight) ──
      All coalesced into one rAF and skipped entirely under reduced motion
      or on touch/coarse pointers. */

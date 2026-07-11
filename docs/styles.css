@@ -8,13 +8,17 @@
    Radius: 10px panels, pill buttons. One scale, applied everywhere.
    ═══════════════════════════════════════════════════════════════ */
 
-@font-face {
-  font-family: "Archivo Black";
-  src: url("./fonts/archivo-black.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
+/* Self-hosted display faces (OFL, see fonts/LICENSE.txt). Body stays on
+   the system stack for reliable weights; these carry the headlines,
+   numbers and type effects. JS can pull any additional Google Font on
+   demand (see FontKit in main.js) - the same "any font by name" idea
+   the editor itself uses. */
+@font-face { font-family: "Anton";           src: url("./fonts/anton.woff2") format("woff2");           font-weight: 400; font-display: swap; }
+@font-face { font-family: "Bebas Neue";      src: url("./fonts/bebas-neue.woff2") format("woff2");      font-weight: 400; font-display: swap; }
+@font-face { font-family: "Abril Fatface";   src: url("./fonts/abril-fatface.woff2") format("woff2");   font-weight: 400; font-display: swap; }
+@font-face { font-family: "Oswald";          src: url("./fonts/oswald.woff2") format("woff2");          font-weight: 400; font-display: swap; }
+@font-face { font-family: "Playfair Display"; src: url("./fonts/playfair-display.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Archivo Black";   src: url("./fonts/archivo-black.woff2") format("woff2");   font-weight: 400; font-display: swap; }
 
 :root {
   --bg: #0b0b0e;
@@ -33,7 +37,10 @@
   --r: 10px;
   --maxw: 1180px;
   --ease: cubic-bezier(0.19, 1, 0.22, 1);
-  --display: "Archivo Black", "Arial Black", system-ui, sans-serif;
+  /* type roles - deliberately several faces, not one everywhere */
+  --display: "Anton", "Arial Narrow", system-ui, sans-serif;      /* impact headlines */
+  --num: "Bebas Neue", "Arial Narrow", system-ui, sans-serif;     /* numbers, stat, labels */
+  --editorial: "Abril Fatface", Georgia, serif;                   /* high-contrast accent */
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif;
   --mono: "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
 }
@@ -67,11 +74,14 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 
 /* ── type ── */
-h1, h2 { font-family: var(--display); font-weight: 400; letter-spacing: -0.02em; line-height: 1.02; }
-h1 { font-size: clamp(2.7rem, 6vw, 5rem); }
-h2 { font-size: clamp(1.9rem, 4vw, 3rem); }
+h1, h2 { font-family: var(--display); font-weight: 400; letter-spacing: 0.004em; line-height: 0.98; text-transform: uppercase; }
+h1 { font-size: clamp(2.9rem, 6.4vw, 5.4rem); }
+h2 { font-size: clamp(2rem, 4.2vw, 3.2rem); }
 h3 { font-family: var(--sans); font-size: 1.08rem; font-weight: 650; letter-spacing: -0.01em; }
 .sub { color: var(--text-dim); font-size: 1.06rem; max-width: 58ch; }
+
+/* editorial-voice heading (high-contrast serif) for the primer question */
+.editorial h2 { font-family: var(--editorial); text-transform: none; letter-spacing: 0; line-height: 1.05; font-size: clamp(2rem, 4vw, 3.1rem); }
 
 /* Section header: left-aligned, asymmetric. A short gold tick sits on
    the baseline instead of an uppercase eyebrow label. */
@@ -145,11 +155,11 @@ h3 { font-family: var(--sans); font-size: 1.08rem; font-weight: 650; letter-spac
 
 /* ── Primer: horizontal timeline flow (breaks the 3-card pattern) ── */
 .flow { position: relative; }
-.flow-line { position: absolute; left: 0; right: 0; top: 26px; height: 1px; background: var(--line-2); }
-.flow-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 34px; }
+.flow-line { position: absolute; left: 0; right: 0; top: 26px; height: 1px; background: linear-gradient(90deg, transparent, var(--line-2) 6%, var(--line-2) 82%, transparent); }
+.flow-steps { list-style: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 34px; }
 .fstep { position: relative; padding-top: 60px; }
 .fstep .node { position: absolute; top: 20px; left: 0; width: 14px; height: 14px; background: var(--gold); transform: rotate(45deg); box-shadow: 0 0 0 5px var(--bg), 0 0 14px rgba(255, 206, 92, 0.5); }
-.fstep .idx { font-family: var(--display); font-size: 2.6rem; color: var(--text); line-height: 1; margin-bottom: 14px; opacity: 0.16; }
+.fstep .idx { font-family: var(--num); font-size: 3rem; color: var(--gold); line-height: 1; margin-bottom: 14px; opacity: 0.34; letter-spacing: 0.02em; }
 .fstep h3 { margin-bottom: 10px; font-size: 1.16rem; }
 .fstep p { color: var(--text-dim); font-size: 0.98rem; max-width: 34ch; }
 .fstep code { color: #cbd5ff; background: rgba(123, 108, 255, 0.13); padding: 2px 6px; border-radius: 5px; }
@@ -184,8 +194,8 @@ h3 { font-family: var(--sans); font-size: 1.08rem; font-weight: 650; letter-spac
 .cell-tall { grid-row: span 2; }
 .cell.accent { background: radial-gradient(130% 130% at 100% 0%, rgba(79, 140, 255, 0.13), transparent 56%), var(--surface); border-color: rgba(123, 108, 255, 0.26); }
 .cell.dark { background: #0c0c12; }
-.cap-demo { font-family: var(--display); font-size: 2.6rem; letter-spacing: -0.02em; margin-top: 24px; line-height: 1; }
-.stat { font-family: var(--display); font-size: 3.4rem; line-height: 1; color: var(--gold); }
+.cap-demo { font-family: var(--display); font-size: 2.7rem; letter-spacing: 0; margin-top: 24px; line-height: 1; text-transform: uppercase; }
+.stat { font-family: var(--num); font-size: 4rem; line-height: 0.9; color: var(--gold); letter-spacing: 0.01em; }
 .stat + p { margin-top: 12px; }
 
 /* ── Quick start ── */
@@ -343,7 +353,14 @@ h3 { font-family: var(--sans); font-size: 1.08rem; font-weight: 650; letter-spac
 /* ── Kinetic marquee: the product's own look-words, in motion ── */
 .marquee { overflow: hidden; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 20px 0; background: rgba(255, 255, 255, 0.015); }
 .marquee-track { display: inline-flex; align-items: center; gap: 30px; white-space: nowrap; animation: scroll-x 34s linear infinite; will-change: transform; }
-.marquee-track span { font-family: var(--display); font-size: 1.35rem; letter-spacing: -0.01em; color: var(--text-dim); }
+/* marquee is a type specimen: each look-word carries a different face */
+.marquee-track span { font-size: 1.5rem; letter-spacing: 0; color: var(--text-dim); line-height: 1; }
+.marquee-track .f-anton   { font-family: "Anton"; text-transform: uppercase; }
+.marquee-track .f-bebas   { font-family: "Bebas Neue"; text-transform: uppercase; font-size: 1.7rem; }
+.marquee-track .f-abril   { font-family: "Abril Fatface"; }
+.marquee-track .f-oswald  { font-family: "Oswald"; text-transform: uppercase; letter-spacing: 0.02em; }
+.marquee-track .f-playfair{ font-family: "Playfair Display"; font-style: italic; }
+.marquee-track .f-archivo { font-family: "Archivo Black"; }
 .marquee-track i { color: var(--gold); font-size: 0.6rem; font-style: normal; }
 @keyframes scroll-x { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
@@ -351,12 +368,34 @@ h3 { font-family: var(--sans); font-size: 1.08rem; font-weight: 650; letter-spac
 .hero-shot { perspective: 1200px; }
 .hero-shot .window { transform: rotateY(var(--ty, 0deg)) rotateX(var(--tx, 0deg)); transition: transform 0.25s var(--ease); will-change: transform; }
 
+/* ── Type effects (echo the editor's own kinetic text engine) ── */
+
+/* Font clipping: letters are a window onto the flowing graded gradient */
+.clip-live {
+  background: linear-gradient(100deg, #8b7cff, #56a0ff 34%, #ffce5c 52%, #56a0ff 70%, #8b7cff);
+  background-size: 300% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+  animation: clipflow 9s linear infinite;
+}
+@keyframes clipflow { to { background-position: 300% 0; } }
+
+/* Font zoom: headline scales up as it enters (reuses the reveal observer) */
+.reveal.zoom { transform: translateY(20px) scale(0.93); transform-origin: left center; }
+.reveal.zoom.in { transform: none; }
+
+/* Speed font-change cut: JS swaps the family rhythmically, then settles.
+   During the cut the word flashes solid gold (a "live edit" feel). */
+.cut { display: inline-block; }
+.cut.cutting { background: none; color: var(--gold); -webkit-text-fill-color: var(--gold); }
+
 @media (prefers-reduced-motion: reduce) {
-  .fx-aurora, .fx-grain, .marquee-track { animation: none; }
+  .fx-aurora, .fx-grain, .marquee-track, .clip-live { animation: none; }
   .fx-grain { opacity: 0.04; }
+  .clip-live { background-position: 0 0; }
   .h-rgb { animation: none; }
   .fx-spot { display: none; }
   .hero-shot .window { transform: none !important; }
-  .cell::before { transition: none; }
+  .cell::before, .reveal.zoom { transition: none; }
 }
 
