@@ -943,10 +943,17 @@ function startClipGesture(e, c, mode, collapseOnClick) {
     if (Math.abs(dt * state.pps) > 3) moved = true;
     if (!moved) return;
     if (mode === "move") {
-      let ns = snapTime(orig.start + dt, groupIds);
-      const nsEnd = snapTime(orig.start + orig.duration + dt, groupIds);
-      if (Math.abs(nsEnd - (orig.start + orig.duration + dt)) < Math.abs(ns - (orig.start + dt)))
-        ns = nsEnd - orig.duration;
+      // Snap whichever edge is closer to a target. A non-snapping edge has
+      // distance 0, which must NOT beat a real snap on the other edge.
+      const rawStart = orig.start + dt;
+      const rawEnd = orig.start + orig.duration + dt;
+      const snapStart = snapTime(rawStart, groupIds);
+      const snapEnd = snapTime(rawEnd, groupIds);
+      const dStart = Math.abs(snapStart - rawStart);
+      const dEnd = Math.abs(snapEnd - rawEnd);
+      let ns = rawStart;
+      if (dEnd > 0 && (dStart === 0 || dEnd < dStart)) ns = snapEnd - orig.duration;
+      else if (dStart > 0) ns = snapStart;
       // one time-delta for the whole group, clamped so nothing crosses 0
       let d = ns - orig.start;
       d = Math.max(d, -Math.min(...group.map((x) => groupOrig.get(x.id))));
