@@ -19,6 +19,9 @@ const TRACKS = [
 const RULER_H = 26;
 const SNAP_PX = 8;
 const MIN_DUR = 0.05;
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 300;
+const TIMELINE_PAD_SEC = 15; // trailing empty seconds in the scrollable content
 
 const DEFAULT_PROPS = {
   x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, volume: 1,
@@ -240,6 +243,18 @@ function toast(msg) {
   els.toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => els.toast.classList.remove("show"), 3200);
+}
+
+/* True when keyboard events should go to a text-entry control (not range/checkbox). */
+function isTypingTarget(el) {
+  if (!el || el === document.body || el === document.documentElement) return false;
+  const tag = el.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag === "INPUT") {
+    const t = (el.type || "text").toLowerCase();
+    return !["range", "checkbox", "radio", "button", "submit", "reset", "color", "file", "hidden"].includes(t);
+  }
+  return !!el.isContentEditable;
 }
 
 /* ═══════════════════════ SERVER SYNC (optional) ═══════════════════════ */
@@ -761,7 +776,7 @@ els.timelineScroll.addEventListener("scroll", () => {
 });
 function contentWidth() {
   const minSec = (els.timelineScroll.clientWidth || 800) / state.pps;
-  return Math.max(projDur() + 15, minSec) * state.pps;
+  return Math.max(projDur() + TIMELINE_PAD_SEC, minSec) * state.pps;
 }
 function rebuildClips() {
   const w = contentWidth();
@@ -896,6 +911,9 @@ function trackAtEvent(e) {
 
 els.tracksContent.addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
+  // Clicking the timeline should release inspector text fields so shortcuts (z, s, …) work
+  if (isTypingTarget(document.activeElement) && els.inspector.contains(document.activeElement))
+    document.activeElement.blur();
   const clipDiv = e.target.closest(".clip");
   if (!clipDiv) {
     // empty track background: drag = marquee select, plain click = seek + deselect
@@ -1146,13 +1164,36 @@ function setZoom(pps, anchorClientX) {
   const rect = scroller.getBoundingClientRect();
   const ax = anchorClientX != null ? anchorClientX - rect.left : rect.width / 2;
   const tAtAnchor = (scroller.scrollLeft + ax) / state.pps;
-  state.pps = clamp(pps, 8, 300);
+  state.pps = clamp(pps, ZOOM_MIN, ZOOM_MAX);
   els.zoomSlider.value = state.pps;
   state.dirtyTimeline = true;
   rebuildClips();
   scroller.scrollLeft = Math.max(0, tAtAnchor * state.pps - ax);
 }
+/* Fit the full timeline (clips + trailing pad) into the visible scroll area
+   with no horizontal overflow, then scroll to the start. */
+function zoomToFit() {
+  const w = els.timelineScroll.clientWidth || 800;
+  const span = Math.max(projDur() + TIMELINE_PAD_SEC, 1);
+  setZoom(w / span);
+  els.timelineScroll.scrollLeft = 0;
+}
+/* Zoom so the primary selected clip fills 90% of the timeline width and is centered. */
+function zoomToSelection() {
+  const c = getClip(state.selId) || selectedClips()[0];
+  if (!c) { toast("Select a clip to zoom to"); return; }
+  const w = els.timelineScroll.clientWidth || 800;
+  const dur = Math.max(c.duration, MIN_DUR);
+  const pps = clamp((0.9 * w) / dur, ZOOM_MIN, ZOOM_MAX);
+  state.pps = pps;
+  els.zoomSlider.value = pps;
+  rebuildClips();
+  const center = c.start + c.duration / 2;
+  const maxScroll = Math.max(0, contentWidth() - w);
+  els.timelineScroll.scrollLeft = clamp(center * pps - w / 2, 0, maxScroll);
+}
 els.zoomSlider.addEventListener("input", () => setZoom(+els.zoomSlider.value));
+$("btnZoomFit").addEventListener("click", zoomToFit);
 els.timelineScroll.addEventListener("wheel", (e) => {
   if (e.ctrlKey || e.metaKey) {
     e.preventDefault();
@@ -2710,8 +2751,7 @@ function updateSafeOverlay() {
 }
 
 window.addEventListener("keydown", (e) => {
-  const tag = document.activeElement?.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if (isTypingTarget(document.activeElement)) return;
   const k = e.key;
   if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
   else if (k === "s" || k === "S") splitAtPlayhead();
@@ -2731,6 +2771,10 @@ window.addEventListener("keydown", (e) => {
   }
   else if (k === "+" || k === "=") setZoom(state.pps * 1.25);
   else if (k === "-") setZoom(state.pps / 1.25);
+  else if (e.code === "KeyZ" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    e.shiftKey ? zoomToFit() : zoomToSelection();
+  }
   else if ((e.ctrlKey || e.metaKey) && (k === "z" || k === "Z")) {
     e.preventDefault();
     e.shiftKey ? redo() : undo();
