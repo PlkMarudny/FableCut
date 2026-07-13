@@ -2,6 +2,8 @@
 
 **A browser video editor that AI agents can drive.**
 
+<a href="https://trendshift.io/repositories/77702?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-77702" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/77702/daily?language=JavaScript" alt="ronak-create%2FFableCut | Trendshift" width="250" height="55"/></a>
+
 https://github.com/user-attachments/assets/2430b854-168b-4a9a-af2e-489e5efa7543
 
 FableCut is a Premiere-style non-linear video editor that runs entirely in your
