@@ -1219,17 +1219,20 @@ function zoomToFit() {
   setZoom(w / span);
   els.timelineScroll.scrollLeft = 0;
 }
-/* Zoom so the primary selected clip fills 90% of the timeline width and is centered. */
+/* Zoom so the selection fills 90% of the timeline width and is centered.
+   One clip → that clip; multiple → the time range covering all of them. */
 function zoomToSelection() {
-  const c = getClip(state.selId) || selectedClips()[0];
-  if (!c) { toast("Select a clip to zoom to"); return; }
+  const clips = selectedClips();
+  if (!clips.length) { toast("Select a clip to zoom to"); return; }
+  const t0 = Math.min(...clips.map((c) => c.start));
+  const t1 = Math.max(...clips.map((c) => c.start + c.duration));
+  const dur = Math.max(t1 - t0, MIN_DUR);
   const w = els.timelineScroll.clientWidth || 800;
-  const dur = Math.max(c.duration, MIN_DUR);
   const pps = clamp((0.9 * w) / dur, ZOOM_MIN, ZOOM_MAX);
   state.pps = pps;
   els.zoomSlider.value = pps;
   rebuildClips();
-  const center = c.start + c.duration / 2;
+  const center = (t0 + t1) / 2;
   const maxScroll = Math.max(0, contentWidth() - w);
   els.timelineScroll.scrollLeft = clamp(center * pps - w / 2, 0, maxScroll);
 }
