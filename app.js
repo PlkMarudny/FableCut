@@ -718,22 +718,82 @@ function addClipFromMedia(m, trackId, at) {
   return c;
 }
 /* Apply a named title style: reset the props a style owns, merge the style,
-   place it (canvas-aware), and make sure its fonts are loaded. */
-function applyTitleStyle(clip, name) {
+   place it (canvas-aware), and make sure its fonts are loaded.
+   keepTransform: restyle the look only — x/y/scale/rotation/align stay as the
+   user set them. Used when switching styles on an existing clip; new titles
+   (keepTransform=false) still get the style's placement. */
+function applyTitleStyle(clip, name, { keepTransform = false } = {}) {
   const st = TITLE_STYLES[name] || TITLE_STYLES.plain;
   const P = clip.props;
+  const kept = keepTransform
+    ? { x: P.x, y: P.y, scale: P.scale, rotation: P.rotation, align: P.align }
+    : null;
   Object.assign(P, STYLE_RESET, st.props);
-  const H = project.height || 720, W = project.width || 1280;
-  const place = st.place || "center";
-  P.x = 0;
-  P.y = place === "lower" ? Math.round(H * 0.30)
-      : place === "upper" ? -Math.round(H * 0.30)
-      : place === "lower-left" ? Math.round(H * 0.28) : 0;
-  if (place === "lower-left") { P.x = -Math.round(W * 0.18); P.align = "left"; }
+  if (kept) Object.assign(P, kept);
+  else {
+    const H = project.height || 720, W = project.width || 1280;
+    const place = st.place || "center";
+    P.x = 0;
+    P.y = place === "lower" ? Math.round(H * 0.30)
+        : place === "upper" ? -Math.round(H * 0.30)
+        : place === "lower-left" ? Math.round(H * 0.28) : 0;
+    if (place === "lower-left") { P.x = -Math.round(W * 0.18); P.align = "left"; }
+  }
   ensureFont(P.font);
   if (Array.isArray(P.fontCutSet)) P.fontCutSet.forEach(ensureFont);
   clip.styleName = name;
 }
+/* Custom title-style dropdown: every entry renders in its own font, hovering
+   an entry live-previews the style on the canvas (transform kept — see
+   applyTitleStyle), moving away reverts, clicking commits. Nothing is saved
+   until a click. */
+function openStylePicker(anchor, c) {
+  const snap = { props: JSON.parse(JSON.stringify(c.props)), styleName: c.styleName };
+  let committed = false;
+  const rewind = () => {
+    if (committed) return;
+    c.props = JSON.parse(JSON.stringify(snap.props));
+    c.styleName = snap.styleName;
+  };
+  const menu = document.createElement("div");
+  menu.className = "style-menu";
+  for (const [k, v] of Object.entries(TITLE_STYLES)) {
+    ensureFont(v.props.font); // so the entry itself renders in the style's face
+    const it = document.createElement("div");
+    it.className = "style-opt" + (c.styleName === k ? " on" : "");
+    it.textContent = v.label;
+    it.style.fontFamily = `"${v.props.font}", sans-serif`;
+    if (v.props.uppercase) it.style.textTransform = "uppercase";
+    it.addEventListener("mouseenter", () => {
+      rewind(); // preview from the clip's real state, not a previous preview
+      applyTitleStyle(c, k, { keepTransform: true });
+    });
+    it.addEventListener("click", () => {
+      rewind();
+      pushUndo();
+      applyTitleStyle(c, k, { keepTransform: true });
+      committed = true;
+      close();
+      scheduleSave(); renderInspector();
+    });
+    menu.appendChild(it);
+  }
+  menu.addEventListener("mouseleave", rewind);
+  const onDoc = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
+  function close() {
+    rewind();
+    menu.remove();
+    document.removeEventListener("pointerdown", onDoc, true);
+    runtime.styleMenu = null;
+  }
+  document.addEventListener("pointerdown", onDoc, true);
+  const r = anchor.getBoundingClientRect();
+  menu.style.left = Math.round(Math.min(r.left, innerWidth - 220)) + "px";
+  menu.style.top = Math.round(Math.min(r.bottom + 4, innerHeight - 340)) + "px";
+  document.body.appendChild(menu);
+  runtime.styleMenu = { close };
+}
+function closeStylePicker() { if (runtime.styleMenu) runtime.styleMenu.close(); }
 function addTitle() {
   pushUndo();
   const c = {
@@ -1420,7 +1480,7 @@ function renderInspector(lite) {
         <button class="btn tiny${p.glowColor ? "" : " toggle on"}" data-action="glow-auto" title="Glow uses the text color">auto</button>`)}
     </div>
     <div class="insp-section"><h3>Title &amp; caption</h3>
-      ${row("Title style", `<select data-sel="title-style">${Object.entries(TITLE_STYLES).map(([k, v]) => `<option value="${k}" ${c.styleName === k ? "selected" : ""}>${v.label}</option>`).join("")}</select>
+      ${row("Title style", `<button type="button" class="btn tiny style-picker-btn" data-style-open title="Pick a style — hover to preview it live">${(TITLE_STYLES[c.styleName] || {}).label || "Choose…"} ▾</button>
         <button class="btn tiny" data-action="title-shuffle" title="Random style">Shuffle</button>`)}
       ${row("Animation", `<select data-k="textAnim">${TEXT_ANIMS.map((a) => `<option ${a === p.textAnim ? "selected" : ""}>${a}</option>`).join("")}</select>`)}
       ${slider("wordRate", 0.05, 0.6, 0.01, p.wordRate, "s")}
@@ -1471,17 +1531,16 @@ function renderInspector(lite) {
       }
       else if (a === "title-shuffle") {
         const keys = Object.keys(TITLE_STYLES).filter((k) => k !== "plain" && k !== c.styleName);
-        applyTitleStyle(c, keys[Math.floor(Math.random() * keys.length)]);
+        applyTitleStyle(c, keys[Math.floor(Math.random() * keys.length)], { keepTransform: true });
       }
       scheduleSave(); renderInspector();
     });
   });
-  els.inspector.querySelectorAll("[data-sel='title-style']").forEach((sel2) => {
-    sel2.addEventListener("change", () => {
-      pushUndo();
-      applyTitleStyle(c, sel2.value);
-      state.dirtyTimeline = true;
-      scheduleSave(); renderInspector();
+  els.inspector.querySelectorAll("[data-style-open]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (runtime.styleMenu) { closeStylePicker(); return; }
+      openStylePicker(btn, c);
     });
   });
   els.inspector.querySelectorAll("[data-kf]").forEach((btn) => {
@@ -2035,24 +2094,43 @@ function clipBounds(c, p, W, H) {
   return { cx, cy, hw, hh, rot };
 }
 function isVisualClip(c) { return c && c.kind !== "adjust" && c.kind !== "audio"; }
+/* Screen-space handle positions for the selection overlay. Each handle is
+   clamped into the visible canvas (inset by its own size) so it stays visible
+   and grabbable when the clip's box extends past the frame. Drawing and
+   hit-testing both use these, so they can never disagree. */
+function overlayHandles(b, W, H) {
+  const cs = Math.cos(b.rot), sn = Math.sin(b.rot);
+  const toScreen = (lx, ly) => ({ x: b.cx + lx * cs - ly * sn, y: b.cy + lx * sn + ly * cs });
+  const hs = Math.max(6, W / 150), gap = Math.max(24, W / 34), m = hs * 1.4;
+  const cl = (p) => ({ x: clamp(p.x, m, W - m), y: clamp(p.y, m, H - m) });
+  return {
+    hs,
+    corners: [[-b.hw, -b.hh], [b.hw, -b.hh], [b.hw, b.hh], [-b.hw, b.hh]].map(([x, y]) => cl(toScreen(x, y))),
+    topMid: cl(toScreen(0, -b.hh)),
+    rotate: cl(toScreen(0, -b.hh - gap)),
+  };
+}
 function drawSelectionOverlay(W, H, t) {
   const c = getClip(state.selId);
   if (!isVisualClip(c) || !activeAt(c, t)) return;
   const b = clipBounds(c, evalProps(c, t), W, H);
-  const lw = Math.max(2, W / 640), hs = Math.max(6, W / 150), gap = Math.max(24, W / 34);
+  const lw = Math.max(2, W / 640);
+  const hd = overlayHandles(b, W, H), hs = hd.hs;
   ctx2d.setTransform(1, 0, 0, 1, 0, 0);
   ctx2d.save();
-  ctx2d.translate(b.cx, b.cy); ctx2d.rotate(b.rot);
   ctx2d.lineWidth = lw; ctx2d.strokeStyle = "#4f8cff";
+  ctx2d.save();
+  ctx2d.translate(b.cx, b.cy); ctx2d.rotate(b.rot);
   ctx2d.setLineDash([lw * 4, lw * 3]);
   ctx2d.strokeRect(-b.hw, -b.hh, b.hw * 2, b.hh * 2);
+  ctx2d.restore();
   ctx2d.setLineDash([]);
-  ctx2d.beginPath(); ctx2d.moveTo(0, -b.hh); ctx2d.lineTo(0, -b.hh - gap); ctx2d.stroke();
+  ctx2d.beginPath(); ctx2d.moveTo(hd.topMid.x, hd.topMid.y); ctx2d.lineTo(hd.rotate.x, hd.rotate.y); ctx2d.stroke();
   ctx2d.fillStyle = "#ffffff";
-  for (const [x, y] of [[-b.hw, -b.hh], [b.hw, -b.hh], [b.hw, b.hh], [-b.hw, b.hh]]) {
-    ctx2d.beginPath(); ctx2d.rect(x - hs, y - hs, hs * 2, hs * 2); ctx2d.fill(); ctx2d.stroke();
+  for (const h of hd.corners) {
+    ctx2d.beginPath(); ctx2d.rect(h.x - hs, h.y - hs, hs * 2, hs * 2); ctx2d.fill(); ctx2d.stroke();
   }
-  ctx2d.beginPath(); ctx2d.arc(0, -b.hh - gap, hs * 1.1, 0, Math.PI * 2);
+  ctx2d.beginPath(); ctx2d.arc(hd.rotate.x, hd.rotate.y, hs * 1.1, 0, Math.PI * 2);
   ctx2d.fillStyle = "#ffce5c"; ctx2d.fill(); ctx2d.stroke();
   ctx2d.restore();
 }
@@ -2085,10 +2163,10 @@ els.preview.addEventListener("pointerdown", (e) => {
   canvasDrag = null;
   if (isVisualClip(cur) && activeAt(cur, state.time)) {
     const b = clipBounds(cur, evalProps(cur, state.time), W, H), lp = toLocal(pt, b);
-    const hs = Math.max(6, W / 150) * 1.8, gap = Math.max(24, W / 34);
-    if (Math.hypot(lp.x, lp.y + b.hh + gap) <= hs) {
+    const hd = overlayHandles(b, W, H), grab = hd.hs * 1.8;
+    if (Math.hypot(pt.x - hd.rotate.x, pt.y - hd.rotate.y) <= grab) {
       canvasDrag = { mode: "rotate", id: cur.id, startRot: +cur.props.rotation || 0, startAng: Math.atan2(pt.y - b.cy, pt.x - b.cx) };
-    } else if ([[-b.hw, -b.hh], [b.hw, -b.hh], [b.hw, b.hh], [-b.hw, b.hh]].some(([cx, cy]) => Math.abs(lp.x - cx) <= hs && Math.abs(lp.y - cy) <= hs)) {
+    } else if (hd.corners.some((h) => Math.abs(pt.x - h.x) <= grab && Math.abs(pt.y - h.y) <= grab)) {
       canvasDrag = { mode: "scale", id: cur.id, startScale: +cur.props.scale || 1, startDist: Math.hypot(lp.x, lp.y) || 1 };
     } else if (Math.abs(lp.x) <= b.hw && Math.abs(lp.y) <= b.hh) {
       canvasDrag = { mode: "move", id: cur.id, startX: +cur.props.x || 0, startY: +cur.props.y || 0, startPt: pt };
@@ -2101,11 +2179,43 @@ els.preview.addEventListener("pointerdown", (e) => {
     canvasDrag = { mode: "move", id: hit.id, startX: +hit.props.x || 0, startY: +hit.props.y || 0, startPt: pt };
   }
   canvasDidMove = false;
+  if (canvasDrag.mode === "move") els.preview.style.cursor = "move";
+  else if (canvasDrag.mode === "rotate") els.preview.style.cursor = ROTATE_CURSOR;
   els.preview.setPointerCapture(e.pointerId);
   e.preventDefault();
 });
+/* ── Hover cursor feedback: rotate knob → rotate cursor, corner handles →
+   directional resize arrows (by the handle's on-screen angle, so rotation-
+   aware), clip body → move, other pickable clip → pointer. ── */
+const ROTATE_CURSOR = (() => {
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'>" +
+    "<path d='M10 3a7 7 0 1 1-6.7 9' fill='none' stroke='black' stroke-width='4.5' stroke-linecap='round'/>" +
+    "<path d='M10 3a7 7 0 1 1-6.7 9' fill='none' stroke='white' stroke-width='2' stroke-linecap='round'/>" +
+    "<path d='M10.5 0.5L14.5 3L10.5 5.5Z' fill='white' stroke='black'/></svg>";
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 10 10, crosshair`;
+})();
+function cursorForHandleAngle(deg) {
+  const i = ((Math.round(deg / 45) % 4) + 4) % 4;
+  return ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"][i];
+}
+function updateCanvasCursor(e) {
+  const W = els.preview.width, H = els.preview.height, pt = canvasPt(e);
+  const cur = getClip(state.selId);
+  let cursor = "default";
+  if (isVisualClip(cur) && activeAt(cur, state.time) && !state.playing && !state.exporting) {
+    const b = clipBounds(cur, evalProps(cur, state.time), W, H);
+    const hd = overlayHandles(b, W, H), grab = hd.hs * 1.8;
+    const corner = hd.corners.find((h) => Math.abs(pt.x - h.x) <= grab && Math.abs(pt.y - h.y) <= grab);
+    const lp = toLocal(pt, b);
+    if (Math.hypot(pt.x - hd.rotate.x, pt.y - hd.rotate.y) <= grab) cursor = ROTATE_CURSOR;
+    else if (corner) cursor = cursorForHandleAngle(Math.atan2(corner.y - b.cy, corner.x - b.cx) * 180 / Math.PI);
+    else if (Math.abs(lp.x) <= b.hw && Math.abs(lp.y) <= b.hh) cursor = "move";
+    else if (pickClipAt(pt, W, H)) cursor = "pointer";
+  } else if (pickClipAt(pt, W, H)) cursor = "pointer";
+  els.preview.style.cursor = cursor;
+}
 els.preview.addEventListener("pointermove", (e) => {
-  if (!canvasDrag) return;
+  if (!canvasDrag) { updateCanvasCursor(e); return; }
   const c = getClip(canvasDrag.id); if (!c) return;
   const W = els.preview.width, H = els.preview.height, pt = canvasPt(e);
   if (!canvasDidMove) { pushUndo(); canvasDidMove = true; } // one undo per drag, only if it actually moves
@@ -2127,6 +2237,7 @@ function endCanvasDrag(e) {
   canvasDrag = null;
   try { els.preview.releasePointerCapture(e.pointerId); } catch {}
   if (canvasDidMove) { scheduleSave(); renderInspector(); } // no-op on a pure click
+  updateCanvasCursor(e); // re-derive hover cursor at the release point
 }
 els.preview.addEventListener("pointerup", endCanvasDrag);
 els.preview.addEventListener("pointercancel", endCanvasDrag);

@@ -286,6 +286,11 @@ edit.** Any Google Font name auto-loads; the display faces above ship in
 `library/fonts/`. Placement props (`x`/`y`) are canvas-aware in the styles
 (lower third ≈ `y: height*0.30`).
 
+Switching the style on an **existing** title (inspector dropdown/Shuffle) only
+restyles the look (font, size, colors, shadow/glow, animation) — the clip's
+`x`/`y`/`scale`/`rotation`/`align` and its `text` are preserved. The style's
+canvas-aware placement is applied only when a title is first created.
+
 **Adjustment layers** (`kind:"adjust"`, `mediaId:null`): a clip that re-renders
 everything drawn *below* it (lower tracks + earlier clips) through its own
 filter stack — Premiere-style. Supports all Filter/Color props, vignette,

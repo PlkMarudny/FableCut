@@ -128,6 +128,8 @@ body.resizing-panels * {
 }
 
 .logo {
+  display: flex;
+  align-items: center;
   font-size: 15px;
   letter-spacing: .3px;
   color: #fff;
@@ -139,6 +141,7 @@ body.resizing-panels * {
 
 .logo-mark {
   display: inline-flex;
+  flex: none;
   width: 22px;
   height: 22px;
   border-radius: 6px;
@@ -148,7 +151,6 @@ body.resizing-panels * {
   font-size: 10px;
   align-items: center;
   justify-content: center;
-  vertical-align: -5px;
 }
 
 .topbar-center {
@@ -218,6 +220,47 @@ body.track-size-s .clip .handle.r { border-right-width: 1px; }
 body.track-size-s .clip.selected {
   outline-width: 1px;
   box-shadow: 0 0 0 1px #7b6cff55;
+}
+
+/* ── Title-style picker (inspector) ── */
+.style-picker-btn {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.style-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 190px;
+  max-height: 330px;
+  overflow-y: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 12px 32px #000c;
+}
+
+.style-opt {
+  padding: 7px 10px;
+  border-radius: 5px;
+  font-size: 15px;
+  line-height: 1.25;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.style-opt:hover {
+  background: #7b6cff26;
+}
+
+.style-opt.on {
+  color: #cfc8ff;
+  background: #7b6cff14;
 }
 
 /* ── Buttons ── */
