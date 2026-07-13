@@ -2825,9 +2825,73 @@ window.addEventListener("keydown", (e) => {
   else if ((e.ctrlKey || e.metaKey) && (k === "y" || k === "Y")) { e.preventDefault(); redo(); }
 });
 
-window.addEventListener("resize", () => { state.dirtyTimeline = true; });
+window.addEventListener("resize", () => { state.dirtyTimeline = true; clampTimelineHeight(); });
+
+/* ── Resizable upper / timeline split ── */
+const TL_H_KEY = "fablecut-timeline-h";
+const TL_H_MIN = 180;
+const UPPER_MIN = 140;
+function availableTimelineMax() {
+  const app = $("app").getBoundingClientRect();
+  const topbar = document.querySelector(".topbar")?.getBoundingClientRect();
+  const topbarH = topbar ? topbar.height : 46;
+  const split = 6;
+  const gaps = 18; // three 6px flex gaps between four children
+  return Math.floor(app.height - topbarH - UPPER_MIN - split - gaps);
+}
+function setTimelineHeight(px) {
+  const h = clamp(Math.round(px), TL_H_MIN, Math.max(TL_H_MIN, availableTimelineMax()));
+  $("app").style.setProperty("--timeline-h", h + "px");
+  state.dirtyTimeline = true;
+  return h;
+}
+function resetTimelineHeight() {
+  const h = setTimelineHeight(window.innerHeight * 0.32);
+  localStorage.removeItem(TL_H_KEY);
+  state.dirtyTimeline = true;
+  return h;
+}
+function clampTimelineHeight() {
+  const cur = $("timelinePanel")?.getBoundingClientRect().height;
+  if (cur) setTimelineHeight(cur);
+}
+function initPanelSplit() {
+  const handle = $("splitUpperTimeline");
+  const tl = $("timelinePanel");
+  if (!handle || !tl) return;
+  const saved = parseFloat(localStorage.getItem(TL_H_KEY));
+  if (saved > 0) setTimelineHeight(saved);
+  else resetTimelineHeight();
+
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add("dragging");
+    document.body.classList.add("resizing-panels");
+    const y0 = e.clientY;
+    const h0 = tl.getBoundingClientRect().height;
+    const onMove = (ev) => setTimelineHeight(h0 - (ev.clientY - y0));
+    const onUp = () => {
+      handle.releasePointerCapture(e.pointerId);
+      handle.classList.remove("dragging");
+      document.body.classList.remove("resizing-panels");
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      localStorage.setItem(TL_H_KEY, String(Math.round(tl.getBoundingClientRect().height)));
+      state.dirtyTimeline = true;
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+  });
+  handle.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    resetTimelineHeight();
+  });
+}
 
 /* ── Boot ── */
+initPanelSplit();
 buildTrackDOM();
 rebuildClips();
 renderBin();

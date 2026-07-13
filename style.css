@@ -20,7 +20,25 @@ body {
   color: var(--text);
   font: 13px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
 }
-.app { display: grid; grid-template-rows: 46px minmax(0, 1fr) minmax(230px, 38%); height: 100vh; gap: 6px; padding: 6px; }
+.app {
+  display: flex; flex-direction: column; height: 100vh; gap: 6px; padding: 6px;
+}
+.topbar { flex: 0 0 46px; }
+.upper { flex: 1 1 0; min-height: 140px; min-width: 0; }
+.timeline-panel {
+  flex: 0 0 var(--timeline-h, 32vh); min-height: 180px; overflow: hidden;
+}
+.v-split {
+  flex: 0 0 6px; cursor: ns-resize; position: relative; z-index: 5;
+  border-radius: 3px;
+}
+.v-split::after {
+  content: ""; position: absolute; left: 18%; right: 18%; top: 2px; height: 2px;
+  border-radius: 1px; background: var(--border); transition: background .15s;
+}
+.v-split:hover::after, .v-split.dragging::after { background: var(--accent); }
+body.resizing-panels { cursor: ns-resize !important; }
+body.resizing-panels * { cursor: ns-resize !important; user-select: none !important; }
 .hidden { display: none !important; }
 .dim { color: var(--dim); }
 .flex-spacer { flex: 1; }
@@ -167,7 +185,6 @@ input[type=range] { accent-color: var(--accent); height: 18px; }
 .kf-btn.has { color: #ffd166; border-color: #ffd16666; }
 
 /* ── Timeline ── */
-.timeline-panel { overflow: hidden; }
 .timeline-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
 .tiny-label { font-size: 11px; }
 #zoomSlider { width: 130px; }
