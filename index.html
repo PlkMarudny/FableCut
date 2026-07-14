@@ -86,6 +86,7 @@
           <button class="btn icon big" id="btnPlay" title="Play / Pause (Space)">▶</button>
           <button class="btn icon" id="btnFwd" title="Forward 1 frame (→)">▶︎</button>
           <button class="btn icon" id="btnEnd" title="Go to end (End)">⏭</button>
+          <button class="btn icon toggle" id="btnSpeed" title="Preview speed — click to cycle 1×/1.5×/2×/4×. While playing: L faster · J slower · K play/pause and reset to 1×. Preview only, not export.">1×</button>
         </div>
         <span class="timecode dim" id="tcTotal">00:00:00</span>
       </div>
@@ -169,6 +170,7 @@
     <div class="keys-cols">
       <table class="keys">
         <tr><td><kbd>Space</kbd></td><td>Play / pause</td></tr>
+        <tr><td><kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd></td><td>Shuttle preview — <kbd>L</kbd> faster / <kbd>J</kbd> slower (1× · 1.5× · 2× · 4×); <kbd>K</kbd> play/pause + reset to 1×</td></tr>
         <tr><td><kbd>S</kbd></td><td>Split clip(s) at playhead</td></tr>
         <tr><td><kbd>G</kbd></td><td>Find next shared gap (wraps; respects IN/OUT)</td></tr>
         <tr><td><kbd>⇧</kbd>+<kbd>G</kbd></td><td>Close gap at playhead (enabled tracks)</td></tr>

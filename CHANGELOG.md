@@ -5,6 +5,11 @@ All notable changes to FableCut are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Preview playback speed — a monitor toolbar toggle plus **J**/**K**/**L** shortcuts cycle the preview player through 1×, 1.5×, 2×, and 4× (L faster, J slower, K play/pause and reset to 1×). It rides on top of each clip's own speed and is forced back to 1× during export, so renders always come out at real time.
+
 ## [1.6.0] - 2026-07-14
 
 ### Added
@@ -174,6 +179,7 @@ the report in [#1](https://github.com/ronak-create/FableCut/issues/1) — thanks
 - Three control surfaces for AI agents: **MCP server**, direct `project.json`
   editing, and a **REST API** with live-reload over server-sent events.
 
+[1.6.0]: https://github.com/ronak-create/FableCut/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/ronak-create/FableCut/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ronak-create/FableCut/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/ronak-create/FableCut/compare/v1.3.0...v1.3.1
