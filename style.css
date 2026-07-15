@@ -819,6 +819,24 @@ input[type=range] {
 .tracks-content {
   position: relative;
 }
+.work-dim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #00000066;
+  pointer-events: none;
+  z-index: 1;
+}
+.work-dim-l {
+  left: 0;
+  border-right: 1px solid #5eead4aa;
+}
+.work-dim-r {
+  border-left: 1px solid #fb923caa;
+}
+.work-dim.hidden {
+  display: none;
+}
 
 .track {
   position: relative;

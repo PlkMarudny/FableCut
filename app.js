@@ -131,6 +131,8 @@ const project = {
   media: [],   // {id, name, kind:'video'|'audio'|'image', src, duration, width?, height?}
   clips: [],   // {id, mediaId, kind, track, start, in, duration, name, props:{}}
   markers: [], // {t, label?} — beat/cue markers on the ruler; snap targets
+  inPoint: null,  // timeline work-area IN (seconds), or null
+  outPoint: null, // timeline work-area OUT (seconds), or null
 };
 const state = {
   time: 0, playing: false, pps: 60, snap: true,
@@ -292,6 +294,8 @@ function applyProject(data) {
     revision: data.revision || 0,
     media: data.media || [], clips: data.clips || [],
     markers: (data.markers || []).filter((m) => m && isFinite(m.t)).sort((a, b) => a.t - b.t),
+    inPoint: (data.inPoint != null && isFinite(data.inPoint)) ? +data.inPoint : null,
+    outPoint: (data.outPoint != null && isFinite(data.outPoint)) ? +data.outPoint : null,
   });
   for (const c of project.clips) {
     c.props = { ...DEFAULT_PROPS, ...(c.props || {}) };
@@ -308,6 +312,7 @@ function applyProject(data) {
   pruneSelection(); // keep the selection across external reloads where possible
   state.dirtyTimeline = true;
   renderBin(); renderInspector();
+  updateWorkArea();
 }
 function scheduleSave() {
   state.dirtyTimeline = true;
@@ -328,7 +333,7 @@ function scheduleSave() {
   }, 400);
 }
 function projectJSON() {
-  const { name, width, height, fps, background, revision, media, clips, markers } = project;
+  const { name, width, height, fps, background, revision, media, clips, markers, inPoint, outPoint } = project;
   return {
     name, width, height, fps, background, revision,
     media: media.filter((m) => !m.transient).map(({ id, name, kind, src, duration, width, height }) =>
@@ -336,6 +341,8 @@ function projectJSON() {
     clips: clips.map(({ id, mediaId, kind, track, start, in: inn, duration, name, props, keyframes, transitionIn, transitionOut }) =>
       ({ id, mediaId, kind, track, start, in: inn, duration, name, props, keyframes, transitionIn, transitionOut })),
     markers: (markers || []).map(({ t, label }) => (label ? { t, label } : { t })),
+    inPoint: inPoint == null ? null : inPoint,
+    outPoint: outPoint == null ? null : outPoint,
   };
 }
 function listenSSE() {
@@ -921,6 +928,7 @@ function rebuildClips() {
     if (hasWave) drawClipWave(div.querySelector(".wave"), c, tr.h);
   }
   state.dirtyTimeline = false;
+  updateWorkArea();
 }
 
 /* Render decoded peaks for the [in, in+duration] slice of the clip's media */
@@ -957,9 +965,12 @@ function drawRuler() {
   const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
   const step = steps.find((s) => s * pps >= 70) || 600;
   const minor = step / 5;
-  g.strokeStyle = "#4a4a55"; g.fillStyle = "#9a9aa6"; g.font = "10px Consolas, monospace";
-  g.beginPath();
   const i0 = Math.max(0, Math.floor(sl / pps / minor));
+  // ticks + time labels first so IN/OUT can difference-blend over them
+  g.strokeStyle = "#4a4a55";
+  g.fillStyle = "#9a9aa6";
+  g.font = "10px Consolas, monospace";
+  g.beginPath();
   for (let i = i0; i * minor * pps < sl + w; i++) {
     const t = i * minor;
     const x = Math.round(t * pps - sl) + 0.5;
@@ -968,6 +979,14 @@ function drawRuler() {
     if (isMajor) g.fillText(fmt(Math.round(t * 1000) / 1000).slice(0, 5), x + 4, 12);
   }
   g.stroke();
+  // dim timeline outside the IN–OUT work area
+  const inn = project.inPoint, out = project.outPoint;
+  if (inn != null && out != null && out > inn) {
+    const x0 = inn * pps - sl, x1 = out * pps - sl;
+    g.fillStyle = "#00000055";
+    if (x0 > 0) g.fillRect(0, 0, Math.min(w, x0), h);
+    if (x1 < w) g.fillRect(Math.max(0, x1), 0, w - Math.max(0, x1), h);
+  }
   // beat/cue markers
   for (const mk of project.markers || []) {
     const x = mk.t * pps - sl;
@@ -977,6 +996,29 @@ function drawRuler() {
     g.moveTo(x, h - 9); g.lineTo(x + 4, h - 5); g.lineTo(x, h - 1); g.lineTo(x - 4, h - 5);
     g.closePath(); g.fill();
   }
+  // IN / OUT — bottom-aligned; `difference` keeps time glyphs readable where they overlap
+  // (true `xor` would punch transparent holes instead of showing the digits)
+  const mkH = (h - 4) * 0.75, bot = h - 1, top = bot - mkH, mid = (top + bot) / 2;
+  g.globalCompositeOperation = "difference";
+  if (inn != null) {
+    const x = inn * pps - sl;
+    if (x >= -10 && x <= w + 10) {
+      g.fillStyle = "#5eead4";
+      g.beginPath();
+      g.moveTo(x, top); g.lineTo(x, bot); g.lineTo(x + 8, mid);
+      g.closePath(); g.fill();
+    }
+  }
+  if (out != null) {
+    const x = out * pps - sl;
+    if (x >= -10 && x <= w + 10) {
+      g.fillStyle = "#fb923c";
+      g.beginPath();
+      g.moveTo(x, top); g.lineTo(x, bot); g.lineTo(x - 8, mid);
+      g.closePath(); g.fill();
+    }
+  }
+  g.globalCompositeOperation = "source-over";
   // playhead marker on ruler
   const px = state.time * pps - sl;
   if (px >= -8 && px <= w + 8) {
@@ -994,6 +1036,8 @@ function snapTime(t, ignore) { // ignore: clip id, Set of ids, or null
   const tol = SNAP_PX / state.pps;
   const cands = [0, state.time];
   for (const mk of project.markers || []) cands.push(mk.t);
+  if (project.inPoint != null) cands.push(project.inPoint);
+  if (project.outPoint != null) cands.push(project.outPoint);
   for (const c of project.clips) {
     if (ign.has(c.id)) continue;
     cands.push(c.start, clipEnd(c));
@@ -1224,6 +1268,48 @@ function toggleMarker() {
   if (near >= 0 && !state.playing) project.markers.splice(near, 1);
   else { project.markers.push({ t }); project.markers.sort((a, b) => a.t - b.t); }
   scheduleSave();
+}
+/* Work-area IN/OUT markers (I / O). Shift+I / Shift+O clear them. */
+function setInPoint() {
+  project.inPoint = +state.time.toFixed(3);
+  if (project.outPoint != null && project.inPoint > project.outPoint) project.outPoint = null;
+  updateWorkArea();
+  scheduleSave();
+}
+function setOutPoint() {
+  project.outPoint = +state.time.toFixed(3);
+  if (project.inPoint != null && project.outPoint < project.inPoint) project.inPoint = null;
+  updateWorkArea();
+  scheduleSave();
+}
+function clearInPoint() {
+  if (project.inPoint == null) return;
+  project.inPoint = null;
+  updateWorkArea();
+  scheduleSave();
+}
+function clearOutPoint() {
+  if (project.outPoint == null) return;
+  project.outPoint = null;
+  updateWorkArea();
+  scheduleSave();
+}
+function updateWorkArea() {
+  const left = $("workDimL"), right = $("workDimR");
+  if (!left || !right) return;
+  const a = project.inPoint, b = project.outPoint;
+  const contentW = els.tracksContent.offsetWidth || contentWidth();
+  if (a == null || b == null || b <= a) {
+    left.classList.add("hidden");
+    right.classList.add("hidden");
+    return;
+  }
+  const x0 = a * state.pps, x1 = b * state.pps;
+  left.classList.remove("hidden");
+  right.classList.remove("hidden");
+  left.style.width = Math.max(0, x0) + "px";
+  right.style.left = x1 + "px";
+  right.style.width = Math.max(0, contentW - x1) + "px";
 }
 
 /* ── Drag & drop: bin → timeline, files → window ── */
@@ -2931,6 +3017,14 @@ window.addEventListener("keydown", (e) => {
   else if (k === "[") trimToPlayhead("in");
   else if (k === "]") trimToPlayhead("out");
   else if (k === "m" || k === "M") toggleMarker();
+  else if ((k === "i" || k === "I") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    e.shiftKey ? clearInPoint() : setInPoint();
+  }
+  else if ((k === "o" || k === "O") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    e.shiftKey ? clearOutPoint() : setOutPoint();
+  }
   else if (k === "n" || k === "N") els.btnSnap.click();
   else if (k === "Escape") selectClip(null);
   else if ((e.ctrlKey || e.metaKey) && (k === "a" || k === "A")) {

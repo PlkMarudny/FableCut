@@ -118,6 +118,8 @@
       <div class="timeline-scroll" id="timelineScroll">
         <canvas class="ruler" id="ruler"></canvas>
         <div class="tracks-content" id="tracksContent">
+          <div class="work-dim work-dim-l hidden" id="workDimL"></div>
+          <div class="work-dim work-dim-r hidden" id="workDimR"></div>
           <div class="tracks" id="tracks"></div>
           <div class="playhead" id="playhead"><div class="playhead-cap"></div></div>
         </div>
@@ -171,6 +173,8 @@
       <tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td>Trim selected clip's in / out to playhead</td></tr>
       <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>Jump to start / end</td></tr>
       <tr><td><kbd>M</kbd></td><td>Add / remove marker at playhead (tap on the beat while playing)</td></tr>
+      <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>Set IN / OUT work-area marker at playhead</td></tr>
+      <tr><td><kbd>⇧</kbd>+<kbd>I</kbd> / <kbd>⇧</kbd>+<kbd>O</kbd></td><td>Clear IN / OUT marker</td></tr>
       <tr><td><kbd>N</kbd></td><td>Toggle snapping</td></tr>
       <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom timeline</td></tr>
       <tr><td><kbd>Z</kbd></td><td>Zoom to selected clip(s)</td></tr>
