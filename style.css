@@ -771,7 +771,7 @@ input[type=range] {
 }
 
 .track-headers {
-  width: 92px;
+  width: 58px;
   flex: none;
   border-right: 1px solid var(--border);
   padding-top: 26px;
@@ -783,19 +783,50 @@ input[type=range] {
 .track-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
+  gap: 4px;
+  padding: 0 6px;
   border-bottom: 1px solid #232328;
   font-size: 11px;
   font-weight: 700;
   color: var(--dim);
   letter-spacing: .5px;
 }
-
-.track-head .track-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.track-head.disabled {
+  opacity: .55;
+}
+.track-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  margin: 0;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 4px;
+  color: inherit;
+}
+.track-toggle:hover {
+  background: #ffffff12;
+}
+.track-toggle .track-ico {
+  display: block;
+  width: 15px;
+  height: 15px;
+  pointer-events: none;
+}
+.track-toggle .track-ico-off {
+  display: none;
+}
+.track-toggle[aria-pressed="false"] {
+  color: var(--dim) !important;
+}
+.track-toggle[aria-pressed="false"] .track-ico-off {
+  display: block;
+}
+.track.disabled {
+  opacity: .4;
 }
 
 .timeline-scroll {
@@ -1073,6 +1104,19 @@ input[type=range] {
 
 .engine-opt .dim {
   font-size: 12px;
+}
+.export-track-warn {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border: 1px solid #8a6a28;
+  border-radius: 8px;
+  background: #3a2e12;
+  color: #f0c14a;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.export-track-warn.hidden {
+  display: none;
 }
 
 .dialog.help .keys {
