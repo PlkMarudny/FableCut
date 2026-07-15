@@ -2709,6 +2709,20 @@ function openExportSetup() {
   $("engineFastNote").textContent = fastOk
     ? "Frame-accurate ffmpeg encode. Keeps rendering if you switch tabs."
     : "Needs the server + ffmpeg on PATH.";
+  const warn = $("exportTrackWarn");
+  const disabled = TRACKS.filter((t) =>
+    !isTrackEnabled(t.id) && project.clips.some((c) => c.track === t.id)
+  ).map((t) => t.id);
+  if (disabled.length && warn) {
+    const list = disabled.join(", ");
+    warn.textContent = disabled.length === 1
+      ? `Track ${list} is disabled and will be omitted from the export.`
+      : `Tracks ${list} are disabled and will be omitted from the export.`;
+    warn.classList.remove("hidden");
+  } else if (warn) {
+    warn.textContent = "";
+    warn.classList.add("hidden");
+  }
   els.exportSetup.classList.remove("hidden");
 }
 function startChosenExport() {
