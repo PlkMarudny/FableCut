@@ -1381,6 +1381,18 @@ function zoomToSelection() {
   if (!clips.length) { toast("Select a clip to zoom to"); return; }
   const t0 = Math.min(...clips.map((c) => c.start));
   const t1 = Math.max(...clips.map((c) => c.start + c.duration));
+  zoomToRange(t0, t1);
+}
+/* Zoom so the IN–OUT work area fills 90% of the timeline width and is centered. */
+function zoomToWorkArea() {
+  const t0 = project.inPoint, t1 = project.outPoint;
+  if (t0 == null || t1 == null || t1 <= t0) {
+    toast("Set IN and OUT markers first (I / O)");
+    return;
+  }
+  zoomToRange(t0, t1);
+}
+function zoomToRange(t0, t1) {
   const dur = Math.max(t1 - t0, MIN_DUR);
   const w = els.timelineScroll.clientWidth || 800;
   const pps = clamp((0.9 * w) / dur, ZOOM_MIN, ZOOM_MAX);
@@ -3033,9 +3045,11 @@ window.addEventListener("keydown", (e) => {
   }
   else if (k === "+" || k === "=") setZoom(state.pps * 1.25);
   else if (k === "-") setZoom(state.pps / 1.25);
-  else if (e.code === "KeyZ" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+  else if (e.code === "KeyZ" && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
-    e.shiftKey ? zoomToFit() : zoomToSelection();
+    if (e.altKey) zoomToWorkArea();
+    else if (e.shiftKey) zoomToFit();
+    else zoomToSelection();
   }
   else if ((e.ctrlKey || e.metaKey) && (k === "z" || k === "Z")) {
     e.preventDefault();
