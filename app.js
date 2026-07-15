@@ -313,6 +313,7 @@ function applyProject(data) {
   state.dirtyTimeline = true;
   renderBin(); renderInspector();
   updateWorkArea();
+  syncTrimIOButton();
 }
 function scheduleSave() {
   state.dirtyTimeline = true;
@@ -868,6 +869,61 @@ function trimToPlayhead(side) {
   }
   scheduleSave(); renderInspector();
 }
+/* Split at IN/OUT and discard clip heads before IN and tails after OUT.
+   Skips disabled tracks when track enable/disable is available. */
+function trimToWorkArea() {
+  const inn = project.inPoint, out = project.outPoint;
+  if (inn == null && out == null) {
+    toast("Set an IN or OUT marker first (I / O)");
+    return;
+  }
+  const onTrack = (c) => typeof isTrackEnabled !== "function" || isTrackEnabled(c.track);
+  const willChange = project.clips.some((c) => {
+    if (!onTrack(c)) return false;
+    const start = c.start, end = clipEnd(c);
+    let t0 = start, t1 = end;
+    if (inn != null) t0 = Math.max(t0, inn);
+    if (out != null) t1 = Math.min(t1, out);
+    return t1 - t0 < MIN_DUR || t0 > start + 1e-6 || t1 < end - 1e-6;
+  });
+  if (!willChange) { toast("Nothing to trim"); return; }
+
+  pushUndo();
+  const doomed = new Set();
+  for (const c of project.clips) {
+    if (!onTrack(c)) continue;
+    const start = c.start, end = clipEnd(c);
+    let t0 = start, t1 = end;
+    if (inn != null) t0 = Math.max(t0, inn);
+    if (out != null) t1 = Math.min(t1, out);
+    if (t1 - t0 < MIN_DUR) { doomed.add(c.id); continue; }
+
+    const dIn = t0 - start;
+    if (dIn > 1e-6) {
+      c.start = t0;
+      if (c.kind === "video" || c.kind === "audio") c.in += dIn * clipSpeed(c);
+      else c.in = 0;
+      c.duration -= dIn;
+      c.keyframes = shiftKF(c.keyframes, dIn, c.duration);
+      c.transitionIn = undefined;
+    }
+    if (clipEnd(c) - t1 > 1e-6) {
+      c.duration = Math.max(MIN_DUR, t1 - c.start);
+      c.keyframes = shiftKF(c.keyframes, 0, c.duration);
+      c.transitionOut = undefined;
+    }
+  }
+  for (const id of doomed) releaseClipEl(id);
+  if (doomed.size) project.clips = project.clips.filter((c) => !doomed.has(c.id));
+  pruneSelection();
+  scheduleSave();
+  renderInspector();
+}
+function syncTrimIOButton() {
+  const btn = $("btnTrimIO");
+  if (!btn) return;
+  btn.classList.toggle("hidden", project.inPoint == null && project.outPoint == null);
+}
 
 /* ═══════════════════════════ TIMELINE UI ═══════════════════════════ */
 function buildTrackDOM() {
@@ -1274,24 +1330,28 @@ function setInPoint() {
   project.inPoint = +state.time.toFixed(3);
   if (project.outPoint != null && project.inPoint > project.outPoint) project.outPoint = null;
   updateWorkArea();
+  syncTrimIOButton();
   scheduleSave();
 }
 function setOutPoint() {
   project.outPoint = +state.time.toFixed(3);
   if (project.inPoint != null && project.outPoint < project.inPoint) project.inPoint = null;
   updateWorkArea();
+  syncTrimIOButton();
   scheduleSave();
 }
 function clearInPoint() {
   if (project.inPoint == null) return;
   project.inPoint = null;
   updateWorkArea();
+  syncTrimIOButton();
   scheduleSave();
 }
 function clearOutPoint() {
   if (project.outPoint == null) return;
   project.outPoint = null;
   updateWorkArea();
+  syncTrimIOButton();
   scheduleSave();
 }
 function updateWorkArea() {
@@ -2953,6 +3013,7 @@ els.fileInput.addEventListener("change", () => { importFiles(els.fileInput.files
 $("btnTitle").addEventListener("click", addTitle);
 $("btnAdjust").addEventListener("click", addAdjust);
 $("btnSplit").addEventListener("click", splitAtPlayhead);
+$("btnTrimIO").addEventListener("click", trimToWorkArea);
 $("btnDelete").addEventListener("click", deleteSelected);
 $("btnExport").addEventListener("click", openExportSetup);
 $("btnStartExport").addEventListener("click", startChosenExport);
@@ -3021,6 +3082,10 @@ window.addEventListener("keydown", (e) => {
   const k = e.key;
   if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
   else if (k === "s" || k === "S") splitAtPlayhead();
+  else if ((k === "t" || k === "T") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    trimToWorkArea();
+  }
   else if (k === "Delete" || k === "Backspace") deleteSelected();
   else if (k === "ArrowLeft") setTime(state.time - (e.shiftKey ? 1 : 1 / project.fps));
   else if (k === "ArrowRight") setTime(state.time + (e.shiftKey ? 1 : 1 / project.fps));
@@ -3178,5 +3243,6 @@ initPanelSplit();
 buildTrackDOM();
 rebuildClips();
 renderBin();
+syncTrimIOButton();
 connectServer().then(loadLibraryFonts);
 requestAnimationFrame(loop);
