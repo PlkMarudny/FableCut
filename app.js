@@ -123,6 +123,13 @@ const ASPECT_PRESETS = [
 const WAVE_PEAKS_PER_SEC = 50;
 
 /* ── State ─────────────────────────────────────────────────────────────── */
+const DISABLED_TRACKS_KEY = "fablecut-disabled-tracks";
+function loadDisabledTracks() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DISABLED_TRACKS_KEY) || "[]");
+    return new Set(Array.isArray(raw) ? raw : []);
+  } catch { return new Set(); }
+}
 const project = {
   name: "Untitled Project",
   width: 1280, height: 720, fps: 30,
@@ -146,7 +153,31 @@ const state = {
   dirtyTimeline: true, gesture: false,
   workAreaPlay: false,   // when true, play + Home/End stay inside IN/OUT
   binTab: "project",     // project | elements | sfx | svg
+  disabledTracks: loadDisabledTracks(),
 };
+function saveDisabledTracks() {
+  try { localStorage.setItem(DISABLED_TRACKS_KEY, JSON.stringify([...state.disabledTracks])); } catch {}
+}
+function isTrackEnabled(id) {
+  return !state.disabledTracks.has(id);
+}
+function toggleTrackEnabled(id) {
+  if (state.disabledTracks.has(id)) state.disabledTracks.delete(id);
+  else state.disabledTracks.add(id);
+  saveDisabledTracks();
+  const head = els.trackHeaders.querySelector(`.track-head[data-track="${id}"]`);
+  const row = els.tracks.querySelector(`.track[data-track="${id}"]`);
+  const on = isTrackEnabled(id);
+  if (head) {
+    head.classList.toggle("disabled", !on);
+    const btn = head.querySelector(".track-toggle");
+    if (btn) {
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.title = on ? "Disable track" : "Enable track";
+    }
+  }
+  if (row) row.classList.toggle("disabled", !on);
+}
 const runtime = {
   clipEls: new Map(),   // clipId -> HTMLMediaElement
   clipGain: new Map(),  // clipId -> GainNode
@@ -995,6 +1026,20 @@ function syncTrimIOButton() {
 }
 
 /* ═══════════════════════════ TIMELINE UI ═══════════════════════════ */
+function trackToggleIcon(kind) {
+  if (kind === "audio") {
+    // Speaker
+    return `<svg class="track-ico" viewBox="0 0 16 16" aria-hidden="true">` +
+      `<path fill="currentColor" d="M2.5 5.75h2.2L8.2 3.1v9.8L4.7 10.25H2.5V5.75zm7.15 1.05a2.1 2.1 0 0 1 0 2.4l.95.7a3.35 3.35 0 0 0 0-3.8l-.95.7zm1.55-2.2a4.6 4.6 0 0 1 0 6.8l.95.7a5.85 5.85 0 0 0 0-8.2l-.95.7z"/>` +
+      `<path class="track-ico-off" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M2.2 2.2l11.6 11.6"/>` +
+      `</svg>`;
+  }
+  // Screen / monitor
+  return `<svg class="track-ico" viewBox="0 0 16 16" aria-hidden="true">` +
+    `<path fill="currentColor" d="M1.75 3.25h12.5v8H9.6l.4 1.5h2.25v1.25H3.75V12.75H6l.4-1.5H1.75v-8zm1.25 1.25v5.5h10.0v-5.5H3z"/>` +
+    `<path class="track-ico-off" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M2.2 2.2l11.6 11.6"/>` +
+    `</svg>`;
+}
 function buildTrackDOM() {
   els.trackHeaders.innerHTML = "";
   els.tracks.innerHTML = "";
@@ -1002,12 +1047,26 @@ function buildTrackDOM() {
   inner.id = "trackHeadInner";
   els.trackHeaders.appendChild(inner);
   for (const t of TRACKS) {
+    const on = isTrackEnabled(t.id);
     const h = document.createElement("div");
-    h.className = "track-head"; h.style.height = t.h + "px";
-    h.innerHTML = `<span class="track-dot" style="background:${t.color}"></span>${t.id} <span class="dim" style="font-weight:400">${t.kind}</span>`;
+    h.className = "track-head" + (on ? "" : " disabled");
+    h.dataset.track = t.id;
+    h.style.height = t.h + "px";
+    h.innerHTML =
+      `<button type="button" class="track-toggle" aria-pressed="${on}" ` +
+      `title="${on ? "Disable track" : "Enable track"}" style="color:${t.color}">` +
+      `${trackToggleIcon(t.kind)}</button>` +
+      `<span class="track-id">${t.id}</span>`;
+    h.querySelector(".track-toggle").addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleTrackEnabled(t.id);
+    });
     inner.appendChild(h);
     const row = document.createElement("div");
-    row.className = "track"; row.dataset.track = t.id; row.style.height = t.h + "px";
+    row.className = "track" + (on ? "" : " disabled");
+    row.dataset.track = t.id;
+    row.style.height = t.h + "px";
     els.tracks.appendChild(row);
   }
 }
@@ -1886,19 +1945,22 @@ function syncMedia() {
   for (const c of project.clips) {
     if (c.kind === "text" || c.kind === "image" || c.kind === "svg" || c.kind === "adjust") continue;
     const el = getClipEl(c); if (!el) continue;
+    const enabled = isTrackEnabled(c.track);
     const p = evalProps(c, t);
     const sp = clamp(+p.speed || 1, 0.1, 8);
     const mt = mediaTimeAt(c, t);
-    if (state.playing && activeAt(c, t)) {
-      if (el.playbackRate !== sp) { try { el.playbackRate = sp; } catch { } }
-      if (el.paused) el.play().catch(() => { });
-      if (Math.abs(el.currentTime - mt) > 0.25 * sp) { try { el.currentTime = mt; } catch { } }
+    if (state.playing && enabled && activeAt(c, t)) {
+      if (el.playbackRate !== sp) { try { el.playbackRate = sp; } catch {} }
+      if (el.paused) el.play().catch(() => {});
+      if (Math.abs(el.currentTime - mt) > 0.25 * sp) { try { el.currentTime = mt; } catch {} }
       const vol = clamp(p.volume, 0, 4);
       const g = runtime.clipGain.get(c.id);
       if (g) g.gain.value = vol;
       else el.volume = clamp(vol, 0, 1);
-    } else if (!el.paused) {
-      el.pause();
+    } else {
+      if (!el.paused) el.pause();
+      const g = runtime.clipGain.get(c.id);
+      if (g) g.gain.value = 0;
     }
   }
 }
@@ -1907,6 +1969,7 @@ function seekMediaWhilePaused() {
   const t = state.time;
   for (const c of project.clips) {
     if (c.kind !== "video") continue;
+    if (!isTrackEnabled(c.track)) continue;
     if (!activeAt(c, t)) continue;
     const el = getClipEl(c); if (!el) continue;
     const mt = mediaTimeAt(c, t);
@@ -2307,7 +2370,7 @@ function drawFrame(t = state.time) {
   ctx2d.filter = "none"; ctx2d.globalAlpha = 1;
   ctx2d.fillStyle = project.background || "#000"; ctx2d.fillRect(0, 0, W, H);
   // render video tracks bottom-up (V1 under V2)
-  const videoTracks = TRACKS.filter((tr) => tr.kind === "video").reverse();
+  const videoTracks = TRACKS.filter((tr) => tr.kind === "video" && isTrackEnabled(tr.id)).reverse();
   for (const tr of videoTracks) {
     const clips = project.clips
       .filter((c) => c.track === tr.id && activeAt(c, t))
@@ -2361,7 +2424,7 @@ function overlayHandles(b, W, H) {
 }
 function drawSelectionOverlay(W, H, t) {
   const c = getClip(state.selId);
-  if (!isVisualClip(c) || !activeAt(c, t)) return;
+  if (!isVisualClip(c) || !activeAt(c, t) || !isTrackEnabled(c.track)) return;
   const b = clipBounds(c, evalProps(c, t), W, H);
   const lw = Math.max(2, W / 640);
   const hd = overlayHandles(b, W, H), hs = hd.hs;
@@ -2396,7 +2459,7 @@ function toLocal(pt, b) {
 }
 function pickClipAt(pt, W, H) {
   const seq = [];
-  for (const tr of TRACKS.filter((tk) => tk.kind === "video").slice().reverse()) {
+  for (const tr of TRACKS.filter((tk) => tk.kind === "video" && isTrackEnabled(tk.id)).slice().reverse()) {
     for (const c of project.clips.filter((c) => c.track === tr.id && activeAt(c, state.time)).sort((a, b) => a.start - b.start))
       if (isVisualClip(c)) seq.push(c);
   }
@@ -2897,6 +2960,20 @@ function openExportSetup() {
   $("engineFastNote").textContent = fastOk
     ? "Frame-accurate ffmpeg encode. Keeps rendering if you switch tabs."
     : "Needs the server + ffmpeg on PATH.";
+  const warn = $("exportTrackWarn");
+  const disabled = TRACKS.filter((t) =>
+    !isTrackEnabled(t.id) && project.clips.some((c) => c.track === t.id)
+  ).map((t) => t.id);
+  if (disabled.length && warn) {
+    const list = disabled.join(", ");
+    warn.textContent = disabled.length === 1
+      ? `Track ${list} is disabled and will be omitted from the export.`
+      : `Tracks ${list} are disabled and will be omitted from the export.`;
+    warn.classList.remove("hidden");
+  } else if (warn) {
+    warn.textContent = "";
+    warn.classList.add("hidden");
+  }
   els.exportSetup.classList.remove("hidden");
 }
 function startChosenExport() {
@@ -2911,6 +2988,7 @@ function seekVideosTo(t) {
   const waits = [];
   for (const c of project.clips) {
     if (c.kind !== "video") continue;
+    if (!isTrackEnabled(c.track)) continue;
     const el = getClipEl(c); if (!el) continue;
     if (!activeAt(c, t)) { if (!el.paused) el.pause(); continue; }
     const mt = mediaTimeAt(c, t);
@@ -2947,6 +3025,7 @@ async function renderAudioMix(dur) {
   const jobs = [];
   for (const c of project.clips) {
     if (c.kind !== "audio" && c.kind !== "video") continue;
+    if (!isTrackEnabled(c.track)) continue;
     const m = getMedia(c.mediaId); if (!m) continue;
     jobs.push(getAudioBuffer(m).then((buf) => ({ c, buf })).catch(() => null));
   }
@@ -2982,7 +3061,7 @@ async function renderAudioMix(dur) {
    this exact time, and refresh AI person masks synchronously. */
 async function prepareFrameAssets(t) {
   for (const c of project.clips) {
-    if (!activeAt(c, t)) continue;
+    if (!activeAt(c, t) || !isTrackEnabled(c.track)) continue;
     if (c.kind === "svg") await prepareSvgFrame(c, t);
     if (c.props?.bgRemove && (c.kind === "video" || c.kind === "image")) {
       const el = c.kind === "video" ? getClipEl(c) : runtime.mediaAux.get(c.mediaId)?.img;
