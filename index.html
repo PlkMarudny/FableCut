@@ -105,6 +105,8 @@
   <!-- ══════════ TIMELINE ══════════ -->
   <section class="panel timeline-panel" id="timelinePanel">
     <div class="timeline-toolbar">
+      <button class="btn tiny hidden" id="btnTrimIO" title="Trim clips to IN/OUT (⇧T)">Trim</button>
+      <button class="btn tiny toggle hidden" id="btnWorkAreaPlay" title="Limit playback to IN/OUT (Home/End jump to markers; playhead outside = override)">Limit</button>
       <button class="btn tiny" id="btnSplit" title="Split at playhead (S)">✂ Split</button>
       <button class="btn tiny" id="btnDelete" title="Delete selected (Del)"><svg class="ico" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M5.5 1.5h5v1.25H14v1.5H2v-1.5h3.5V1.5zM3.75 5.5h8.5v8.25a1.5 1.5 0 0 1-1.5 1.5h-5.5a1.5 1.5 0 0 1-1.5-1.5V5.5zm2 2v5h1.25v-5H5.75zm3.25 0v5H10.25v-5H9z"/></svg> Delete</button>
       <button class="btn tiny toggle on" id="btnSnap" title="Toggle snapping (N)"><svg class="ico" viewBox="0 0 16 14" width="14" height="12" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="3.25" stroke-linecap="butt" d="M4 10.25V7a4 4 0 0 1 8 0v3.25"/><path fill="currentColor" d="M2.375 10.75h3.25v2.5h-3.25zm8 0h3.25v2.5h-3.25z"/></svg> Snap</button>
@@ -118,6 +120,8 @@
       <div class="timeline-scroll" id="timelineScroll">
         <canvas class="ruler" id="ruler"></canvas>
         <div class="tracks-content" id="tracksContent">
+          <div class="work-dim work-dim-l hidden" id="workDimL"></div>
+          <div class="work-dim work-dim-r hidden" id="workDimR"></div>
           <div class="tracks" id="tracks"></div>
           <div class="playhead" id="playhead"><div class="playhead-cap"></div></div>
         </div>
@@ -172,9 +176,15 @@
       <tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td>Trim selected clip's in / out to playhead</td></tr>
       <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>Jump to start / end</td></tr>
       <tr><td><kbd>M</kbd></td><td>Add / remove marker at playhead (tap on the beat while playing)</td></tr>
+      <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>Set IN / OUT work-area marker at playhead</td></tr>
+      <tr><td><kbd>⇧</kbd>+<kbd>I</kbd> / <kbd>⇧</kbd>+<kbd>O</kbd></td><td>Clear IN / OUT marker</td></tr>
+      <tr><td><kbd>T</kbd></td><td>Split clips at IN/OUT markers</td></tr>
+      <tr><td><kbd>⇧</kbd>+<kbd>T</kbd></td><td>Trim clips to IN/OUT (remove heads/tails)</td></tr>
+      <tr><td>Limit (toolbar)</td><td>When on, play stops at OUT and Home/End use IN/OUT; playhead outside the range overrides</td></tr>
       <tr><td><kbd>N</kbd></td><td>Toggle snapping</td></tr>
       <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom timeline</td></tr>
       <tr><td><kbd>Z</kbd></td><td>Zoom to selected clip(s)</td></tr>
+      <tr><td><kbd>Alt</kbd>+<kbd>Z</kbd></td><td>Zoom to IN–OUT work area</td></tr>
       <tr><td><kbd>⇧</kbd>+<kbd>Z</kbd></td><td>Zoom timeline to fit</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>⇧</kbd>+<kbd>Z</kbd></td><td>Undo / redo</td></tr>
       <tr><td><kbd>Ctrl</kbd>+wheel</td><td>Zoom timeline at cursor</td></tr>
