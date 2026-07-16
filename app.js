@@ -1733,11 +1733,9 @@ function selectClip(id, opts) {
     else { s.add(id); setSelection([...s], id); }
     return;
   }
-  const focus = opts?.transFocus ?? null;
-  if (id == null) state.transFocus = null;
-  else if (focus) state.transFocus = focus;
-  else state.transFocus = null;
-  if (state.selId === id && state.selIds.size <= 1 && focus === state.transFocus && focus == null) return;
+  const nextFocus = id == null ? null : (opts?.transFocus ?? null);
+  if (state.selId === id && state.selIds.size <= 1 && nextFocus === state.transFocus) return;
+  state.transFocus = nextFocus;
   setSelection(id == null ? [] : [id], id ?? null);
 }
 /* Drop selected ids whose clips no longer exist (undo/redo, external reload) */
@@ -3374,7 +3372,7 @@ function updateSafeOverlay() {
 window.addEventListener("keydown", (e) => {
   const k = e.key;
   if (k === "Delete" || k === "Backspace") {
-    if (clearFocusedTransition()) {
+    if (!isTypingTarget(document.activeElement) && clearFocusedTransition()) {
       e.preventDefault();
       return;
     }

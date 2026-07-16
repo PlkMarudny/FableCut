@@ -1004,8 +1004,7 @@ input[type=range] {
   top: 0;
   bottom: 0;
   height: auto;
-  pointer-events: auto;
-  cursor: pointer;
+  pointer-events: none;
   z-index: 2;
   overflow: hidden;
 }
@@ -1030,6 +1029,8 @@ input[type=range] {
   stroke: #ffffffcc;
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
+  pointer-events: auto;
+  cursor: pointer;
 }
 .clip .trans-mark.focused polygon {
   fill: #7b6cff88;
@@ -1043,6 +1044,7 @@ input[type=range] {
   bottom: 0;
   width: 10px;
   cursor: ew-resize;
+  pointer-events: auto;
   z-index: 3;
 }
 .clip .trans-mark.in .trans-dur-handle {
