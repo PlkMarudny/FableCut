@@ -24,6 +24,8 @@ const TRACK_SIZE_PRESETS = {
   l: { thumbs: true, h: { V4: 44, V3: 44, V2: 58, V1: 58, A1: 42, A2: 42, A3: 42 } },
 };
 const TRACK_SIZE_KEY = "fablecut-track-size";
+const LAST_TRANS_KEY = { in: "fablecut-last-trans-in", out: "fablecut-last-trans-out" };
+const DEFAULT_LAST_TRANS = { type: "fade", duration: 1 };
 const RULER_H = 26;
 const SNAP_PX = 8;
 const MIN_DUR = 0.05;
@@ -154,6 +156,7 @@ const state = {
   workAreaPlay: false,   // when true, play + Home/End stay inside IN/OUT
   binTab: "project",     // project | elements | sfx | svg
   disabledTracks: loadDisabledTracks(),
+  transFocus: null,      // "in" | "out" — inspector transition row highlighted
 };
 function saveDisabledTracks() {
   try { localStorage.setItem(DISABLED_TRACKS_KEY, JSON.stringify([...state.disabledTracks])); } catch {}
@@ -877,6 +880,55 @@ function deleteSelected() {
   setSelection([]);
   scheduleSave(); renderInspector();
 }
+function clearFocusedTransition() {
+  if (!state.transFocus || !state.selId) return false;
+  const c = getClip(state.selId);
+  if (!c) return false;
+  const key = state.transFocus === "in" ? "transitionIn" : "transitionOut";
+  if (!c[key]) return false;
+  pushUndo();
+  c[key] = undefined;
+  state.transFocus = null;
+  state.dirtyTimeline = true;
+  scheduleSave();
+  renderInspector();
+  return true;
+}
+function loadLastTransition(side) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAST_TRANS_KEY[side]) || "null");
+    if (raw?.type && raw.type !== "none" && TRANSITIONS.includes(raw.type)) {
+      const dur = +raw.duration;
+      return { type: raw.type, duration: isFinite(dur) && dur >= MIN_TRANS_DUR ? dur : 1 };
+    }
+  } catch {}
+  return { ...DEFAULT_LAST_TRANS };
+}
+function saveLastTransition(side, tr) {
+  if (!tr?.type || tr.type === "none") return;
+  try {
+    localStorage.setItem(LAST_TRANS_KEY[side], JSON.stringify({
+      type: tr.type,
+      duration: Math.max(MIN_TRANS_DUR, +tr.duration || 1),
+    }));
+  } catch {}
+}
+function addTransitionAtPlayhead() {
+  const c = getClip(state.selId);
+  if (!c) { toast("Select a clip first"); return; }
+  const t = state.time;
+  if (t < c.start || t >= clipEnd(c)) { toast("Move playhead over the selected clip"); return; }
+  const side = (t - c.start) / c.duration < 0.5 ? "in" : "out";
+  const key = side === "in" ? "transitionIn" : "transitionOut";
+  const preset = loadLastTransition(side);
+  const dur = Math.min(Math.max(MIN_TRANS_DUR, preset.duration), c.duration);
+  pushUndo();
+  c[key] = { type: preset.type, duration: +dur.toFixed(3) };
+  saveLastTransition(side, c[key]);
+  state.dirtyTimeline = true;
+  selectClip(c.id, { transFocus: side });
+  scheduleSave();
+}
 function splitAtPlayhead() {
   const t = state.time;
   let targets = state.selIds.size ? selectedClips() : project.clips;
@@ -1079,6 +1131,41 @@ function contentWidth() {
   const minSec = (els.timelineScroll.clientWidth || 800) / state.pps;
   return Math.max(projDur() + TIMELINE_PAD_SEC, minSec) * state.pps;
 }
+function clipTransitionDur(tr) {
+  if (!tr || tr.type === "none") return 0;
+  const d = +tr.duration;
+  return isFinite(d) && d > 0 ? d : 0;
+}
+function clipBorderRadius() {
+  return state.trackSize === "s" ? 2 : 5;
+}
+/* Top-edge SVG wedges — width from transition duration × pps. */
+function transitionMarksHtml(c, trackH) {
+  let html = "";
+  const clipH = Math.max(8, trackH - 6);
+  const r = clipBorderRadius();
+  const wedge = (tr, side) => {
+    const dur = clipTransitionDur(tr);
+    if (!dur) return;
+    const w = Math.max(4, Math.min(dur, c.duration) * state.pps);
+    const bot = clipH - r;
+    const focused = state.selId === c.id && state.transFocus === side ? " focused" : "";
+    if (side === "in") {
+      html += `<div class="trans-mark in${focused}" style="width:${w}px" data-side="in">` +
+        `<svg viewBox="0 0 ${w} ${clipH}" preserveAspectRatio="none" aria-hidden="true">` +
+        `<polygon points="0,0 ${w},0 0,${bot}"/></svg>` +
+        `<div class="trans-dur-handle" title="Drag to adjust duration"></div></div>`;
+    } else {
+      html += `<div class="trans-mark out${focused}" style="width:${w}px" data-side="out">` +
+        `<svg viewBox="0 0 ${w} ${clipH}" preserveAspectRatio="none" aria-hidden="true">` +
+        `<polygon points="0,0 ${w},0 ${w},${bot}"/></svg>` +
+        `<div class="trans-dur-handle" title="Drag to adjust duration"></div></div>`;
+    }
+  };
+  wedge(c.transitionIn, "in");
+  wedge(c.transitionOut, "out");
+  return html;
+}
 function rebuildClips() {
   const w = contentWidth();
   els.tracksContent.style.width = w + "px";
@@ -1093,19 +1180,20 @@ function rebuildClips() {
     div.dataset.id = c.id;
     div.style.left = c.start * state.pps + "px";
     div.style.width = Math.max(8, c.duration * state.pps) + "px";
-    let inner = "";
+    let body = "";
     if (c.kind === "video" && trackSizeShowsThumbs()) {
       const thumb = runtime.mediaAux.get(c.mediaId)?.thumb;
-      if (thumb) inner += `<div class="thumbs" style="background-image:url('${thumb}')"></div>`;
+      if (thumb) body += `<div class="thumbs" style="background-image:url('${thumb}')"></div>`;
     }
     const hasWave = c.kind === "audio" && runtime.wavePeaks.get(c.mediaId) instanceof Float32Array;
-    if (hasWave) inner += `<canvas class="wave"></canvas>`;
-    const badge = (c.keyframes && Object.keys(c.keyframes).length ? "◆ " : "") +
-      (c.transitionIn || c.transitionOut ? "⇄ " : "");
-    inner += `<div class="fade"></div>
+    if (hasWave) body += `<canvas class="wave"></canvas>`;
+    const badge = c.keyframes && Object.keys(c.keyframes).length ? "◆ " : "";
+    body += `<div class="fade"></div>
       <div class="clip-label">${badge}${c.kind === "text" ? "T · " + (c.props.text || "").split("\n")[0]
-        : c.kind === "adjust" ? "FX · " + c.name : c.name}</div>
-      <div class="handle l"></div><div class="handle r"></div>`;
+        : c.kind === "adjust" ? "FX · " + c.name : c.name}</div>`;
+    let inner = `<div class="clip-body">${body}</div>`;
+    inner += transitionMarksHtml(c, tr.h);
+    inner += `<div class="handle l"></div><div class="handle r"></div>`;
     div.innerHTML = inner;
     if (hasWave) div.classList.add("has-wave");
     row.appendChild(div);
@@ -1260,6 +1348,18 @@ els.tracksContent.addEventListener("pointerdown", (e) => {
   }
   const c = getClip(clipDiv.dataset.id);
   if (!c) return;
+  const transHandle = e.target.closest(".trans-dur-handle");
+  if (transHandle) {
+    const wrap = transHandle.closest(".trans-mark");
+    startTransDurGesture(e, c, wrap?.classList.contains("out") ? "out" : "in");
+    return;
+  }
+  const transMark = e.target.closest(".trans-mark");
+  if (transMark) {
+    e.preventDefault();
+    selectClip(c.id, { transFocus: transMark.classList.contains("out") ? "out" : "in" });
+    return;
+  }
   const additive = e.ctrlKey || e.metaKey || e.shiftKey;
   if (additive) {
     selectClip(c.id, { toggle: true });
@@ -1277,6 +1377,46 @@ els.tracksContent.addEventListener("pointerdown", (e) => {
   // a plain click (no drag) on a multi-selection collapses it to that clip on release
   startClipGesture(e, c, mode, !additive && state.selIds.size > 1);
 });
+
+const MIN_TRANS_DUR = 0.1;
+function startTransDurGesture(e, c, side) {
+  e.preventDefault();
+  const key = side === "in" ? "transitionIn" : "transitionOut";
+  const tr = c[key];
+  if (!tr) return;
+  selectClip(c.id, { transFocus: side });
+  state.gesture = true;
+  const origDur = tr.duration;
+  const x0 = e.clientX;
+  let moved = false;
+  pushUndo();
+
+  const onMove = (ev) => {
+    const dx = ev.clientX - x0;
+    if (Math.abs(dx) < 2 && !moved) return;
+    moved = true;
+    const sign = side === "in" ? 1 : -1;
+    const dur = clamp(origDur + sign * dx / state.pps, MIN_TRANS_DUR, c.duration);
+    tr.duration = +dur.toFixed(3);
+    state.dirtyTimeline = true;
+    rebuildClips();
+    const durK = side === "in" ? "transInDur" : "transOutDur";
+    const inp = els.inspector.querySelector(`[data-k="${durK}"]`);
+    if (inp) inp.value = tr.duration;
+  };
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    state.gesture = false;
+    if (moved) {
+      scheduleSave();
+      saveLastTransition(side, c[key]);
+    }
+    renderInspector();
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
 
 function startClipGesture(e, c, mode, collapseOnClick) {
   e.preventDefault();
@@ -1628,11 +1768,14 @@ function setSelection(ids, primary) {
 function selectClip(id, opts) {
   if (opts && opts.toggle && id != null) {
     const s = new Set(state.selIds);
+    state.transFocus = null;
     if (s.has(id)) { s.delete(id); setSelection([...s]); }
     else { s.add(id); setSelection([...s], id); }
     return;
   }
-  if (state.selId === id && state.selIds.size <= 1) return;
+  const nextFocus = id == null ? null : (opts?.transFocus ?? null);
+  if (state.selId === id && state.selIds.size <= 1 && nextFocus === state.transFocus) return;
+  state.transFocus = nextFocus;
   setSelection(id == null ? [] : [id], id ?? null);
 }
 /* Drop selected ids whose clips no longer exist (undo/redo, external reload) */
@@ -1735,9 +1878,12 @@ function renderInspector(lite) {
       ${slider("speed", 0.25, 4, 0.05, p.speed, "×")}
     </div>`;
   }
-  const tsel = (label, key, tr) => row(label,
-    `<span class="insp-ctrls"><select data-k="${key}">${TRANSITIONS.map((x) => `<option ${x === (tr?.type || "none") ? "selected" : ""}>${x}</option>`).join("")}</select>
-     <input type="number" class="insp-dur" data-k="${key}Dur" step="0.1" min="0.1" value="${tr?.duration ?? 1}"></span>`);
+  const tsel = (label, key, tr) => {
+    const active = state.transFocus === (key === "transIn" ? "in" : "out");
+    return `<div class="insp-row${active ? " trans-active" : ""}"><label>${label}</label>
+      <span class="insp-ctrls"><select data-k="${key}">${TRANSITIONS.map((x) => `<option ${x === (tr?.type || "none") ? "selected" : ""}>${x}</option>`).join("")}</select>
+       <input type="number" class="insp-dur" data-k="${key}Dur" step="0.1" min="0.1" value="${tr?.duration ?? 1}"></span></div>`;
+  };
   html += `<div class="insp-section"><h3>Transition</h3>
     ${tsel("In", "transIn", c.transitionIn)}
     ${tsel("Out", "transOut", c.transitionOut)}
@@ -1801,13 +1947,20 @@ function renderInspector(lite) {
       else if (k === "duration") { c.duration = Math.max(MIN_DUR, +v || MIN_DUR); state.dirtyTimeline = true; }
       else if (k === "transIn" || k === "transOut") {
         const key = k === "transIn" ? "transitionIn" : "transitionOut";
-        const dur = Math.max(0.1, parseFloat(els.inspector.querySelector(`[data-k="${k}Dur"]`)?.value) || 1);
+        const side = k === "transIn" ? "in" : "out";
+        const dur = Math.max(MIN_TRANS_DUR, parseFloat(els.inspector.querySelector(`[data-k="${k}Dur"]`)?.value) || 1);
         c[key] = v === "none" ? undefined : { type: String(v), duration: dur };
+        if (c[key]) saveLastTransition(side, c[key]);
         state.dirtyTimeline = true;
       }
       else if (k === "transInDur" || k === "transOutDur") {
         const key = k === "transInDur" ? "transitionIn" : "transitionOut";
-        if (c[key]) c[key].duration = Math.max(0.1, +v || 1);
+        const side = k === "transInDur" ? "in" : "out";
+        if (c[key]) {
+          c[key].duration = Math.max(MIN_TRANS_DUR, +v || 1);
+          saveLastTransition(side, c[key]);
+          state.dirtyTimeline = true;
+        }
       }
       else { c.props[k] = v; if (k === "text") state.dirtyTimeline = true; }
       const valEl = els.inspector.querySelector(`[data-val="${k}"]`);
@@ -1870,6 +2023,11 @@ function renderInspector(lite) {
       scheduleSave(); renderInspector();
     });
   });
+  if (state.transFocus) {
+    const k = state.transFocus === "in" ? "transIn" : "transOut";
+    const row = els.inspector.querySelector(`[data-k="${k}"]`)?.closest(".insp-row");
+    row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
 }
 
 /* ═══════════════════════════ PLAYBACK ENGINE ═══════════════════════════ */
@@ -3190,7 +3348,9 @@ $("btnWorkAreaPlay").addEventListener("click", () => {
   state.workAreaPlay = !state.workAreaPlay;
   syncTrimIOButton();
 });
-$("btnDelete").addEventListener("click", deleteSelected);
+$("btnDelete").addEventListener("click", () => {
+  if (!clearFocusedTransition()) deleteSelected();
+});
 $("btnExport").addEventListener("click", openExportSetup);
 $("btnStartExport").addEventListener("click", startChosenExport);
 $("btnCancelSetup").addEventListener("click", () => els.exportSetup.classList.add("hidden"));
@@ -3254,10 +3414,20 @@ function updateSafeOverlay() {
 }
 
 window.addEventListener("keydown", (e) => {
-  if (isTypingTarget(document.activeElement)) return;
   const k = e.key;
+  if (k === "Delete" || k === "Backspace") {
+    if (!isTypingTarget(document.activeElement) && clearFocusedTransition()) {
+      e.preventDefault();
+      return;
+    }
+  }
+  if (isTypingTarget(document.activeElement)) return;
   if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
   else if (k === "s" || k === "S") splitAtPlayhead();
+  else if (e.altKey && !e.ctrlKey && !e.metaKey && (k === "t" || k === "T")) {
+    e.preventDefault();
+    addTransitionAtPlayhead();
+  }
   else if ((k === "t" || k === "T") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
     e.shiftKey ? trimToWorkArea() : splitAtWorkArea();
