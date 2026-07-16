@@ -878,6 +878,20 @@ function deleteSelected() {
   setSelection([]);
   scheduleSave(); renderInspector();
 }
+function clearFocusedTransition() {
+  if (!state.transFocus || !state.selId) return false;
+  const c = getClip(state.selId);
+  if (!c) return false;
+  const key = state.transFocus === "in" ? "transitionIn" : "transitionOut";
+  if (!c[key]) return false;
+  pushUndo();
+  c[key] = undefined;
+  state.transFocus = null;
+  state.dirtyTimeline = true;
+  scheduleSave();
+  renderInspector();
+  return true;
+}
 function splitAtPlayhead() {
   const t = state.time;
   let targets = state.selIds.size ? selectedClips() : project.clips;
@@ -1971,7 +1985,6 @@ function renderInspector(lite) {
     const k = state.transFocus === "in" ? "transIn" : "transOut";
     const row = els.inspector.querySelector(`[data-k="${k}"]`)?.closest(".insp-row");
     row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    requestAnimationFrame(() => els.inspector.querySelector(`[data-k="${k}"]`)?.focus());
   }
 }
 
@@ -3293,7 +3306,9 @@ $("btnWorkAreaPlay").addEventListener("click", () => {
   state.workAreaPlay = !state.workAreaPlay;
   syncTrimIOButton();
 });
-$("btnDelete").addEventListener("click", deleteSelected);
+$("btnDelete").addEventListener("click", () => {
+  if (!clearFocusedTransition()) deleteSelected();
+});
 $("btnExport").addEventListener("click", openExportSetup);
 $("btnStartExport").addEventListener("click", startChosenExport);
 $("btnCancelSetup").addEventListener("click", () => els.exportSetup.classList.add("hidden"));
@@ -3357,8 +3372,14 @@ function updateSafeOverlay() {
 }
 
 window.addEventListener("keydown", (e) => {
-  if (isTypingTarget(document.activeElement)) return;
   const k = e.key;
+  if (k === "Delete" || k === "Backspace") {
+    if (clearFocusedTransition()) {
+      e.preventDefault();
+      return;
+    }
+  }
+  if (isTypingTarget(document.activeElement)) return;
   if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
   else if (k === "s" || k === "S") splitAtPlayhead();
   else if ((k === "t" || k === "T") && !e.ctrlKey && !e.metaKey && !e.altKey) {
