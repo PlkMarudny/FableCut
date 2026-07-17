@@ -3640,7 +3640,7 @@ window.addEventListener("keydown", (e) => {
   else if (k === "s" || k === "S") splitAtPlayhead();
   else if ((k === "g" || k === "G") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
-    e.shiftKey ? goToNextGap() : closeGapAtPlayhead();
+    e.shiftKey ? closeGapAtPlayhead() : goToNextGap();
   }
   else if (e.altKey && !e.ctrlKey && !e.metaKey && (k === "t" || k === "T")) {
     e.preventDefault();
