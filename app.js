@@ -880,6 +880,54 @@ function deleteSelected() {
   setSelection([]);
   scheduleSave(); renderInspector();
 }
+/* Gap under playhead on one track, or null if a clip covers t.
+   Empty track → [0, +Infinity]. Trailing void → gapEnd = +Infinity. */
+const GAP_EPS = 1e-4;
+function gapAtPlayhead(trackId, t) {
+  const clips = project.clips.filter((c) => c.track === trackId).sort((a, b) => a.start - b.start);
+  for (const c of clips) {
+    if (c.start <= t && t < clipEnd(c)) return null;
+  }
+  let gapStart = 0;
+  for (const c of clips) {
+    if (clipEnd(c) <= t) gapStart = Math.max(gapStart, clipEnd(c));
+  }
+  let gapEnd = Infinity;
+  for (const c of clips) {
+    if (c.start > t) gapEnd = Math.min(gapEnd, c.start);
+  }
+  return { gapStart, gapEnd };
+}
+/* Sync-safe close: every enabled track must have a gap at the playhead; close
+   the intersection of those gaps by shifting later clips on all enabled tracks. */
+function closeGapAtPlayhead() {
+  const t = state.time;
+  const enabled = TRACKS.filter((tr) => isTrackEnabled(tr.id));
+  if (!enabled.length) { toast("No enabled tracks"); return; }
+  let L = 0, R = Infinity;
+  for (const tr of enabled) {
+    const g = gapAtPlayhead(tr.id, t);
+    if (!g) {
+      toast(`No gap on ${tr.id} — disable the track or move the playhead`);
+      return;
+    }
+    L = Math.max(L, g.gapStart);
+    R = Math.min(R, g.gapEnd);
+  }
+  const G = R - L;
+  if (!isFinite(R) || G <= GAP_EPS) {
+    toast("Nothing to close at playhead");
+    return;
+  }
+  const movers = project.clips.filter((c) => isTrackEnabled(c.track) && c.start >= R - GAP_EPS);
+  if (!movers.length) { toast("Nothing to close at playhead"); return; }
+  pushUndo();
+  for (const c of movers) c.start = Math.max(0, c.start - G);
+  state.dirtyTimeline = true;
+  scheduleSave();
+  const label = G >= 1 ? G.toFixed(2) : G.toFixed(3);
+  toast(`Closed ${label}s gap`);
+}
 function clearFocusedTransition() {
   if (!state.transFocus || !state.selId) return false;
   const c = getClip(state.selId);
@@ -3439,6 +3487,7 @@ els.fileInput.addEventListener("change", () => { importFiles(els.fileInput.files
 $("btnTitle").addEventListener("click", addTitle);
 $("btnAdjust").addEventListener("click", addAdjust);
 $("btnSplit").addEventListener("click", splitAtPlayhead);
+$("btnCloseGap").addEventListener("click", closeGapAtPlayhead);
 $("btnTrimIO").addEventListener("click", trimToWorkArea);
 $("btnWorkAreaPlay").addEventListener("click", () => {
   state.workAreaPlay = !state.workAreaPlay;
@@ -3520,6 +3569,10 @@ window.addEventListener("keydown", (e) => {
   if (isTypingTarget(document.activeElement)) return;
   if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
   else if (k === "s" || k === "S") splitAtPlayhead();
+  else if ((k === "g" || k === "G") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    closeGapAtPlayhead();
+  }
   else if (e.altKey && !e.ctrlKey && !e.metaKey && (k === "t" || k === "T")) {
     e.preventDefault();
     addTransitionAtPlayhead();
