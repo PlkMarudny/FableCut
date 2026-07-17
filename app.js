@@ -881,6 +881,54 @@ function deleteSelected() {
   setSelection([]);
   scheduleSave(); renderInspector();
 }
+/* Gap under playhead on one track, or null if a clip covers t.
+   Empty track → [0, +Infinity]. Trailing void → gapEnd = +Infinity. */
+const GAP_EPS = 1e-4;
+function gapAtPlayhead(trackId, t) {
+  const clips = project.clips.filter((c) => c.track === trackId).sort((a, b) => a.start - b.start);
+  for (const c of clips) {
+    if (c.start <= t && t < clipEnd(c)) return null;
+  }
+  let gapStart = 0;
+  for (const c of clips) {
+    if (clipEnd(c) <= t) gapStart = Math.max(gapStart, clipEnd(c));
+  }
+  let gapEnd = Infinity;
+  for (const c of clips) {
+    if (c.start > t) gapEnd = Math.min(gapEnd, c.start);
+  }
+  return { gapStart, gapEnd };
+}
+/* Sync-safe close: every enabled track must have a gap at the playhead; close
+   the intersection of those gaps by shifting later clips on all enabled tracks. */
+function closeGapAtPlayhead() {
+  const t = state.time;
+  const enabled = TRACKS.filter((tr) => isTrackEnabled(tr.id));
+  if (!enabled.length) { toast("No enabled tracks"); return; }
+  let L = 0, R = Infinity;
+  for (const tr of enabled) {
+    const g = gapAtPlayhead(tr.id, t);
+    if (!g) {
+      toast(`No gap on ${tr.id} — disable the track or move the playhead`);
+      return;
+    }
+    L = Math.max(L, g.gapStart);
+    R = Math.min(R, g.gapEnd);
+  }
+  const G = R - L;
+  if (!isFinite(R) || G <= GAP_EPS) {
+    toast("Nothing to close at playhead");
+    return;
+  }
+  const movers = project.clips.filter((c) => isTrackEnabled(c.track) && c.start >= R - GAP_EPS);
+  if (!movers.length) { toast("Nothing to close at playhead"); return; }
+  pushUndo();
+  for (const c of movers) c.start = Math.max(0, c.start - G);
+  state.dirtyTimeline = true;
+  scheduleSave();
+  const label = G >= 1 ? G.toFixed(2) : G.toFixed(3);
+  toast(`Closed ${label}s gap`);
+}
 function clearFocusedTransition() {
   if (!state.transFocus || !state.selId) return false;
   const c = getClip(state.selId);
@@ -929,6 +977,74 @@ function addTransitionAtPlayhead() {
   state.dirtyTimeline = true;
   selectClip(c.id, { transFocus: side });
   scheduleSave();
+}
+/* Search window: IN–OUT when both markers are set, else the full project span. */
+function gapSearchRange() {
+  if (project.inPoint != null && project.outPoint != null) {
+    return { t0: project.inPoint, t1: project.outPoint };
+  }
+  return { t0: 0, t1: Math.max(projDur(), 0) };
+}
+/* Aligned gaps on enabled tracks inside [t0, t1] — same notion as closeGapAtPlayhead. */
+function listAlignedGaps(t0, t1) {
+  const enabled = TRACKS.filter((tr) => isTrackEnabled(tr.id));
+  if (!enabled.length || t1 - t0 <= GAP_EPS) return [];
+  const edges = new Set([t0, t1]);
+  for (const c of project.clips) {
+    if (!isTrackEnabled(c.track)) continue;
+    const s = c.start, e = clipEnd(c);
+    if (s > t0 && s < t1) edges.add(s);
+    if (e > t0 && e < t1) edges.add(e);
+  }
+  const ts = [...edges].sort((a, b) => a - b);
+  const gaps = [];
+  const seen = new Set();
+  for (let i = 0; i < ts.length - 1; i++) {
+    const a = ts[i], b = ts[i + 1];
+    if (b - a <= GAP_EPS) continue;
+    const mid = (a + b) / 2;
+    let L = -Infinity, R = Infinity;
+    let ok = true;
+    for (const tr of enabled) {
+      const g = gapAtPlayhead(tr.id, mid);
+      if (!g) { ok = false; break; }
+      L = Math.max(L, g.gapStart);
+      R = Math.min(R, g.gapEnd);
+    }
+    if (!ok) continue;
+    L = Math.max(L, t0);
+    R = Math.min(isFinite(R) ? R : t1, t1);
+    if (R - L <= GAP_EPS) continue;
+    const key = L.toFixed(5) + ":" + R.toFixed(5);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    gaps.push({ L, R });
+  }
+  gaps.sort((a, b) => a.L - b.L);
+  return gaps;
+}
+function ensurePlayheadVisible() {
+  const px = state.time * state.pps, sc = els.timelineScroll;
+  if (!sc) return;
+  if (px < sc.scrollLeft || px > sc.scrollLeft + sc.clientWidth - 40) {
+    sc.scrollLeft = Math.max(0, px - sc.clientWidth / 3);
+  }
+}
+/* Jump playhead to the middle of the next aligned gap (wraps). */
+function goToNextGap() {
+  const { t0, t1 } = gapSearchRange();
+  if (t1 - t0 <= GAP_EPS) { toast("No gaps found"); return; }
+  const gaps = listAlignedGaps(t0, t1);
+  if (!gaps.length) {
+    toast(project.inPoint != null && project.outPoint != null
+      ? "No gaps in IN/OUT range" : "No gaps found");
+    return;
+  }
+  const t = state.time;
+  let g = gaps.find((x) => (x.L + x.R) / 2 > t + GAP_EPS);
+  if (!g) g = gaps[0];
+  setTime((g.L + g.R) / 2);
+  ensurePlayheadVisible();
 }
 function splitAtPlayhead() {
   const t = state.time;
@@ -3440,6 +3556,8 @@ els.fileInput.addEventListener("change", () => { importFiles(els.fileInput.files
 $("btnTitle").addEventListener("click", addTitle);
 $("btnAdjust").addEventListener("click", addAdjust);
 $("btnSplit").addEventListener("click", splitAtPlayhead);
+$("btnCloseGap").addEventListener("click", closeGapAtPlayhead);
+$("btnNextGap").addEventListener("click", goToNextGap);
 $("btnTrimIO").addEventListener("click", trimToWorkArea);
 $("btnWorkAreaPlay").addEventListener("click", () => {
   state.workAreaPlay = !state.workAreaPlay;
@@ -3521,6 +3639,10 @@ window.addEventListener("keydown", (e) => {
   if (isTypingTarget(document.activeElement)) return;
   if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
   else if (k === "s" || k === "S") splitAtPlayhead();
+  else if ((k === "g" || k === "G") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    e.shiftKey ? closeGapAtPlayhead() : goToNextGap();
+  }
   else if (e.altKey && !e.ctrlKey && !e.metaKey && (k === "t" || k === "T")) {
     e.preventDefault();
     addTransitionAtPlayhead();
