@@ -2237,6 +2237,12 @@ function syncMedia() {
       if (!el.paused) el.pause();
       const g = runtime.clipGain.get(c.id);
       if (g) g.gain.value = 0;
+      // Paused preview: keep decode head on the frame under the playhead.
+      // Needed when clips move/trim without setTime (drag does not scrub time).
+      if (!state.playing && enabled && c.kind === "video" && activeAt(c, t) &&
+          Math.abs(el.currentTime - mt) > 0.04) {
+        try { el.currentTime = mt; } catch {}
+      }
     }
   }
 }
