@@ -561,17 +561,39 @@ body.track-size-s .clip.selected {
   background: #000;
 }
 
-/* ── Master VU (segmented RMS) ── */
+/* ── Per-track VU (RMS / LUFS / Peak) ── */
 .vu-meter {
   position: absolute;
   right: 10px;
   bottom: 10px;
   display: flex;
-  gap: 5px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
   z-index: 4;
-  pointer-events: none;
-  padding: 6px 5px 4px;
+  pointer-events: auto;
+  padding: 5px 5px 4px;
   background: #000a;
+  user-select: none;
+}
+.vu-mode {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 2px 0 2px;
+  border: 0;
+  background: transparent;
+  color: #c8c8d0;
+  font: 700 9px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: .6px;
+  text-align: center;
+  cursor: pointer;
+  opacity: .85;
+}
+.vu-mode:hover { opacity: 1; color: #fff; }
+.vu-channels {
+  display: flex;
+  gap: 4px;
 }
 .vu-channel {
   display: flex;

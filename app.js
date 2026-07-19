@@ -1654,7 +1654,10 @@ function startClipGesture(e, c, mode, collapseOnClick) {
       const tk = trackAtEvent(ev);
       if (tk) {
         const trk = TRACKS.find((t) => t.id === tk);
-        if (trk && (c.kind === "audio") === (trk.kind === "audio")) c.track = tk;
+        if (trk && (c.kind === "audio") === (trk.kind === "audio")) {
+          c.track = tk;
+          routeClipGain(c);
+        }
       }
     } else if (mode === "trim-l") {
       let ns = snapTime(orig.start + dt, groupIds);
@@ -2287,11 +2290,22 @@ function ensureAudio() {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const master = ctx.createGain();
   const recDest = ctx.createMediaStreamDestination();
-  // Meter is inserted as a pass-through once the worklet loads; until then
-  // master goes straight to the speakers.
+  const audioTracks = TRACKS.filter((t) => t.kind === "audio");
+  const trackBus = {};
+  for (const t of audioTracks) {
+    trackBus[t.id] = ctx.createGain();
+  }
+  // Until the worklet is ready, audio-track buses and master both feed speakers.
   master.connect(ctx.destination);
   master.connect(recDest);
-  runtime.audio = { ctx, master, recDest, meter: null, meterReady: false };
+  for (const id of Object.keys(trackBus)) {
+    trackBus[id].connect(master);
+  }
+  runtime.audio = {
+    ctx, master, recDest, trackBus,
+    audioTrackIds: audioTracks.map((t) => t.id),
+    meter: null, meterReady: false,
+  };
   installMeterWorklet(runtime.audio).catch(() => {});
   for (const [id, el] of runtime.clipEls) {
     const c = getClip(id);
@@ -2305,51 +2319,113 @@ function hookAudio(c, el) {
   try {
     const src = runtime.audio.ctx.createMediaElementSource(el);
     const g = runtime.audio.ctx.createGain();
-    src.connect(g); g.connect(runtime.audio.master);
+    src.connect(g);
     runtime.clipGain.set(c.id, g);
-  } catch { }
+    routeClipGain(c);
+  } catch {}
+}
+/** Reconnect a clip's gain to the correct track bus (or master for video tracks). */
+function routeClipGain(c) {
+  const g = runtime.clipGain.get(c.id);
+  if (!g || !runtime.audio) return;
+  const bus = runtime.audio.trackBus[c.track] || runtime.audio.master;
+  if (g._fcBus === bus) return;
+  try { g.disconnect(); } catch {}
+  g.connect(bus);
+  g._fcBus = bus;
 }
 
-/* ── Master RMS meter (AudioWorklet) ── */
+/* ── Per-track meters: RMS / LUFS-M / Peak (AudioWorklet) ── */
 const METER_SEGS = 16;
 const METER_DB_MIN = -48;
 const METER_DB_MAX = 0;
+const METER_MODES = ["rms", "lufs", "peak"];
+const METER_MODE_LABEL = { rms: "RMS", lufs: "LUFS", peak: "PEAK" };
 const meterState = {
-  rms: [0, 0],       // raw from worklet
-  peak: [0, 0],
-  disp: [METER_DB_MIN, METER_DB_MIN], // ballistics (dBFS)
-  peakHold: [METER_DB_MIN, METER_DB_MIN],
-  peakHoldT: [0, 0],
-  segs: [[], []],
+  mode: (() => {
+    try {
+      const m = localStorage.getItem("fablecut-meter-mode");
+      return METER_MODES.includes(m) ? m : "rms";
+    } catch { return "rms"; }
+  })(),
+  trackIds: [],
+  rms: {},
+  peak: {},
+  lufs: {},
+  disp: {},
+  peakHold: {},
+  peakHoldT: {},
+  segs: {},
+  modeBtn: null,
 };
+function audioMeterTracks() {
+  return TRACKS.filter((t) => t.kind === "audio");
+}
+function cycleMeterMode(ev) {
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+  const i = METER_MODES.indexOf(meterState.mode);
+  meterState.mode = METER_MODES[(i + 1) % METER_MODES.length];
+  try { localStorage.setItem("fablecut-meter-mode", meterState.mode); } catch {}
+  if (meterState.modeBtn) meterState.modeBtn.textContent = METER_MODE_LABEL[meterState.mode];
+  const root = $("vuMeter");
+  if (root) root.title = `Mode: ${METER_MODE_LABEL[meterState.mode]} — click to switch`;
+  // Reset ballistics so the bar doesn't linger from the previous scale reading
+  for (const id of meterState.trackIds) {
+    meterState.disp[id] = METER_DB_MIN;
+    meterState.peakHold[id] = METER_DB_MIN;
+    meterState.peakHoldT[id] = 0;
+  }
+}
 async function installMeterWorklet(audio) {
   if (audio.meterReady || !audio.ctx.audioWorklet || meterState._loading) return;
   meterState._loading = true;
+  const trackIds = audio.audioTrackIds.slice();
   try {
-    await audio.ctx.audioWorklet.addModule("meter-worklet.js");
+    await audio.ctx.audioWorklet.addModule("meter-worklet.js?v=2");
+    const n = trackIds.length;
     const meter = new AudioWorkletNode(audio.ctx, "fablecut-meter", {
-      numberOfInputs: 1,
+      numberOfInputs: n,
       numberOfOutputs: 1,
       outputChannelCount: [2],
       channelCount: 2,
       channelCountMode: "explicit",
-      processorOptions: { hopBlocks: 8 },
+      processorOptions: { hopBlocks: 8, nTracks: n, trackIds },
     });
     meter.port.onmessage = (ev) => {
       const msg = ev.data;
       if (!msg || msg.type !== "meter") return;
-      meterState.rms[0] = msg.rms[0] || 0;
-      meterState.rms[1] = msg.rms[1] != null ? msg.rms[1] : meterState.rms[0];
-      meterState.peak[0] = msg.peak[0] || 0;
-      meterState.peak[1] = msg.peak[1] != null ? msg.peak[1] : meterState.peak[0];
-      // msg.lufs reserved for momentary/short-term LUFS
+      const ids = msg.trackIds || trackIds;
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        meterState.rms[id] = msg.rms[i] || 0;
+        meterState.peak[id] = msg.peak[i] || 0;
+        meterState.lufs[id] = msg.lufs[i] != null ? msg.lufs[i] : -70;
+      }
     };
-    // Insert: master → meter → destination (pass-through); recDest stays on master
+
+    // Reroute: trackBus → meter inputs → speakers/rec (no double via master)
+    for (const id of trackIds) {
+      const bus = audio.trackBus[id];
+      try { bus.disconnect(); } catch {}
+      bus.connect(meter, 0, trackIds.indexOf(id));
+    }
+    // master still carries video-track embedded audio (recDest already wired)
     try { audio.master.disconnect(audio.ctx.destination); } catch {}
-    audio.master.connect(meter);
+    audio.master.connect(audio.ctx.destination);
     meter.connect(audio.ctx.destination);
+    meter.connect(audio.recDest);
+
     audio.meter = meter;
     audio.meterReady = true;
+    meterState.trackIds = trackIds;
+    for (const id of trackIds) {
+      meterState.rms[id] = 0;
+      meterState.peak[id] = 0;
+      meterState.lufs[id] = -70;
+      meterState.disp[id] = METER_DB_MIN;
+      meterState.peakHold[id] = METER_DB_MIN;
+      meterState.peakHoldT[id] = 0;
+    }
     buildMeterDOM();
   } catch (err) {
     console.warn("[FableCut] meter worklet unavailable:", err);
@@ -2359,52 +2435,100 @@ async function installMeterWorklet(audio) {
 }
 function buildMeterDOM() {
   const root = $("vuMeter");
-  if (!root || meterState.segs[0].length) return;
-  for (const ch of [0, 1]) {
-    const host = root.querySelector(`.vu-channel[data-ch="${ch}"] .vu-segs`);
-    if (!host) continue;
-    host.innerHTML = "";
-    meterState.segs[ch] = [];
+  if (!root) return;
+  const tracks = audioMeterTracks();
+  root.innerHTML = "";
+  root.title = `Mode: ${METER_MODE_LABEL[meterState.mode]} — click to switch`;
+
+  const modeBtn = document.createElement("button");
+  modeBtn.type = "button";
+  modeBtn.className = "vu-mode";
+  modeBtn.textContent = METER_MODE_LABEL[meterState.mode];
+  modeBtn.title = "Cycle RMS → LUFS → Peak";
+  modeBtn.addEventListener("click", cycleMeterMode);
+  root.appendChild(modeBtn);
+  meterState.modeBtn = modeBtn;
+
+  const row = document.createElement("div");
+  row.className = "vu-channels";
+  meterState.segs = {};
+  meterState.trackIds = tracks.map((t) => t.id);
+  for (const t of tracks) {
+    if (meterState.disp[t.id] == null) {
+      meterState.disp[t.id] = METER_DB_MIN;
+      meterState.peakHold[t.id] = METER_DB_MIN;
+      meterState.peakHoldT[t.id] = 0;
+      meterState.rms[t.id] = 0;
+      meterState.peak[t.id] = 0;
+      meterState.lufs[t.id] = -70;
+    }
+    const col = document.createElement("div");
+    col.className = "vu-channel";
+    col.dataset.track = t.id;
+    const segs = document.createElement("div");
+    segs.className = "vu-segs";
+    meterState.segs[t.id] = [];
     for (let i = 0; i < METER_SEGS; i++) {
       const seg = document.createElement("div");
-      const t = i / (METER_SEGS - 1); // 0 = bottom (quiet), 1 = top (hot)
-      seg.className = "vu-seg " + (t < 0.6 ? "g" : t < 0.85 ? "y" : "r");
-      host.appendChild(seg);
-      meterState.segs[ch].push(seg);
+      const u = i / (METER_SEGS - 1);
+      seg.className = "vu-seg " + (u < 0.6 ? "g" : u < 0.85 ? "y" : "r");
+      segs.appendChild(seg);
+      meterState.segs[t.id].push(seg);
     }
+    const label = document.createElement("span");
+    label.className = "vu-label";
+    label.textContent = t.id;
+    col.appendChild(segs);
+    col.appendChild(label);
+    row.appendChild(col);
   }
+  root.appendChild(row);
 }
 function rmsToDb(rms) {
   return rms > 1e-8 ? 20 * Math.log10(rms) : METER_DB_MIN;
 }
+function meterReadingDb(id) {
+  const mode = meterState.mode;
+  if (mode === "peak") return rmsToDb(meterState.peak[id] || 0);
+  if (mode === "lufs") {
+    const v = meterState.lufs[id];
+    return v == null || v < METER_DB_MIN ? METER_DB_MIN : Math.min(METER_DB_MAX, v);
+  }
+  return rmsToDb(meterState.rms[id] || 0);
+}
 function updateMeterUI(dt) {
-  if (!runtime.audio?.meterReady) return;
-  const playing = state.playing;
-  const attack = 1 - Math.exp(-dt / 0.015);   // ~15 ms
-  const release = 1 - Math.exp(-dt / 0.180);  // ~180 ms
+  const ids = meterState.trackIds;
+  if (!ids.length) return;
+  const playing = state.playing && runtime.audio?.meterReady;
+  const mode = meterState.mode;
+  // Peak: snappy; LUFS already smoothed in-worklet (400 ms); RMS: classic VU feel
+  const atkMs = mode === "peak" ? 0.005 : mode === "lufs" ? 0.04 : 0.015;
+  const relMs = mode === "peak" ? 0.35 : mode === "lufs" ? 0.12 : 0.18;
+  const attack = 1 - Math.exp(-dt / atkMs);
+  const release = 1 - Math.exp(-dt / relMs);
   const now = performance.now();
-  for (let ch = 0; ch < 2; ch++) {
-    const target = playing ? rmsToDb(meterState.rms[ch]) : METER_DB_MIN;
-    const cur = meterState.disp[ch];
+  for (const id of ids) {
+    const target = playing ? meterReadingDb(id) : METER_DB_MIN;
+    const cur = meterState.disp[id] ?? METER_DB_MIN;
     const a = target > cur ? attack : release;
     const next = cur + (target - cur) * a;
-    meterState.disp[ch] = next;
+    meterState.disp[id] = next;
 
-    // Peak hold from worklet sample peaks (visual tip)
-    const pk = playing ? rmsToDb(meterState.peak[ch]) : METER_DB_MIN;
-    if (pk >= meterState.peakHold[ch]) {
-      meterState.peakHold[ch] = pk;
-      meterState.peakHoldT[ch] = now;
-    } else if (now - meterState.peakHoldT[ch] > 800) {
-      meterState.peakHold[ch] += (METER_DB_MIN - meterState.peakHold[ch]) * release;
+    // Hold tip follows the active mode reading (not always sample-peak)
+    const pk = target;
+    if (pk >= (meterState.peakHold[id] ?? METER_DB_MIN)) {
+      meterState.peakHold[id] = pk;
+      meterState.peakHoldT[id] = now;
+    } else if (now - (meterState.peakHoldT[id] || 0) > 800) {
+      meterState.peakHold[id] += (METER_DB_MIN - meterState.peakHold[id]) * release;
     }
 
-    const segs = meterState.segs[ch];
-    if (!segs.length) continue;
+    const segs = meterState.segs[id];
+    if (!segs || !segs.length) continue;
     const level = (next - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN);
     const lit = Math.round(clamp(level, 0, 1) * METER_SEGS);
     const hold = Math.round(clamp(
-      (meterState.peakHold[ch] - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN), 0, 1
+      ((meterState.peakHold[id] ?? METER_DB_MIN) - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN), 0, 1
     ) * (METER_SEGS - 1));
     for (let i = 0; i < METER_SEGS; i++) {
       segs[i].classList.toggle("on", i < lit || i === hold);
