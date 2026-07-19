@@ -2208,10 +2208,12 @@ function play() {
   }
   state.playing = true;
   els.btnPlay.textContent = "⏸";
+  els.btnPlay.classList.add("on");
 }
 function pause() {
   state.playing = false;
   els.btnPlay.textContent = "▶";
+  els.btnPlay.classList.remove("on");
   for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
   if (state.exporting) finishExport(false);
 }
@@ -3546,6 +3548,7 @@ async function startExport() {
   recorder.start(250);
   state.playing = true;
   els.btnPlay.textContent = "⏸";
+  els.btnPlay.classList.add("on");
 }
 function finishExport(keep) {
   if (!state.exporting) return;
@@ -3554,6 +3557,7 @@ function finishExport(keep) {
   recDiscard = !keep;
   state.playing = false;
   els.btnPlay.textContent = "▶";
+  els.btnPlay.classList.remove("on");
   for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
   if (recorder && recorder.state !== "inactive") recorder.stop();
   else els.exportOverlay.classList.add("hidden");
