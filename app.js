@@ -160,6 +160,7 @@ const state = {
   binTab: "project",     // project | elements | sfx | svg
   disabledTracks: loadDisabledTracks(),
   transFocus: null,      // "in" | "out" — inspector transition row highlighted
+  kfGraphs: new Set(),   // animatable prop keys with open monitor graphs
 };
 function saveDisabledTracks() {
   try { localStorage.setItem(DISABLED_TRACKS_KEY, JSON.stringify([...state.disabledTracks])); } catch {}
@@ -213,7 +214,7 @@ const els = {
   exportTitle: $("exportTitle"), exportNote: $("exportNote"),
   projectName: $("projectName"), monitorRes: $("monitorRes"),
   aspectSel: $("aspectSel"), btnGuides: $("btnGuides"), safeOverlay: $("safeOverlay"),
-  monitorStage: $("monitorStage"),
+  monitorStage: $("monitorStage"), kfGraphs: $("kfGraphs"),
   exportSetup: $("exportSetup"), engineFast: $("engineFast"), engineRealtime: $("engineRealtime"),
 };
 const ctx2d = els.preview.getContext("2d");
@@ -1907,6 +1908,7 @@ function renderInspector(lite) {
   const c = getClip(state.selId);
   if (!c) {
     els.inspector.innerHTML = `<div class="inspector-empty">Select a clip to edit its<br>transform, effects &amp; audio.</div>`;
+    renderKfGraphsPanel();
     return;
   }
   if (lite) { // during gestures, just refresh timing numbers if present
@@ -1919,7 +1921,14 @@ function renderInspector(lite) {
   const kfCount = (k) => (c.keyframes && c.keyframes[k] ? c.keyframes[k].length : 0);
   const kfCtl = (k) => !ANIMATABLE.includes(k) ? "" :
     `<span class="kf-ctl"><button class="kf-btn${kfCount(k) ? " has" : ""}" data-kf="${k}" title="Set keyframe at playhead">◆${kfCount(k) || ""}</button>${kfCount(k) ? `<button class="kf-btn" data-kfclear="${k}" title="Clear keyframes">✕</button>` : ""}</span>`;
-  const row = (label, inner, k = "") => `<div class="insp-row"><label>${label}</label>${inner}${k ? kfCtl(k) : ""}</div>`;
+  const propLabel = (label, k = "") => {
+    if (!k || !ANIMATABLE.includes(k)) return `<label>${label}</label>`;
+    const on = state.kfGraphs.has(k) ? " on" : "";
+    const has = kfCount(k) ? " has-kf" : "";
+    return `<label class="kf-graph-toggle${on}${has}" data-kfgraph="${k}" title="Show / hide keyframe graph">${label}</label>`;
+  };
+  const row = (label, inner, k = "") =>
+    `<div class="insp-row">${propLabel(label, k)}${inner}${k ? kfCtl(k) : ""}</div>`;
   const slider = (k, min, max, step, val, unit = "") =>
     row(k[0].toUpperCase() + k.slice(1),
       `<input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${val}">
@@ -2147,6 +2156,178 @@ function renderInspector(lite) {
     const k = state.transFocus === "in" ? "transIn" : "transOut";
     const row = els.inspector.querySelector(`[data-k="${k}"]`)?.closest(".insp-row");
     row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  els.inspector.querySelectorAll("[data-kfgraph]").forEach((lab) => {
+    lab.addEventListener("click", (e) => {
+      e.preventDefault();
+      toggleKfGraph(lab.dataset.kfgraph);
+    });
+  });
+  renderKfGraphsPanel();
+}
+
+/* ── Keyframe graphs (program-monitor left gutter) ── */
+const KF_GRAPH_LABEL = {
+  x: "Pos X", y: "Pos Y", scale: "Scale", rotation: "Rotation", opacity: "Opacity",
+  volume: "Volume", speed: "Speed", brightness: "Bright", contrast: "Contrast",
+  saturation: "Sat", hue: "Hue", blur: "Blur", grayscale: "Gray", sepia: "Sepia",
+  invert: "Invert", temperature: "Temp", tint: "Tint", vignette: "Vignette",
+  cornerRadius: "Radius", shake: "Shake", rgbSplit: "RGB", grain: "Grain",
+  fontSize: "Size", letterSpacing: "Track", glow: "Glow",
+};
+function toggleKfGraph(key) {
+  if (!ANIMATABLE.includes(key)) return;
+  if (state.kfGraphs.has(key)) state.kfGraphs.delete(key);
+  else state.kfGraphs.add(key);
+  renderInspector(); // refresh label .on state + panel
+}
+function renderKfGraphsPanel() {
+  const root = els.kfGraphs;
+  if (!root) return;
+  const c = getClip(state.selId);
+  const keys = [...state.kfGraphs].filter((k) => ANIMATABLE.includes(k));
+  if (!c || !keys.length) {
+    root.innerHTML = "";
+    root.hidden = true;
+    return;
+  }
+  root.hidden = false;
+  root.innerHTML = keys.map((k) => {
+    const label = KF_GRAPH_LABEL[k] || k;
+    return `<div class="kf-graph" data-kfgraph-card="${k}">
+      <div class="kf-graph-head"><span>${label}</span>
+        <button type="button" data-kfgraph-close="${k}" title="Close graph">✕</button></div>
+      <canvas width="160" height="52"></canvas>
+    </div>`;
+  }).join("");
+  root.querySelectorAll("[data-kfgraph-close]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.kfGraphs.delete(btn.dataset.kfgraphClose);
+      renderInspector();
+    });
+  });
+  root.querySelectorAll(".kf-graph canvas").forEach((cv) => {
+    const key = cv.closest("[data-kfgraph-card]")?.dataset.kfgraphCard;
+    cv.addEventListener("pointerdown", (e) => seekKfGraph(e, cv, key));
+  });
+  updateKfGraphs();
+}
+function seekKfGraph(e, cv, key) {
+  const c = getClip(state.selId);
+  if (!c || !key) return;
+  const { t0, t1 } = kfGraphRange(c, key);
+  const rect = cv.getBoundingClientRect();
+  const u = clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+  setTime(c.start + t0 + u * Math.max(1e-6, t1 - t0));
+  updateKfGraphs();
+}
+/* Value + time window for a graph. When keyframes exist, zoom X to their span
+   (with padding) instead of the full clip duration. */
+function kfGraphRange(c, key) {
+  const fallback = +(c.props?.[key] ?? DEFAULT_PROPS[key] ?? 0);
+  const dur = Math.max(MIN_DUR, c.duration);
+  const kfs = Array.isArray(c.keyframes?.[key]) ? c.keyframes[key] : [];
+  const vals = kfs.length ? kfs.map((kf) => +kf.v) : [fallback];
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (!isFinite(lo) || !isFinite(hi)) { lo = 0; hi = 1; }
+  if (Math.abs(hi - lo) < 1e-6) {
+    const pad = Math.max(0.05, Math.abs(lo) * 0.1 || 0.5);
+    lo -= pad; hi += pad;
+  } else {
+    const pad = (hi - lo) * 0.12;
+    lo -= pad; hi += pad;
+  }
+
+  let t0 = 0, t1 = dur;
+  if (kfs.length === 1) {
+    const t = clamp(+kfs[0].t || 0, 0, dur);
+    const half = Math.max(0.15, dur * 0.08);
+    t0 = Math.max(0, t - half);
+    t1 = Math.min(dur, t + half);
+  } else if (kfs.length >= 2) {
+    const ts = kfs.map((kf) => +kf.t || 0);
+    const a = Math.min(...ts), b = Math.max(...ts);
+    const pad = Math.max(0.05, (b - a) * 0.1, dur * 0.02);
+    t0 = Math.max(0, a - pad);
+    t1 = Math.min(dur, b + pad);
+  }
+  if (t1 - t0 < 1e-3) { t0 = 0; t1 = dur; }
+  return { lo, hi, fallback, t0, t1, dur };
+}
+function updateKfGraphs() {
+  const root = els.kfGraphs;
+  if (!root || root.hidden) return;
+  const c = getClip(state.selId);
+  if (!c) return;
+  root.querySelectorAll(".kf-graph").forEach((card) => {
+    const key = card.dataset.kfgraphCard;
+    const cv = card.querySelector("canvas");
+    if (key && cv) drawKfGraph(cv, c, key);
+  });
+}
+function drawKfGraph(cv, c, key) {
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = cv.clientWidth || 160, cssH = cv.clientHeight || 52;
+  if (cv.width !== Math.round(cssW * dpr) || cv.height !== Math.round(cssH * dpr)) {
+    cv.width = Math.round(cssW * dpr);
+    cv.height = Math.round(cssH * dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = cssW, H = cssH;
+  g.clearRect(0, 0, W, H);
+  const { lo, hi, fallback, t0, t1 } = kfGraphRange(c, key);
+  const span = Math.max(1e-6, t1 - t0);
+  const yAt = (v) => H - 4 - ((v - lo) / (hi - lo)) * (H - 8);
+  const xAt = (t) => 3 + ((t - t0) / span) * (W - 6);
+
+  // mid / zero guide
+  g.strokeStyle = "#ffffff10";
+  g.lineWidth = 1;
+  g.beginPath();
+  const y0 = yAt(0);
+  if (y0 > 4 && y0 < H - 4) { g.moveTo(3, y0); g.lineTo(W - 3, y0); g.stroke(); }
+
+  // interpolated curve (only the zoomed window)
+  g.strokeStyle = "#7b6cff";
+  g.lineWidth = 1.5;
+  g.beginPath();
+  const steps = Math.max(24, Math.floor(W));
+  for (let i = 0; i <= steps; i++) {
+    const t = t0 + (i / steps) * span;
+    const v = kfChannel(c, key, t, fallback);
+    const x = xAt(t), y = yAt(v);
+    if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  }
+  g.stroke();
+
+  // keyframe diamonds
+  const kfs = c.keyframes?.[key];
+  if (Array.isArray(kfs)) {
+    g.fillStyle = "#ffd166";
+    for (const kf of kfs) {
+      const x = xAt(kf.t), y = yAt(kf.v);
+      g.beginPath();
+      g.moveTo(x, y - 3.5); g.lineTo(x + 3.5, y); g.lineTo(x, y + 3.5); g.lineTo(x - 3.5, y);
+      g.closePath(); g.fill();
+    }
+  }
+
+  // playhead (drawn only when inside the zoomed window)
+  const lt = state.time - c.start;
+  if (lt >= t0 - 1e-6 && lt <= t1 + 1e-6) {
+    const px = xAt(clamp(lt, t0, t1));
+    g.strokeStyle = "#ff4d6a";
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(px, 1); g.lineTo(px, H - 1);
+    g.stroke();
+    const cur = kfChannel(c, key, clamp(lt, t0, t1), fallback);
+    g.fillStyle = "#ff4d6a";
+    g.beginPath();
+    g.arc(px, yAt(cur), 2.5, 0, Math.PI * 2);
+    g.fill();
   }
 }
 
@@ -3311,6 +3492,7 @@ function loop(ts) {
   els.playhead.style.left = state.time * state.pps + "px";
   drawRuler();
   updateSafeOverlay();
+  updateKfGraphs();
   els.tcCurrent.textContent = fmt(state.time);
   els.tcTotal.textContent = fmt(projDur());
   if (state.exporting && !state.rendering) {
