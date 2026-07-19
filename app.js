@@ -194,7 +194,7 @@ const runtime = {
   clipGain: new Map(),  // clipId -> GainNode
   mediaAux: new Map(),  // mediaId -> {img?, thumb?, svgText?, svgAnimated?}
   audioBufs: new Map(), // mediaId -> Promise<AudioBuffer> (waveforms + export mix)
-  wavePeaks: new Map(), // mediaId -> Float32Array peaks at WAVE_PEAKS_PER_SEC
+  wavePeaks: new Map(), // mediaId -> {channels: Float32Array[], max: Float32Array} | Float32Array (legacy) | null (pending)
   library: {},          // dir -> [{name, rel, src, size}] cached /api/library results
   customFonts: [],      // family names loaded from /library/fonts
   googleLoaded: new Set(),
@@ -507,20 +507,40 @@ function ensureWave(m) {
   runtime.wavePeaks.set(m.id, null); // pending
   getAudioBuffer(m).then((buf) => {
     const n = Math.max(1, Math.ceil(buf.duration * WAVE_PEAKS_PER_SEC));
-    const peaks = new Float32Array(n);
     const step = buf.length / n;
+    const channels = [];
     for (let ch = 0; ch < buf.numberOfChannels; ch++) {
       const data = buf.getChannelData(ch);
+      const peaks = new Float32Array(n);
       for (let i = 0; i < n; i++) {
         let mx = 0;
         const i0 = Math.floor(i * step), i1 = Math.min(data.length, Math.floor((i + 1) * step));
         for (let j = i0; j < i1; j += 8) { const a = Math.abs(data[j]); if (a > mx) mx = a; }
-        if (mx > peaks[i]) peaks[i] = mx;
+        peaks[i] = mx;
       }
+      channels.push(peaks);
     }
-    runtime.wavePeaks.set(m.id, peaks);
+    // Combined max envelope for clips that play full stereo
+    const max = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let mx = 0;
+      for (const p of channels) if (p[i] > mx) mx = p[i];
+      max[i] = mx;
+    }
+    runtime.wavePeaks.set(m.id, { channels, max });
+    if (m.channels == null) m.channels = buf.numberOfChannels;
     state.dirtyTimeline = true;
   }).catch(() => runtime.wavePeaks.delete(m.id));
+}
+function wavePeaksFor(c) {
+  const w = runtime.wavePeaks.get(c.mediaId);
+  if (!w) return null;
+  // Legacy: bare Float32Array
+  if (w instanceof Float32Array) return w;
+  if (!w.max) return null;
+  const ch = c.props?.audioChannel;
+  if ((ch === 0 || ch === 1) && w.channels?.[ch]) return w.channels[ch];
+  return w.max;
 }
 
 /* ═══════════════════════════ MEDIA IMPORT ═══════════════════════════ */
@@ -771,23 +791,37 @@ function defaultTrackFor(kind) {
 function linkedClip(c) {
   return c?.linkedId ? getClip(c.linkedId) : null;
 }
-/* Expand a clip list so each AV-linked partner is included once. */
+/* Expand a clip list so each AV-linked partner is included once.
+   Supports N-way `linkGroup` (video + L + R) and legacy pairwise `linkedId`. */
 function withLinked(clips) {
   const out = new Map();
+  const groups = new Set();
   for (const c of clips) {
     out.set(c.id, c);
-    const L = linkedClip(c);
-    if (L) out.set(L.id, L);
+    if (c.linkGroup) groups.add(c.linkGroup);
+    else {
+      const L = linkedClip(c);
+      if (L) out.set(L.id, L);
+    }
+  }
+  if (groups.size) {
+    for (const x of project.clips) {
+      if (x.linkGroup && groups.has(x.linkGroup)) out.set(x.id, x);
+    }
   }
   return [...out.values()];
 }
 function syncLinkedTiming(c) {
-  const L = linkedClip(c);
-  if (!L) return;
-  L.start = c.start;
-  L.in = c.in;
-  L.duration = c.duration;
-  if (c.props?.speed != null) L.props.speed = c.props.speed;
+  for (const L of withLinked([c])) {
+    if (L.id === c.id) continue;
+    L.start = c.start;
+    L.in = c.in;
+    L.duration = c.duration;
+    if (c.props?.speed != null) {
+      L.props = L.props || {};
+      L.props.speed = c.props.speed;
+    }
+  }
 }
 
 function addClipFromMedia(m, trackId, at) {
@@ -805,18 +839,25 @@ function addClipFromMedia(m, trackId, at) {
     props: { ...DEFAULT_PROPS },
   };
   project.clips.push(c);
-  // Video+audio: put picture on a V track and a linked sound clip on A1.
+  // Video+audio: picture on a V track; stereo L/R as separate linked clips on A1/A2.
   // Mute the video clip so audio isn't doubled.
   if (kind === "video") {
     c.props.volume = 0;
-    const a = {
+    const lg = "lg_" + uid();
+    c.linkGroup = lg;
+    const aL = {
       id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A1",
       start, in: 0, duration, name,
-      props: { ...DEFAULT_PROPS },
-      linkedId: c.id,
+      props: { ...DEFAULT_PROPS, audioChannel: 0 },
+      linkGroup: lg,
     };
-    c.linkedId = a.id;
-    project.clips.push(a);
+    const aR = {
+      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A2",
+      start, in: 0, duration, name,
+      props: { ...DEFAULT_PROPS, audioChannel: 1 },
+      linkGroup: lg,
+    };
+    project.clips.push(aL, aR);
     ensureWave(m);
   }
   selectClip(c.id); scheduleSave();
@@ -1123,6 +1164,7 @@ function splitClipAt(c, t) {
     keyframes: shiftKF(c.keyframes, cut, clipEnd(c) - t),
     transitionIn: undefined,
     linkedId: undefined,
+    linkGroup: undefined,
   };
   c.duration = cut;
   c.keyframes = shiftKF(c.keyframes, 0, cut);
@@ -1132,14 +1174,21 @@ function splitClipAt(c, t) {
 }
 /* After splitting a set of clips, wire each new right half to its partner's right half. */
 function relinkSplitRights(targets, newLink) {
+  const newGroups = new Map(); // old linkGroup -> new linkGroup for right halves
   for (const c of targets) {
     const right = newLink.get(c.id);
-    const partner = c.linkedId ? newLink.get(c.linkedId) : null;
-    if (right && partner) {
-      right.linkedId = partner.id;
-      partner.linkedId = right.id;
-    } else if (right) {
-      delete right.linkedId;
+    if (!right) continue;
+    if (c.linkGroup) {
+      if (!newGroups.has(c.linkGroup)) newGroups.set(c.linkGroup, "lg_" + uid());
+      right.linkGroup = newGroups.get(c.linkGroup);
+    } else {
+      const partner = c.linkedId ? newLink.get(c.linkedId) : null;
+      if (partner) {
+        right.linkedId = partner.id;
+        partner.linkedId = right.id;
+      } else {
+        delete right.linkedId;
+      }
     }
   }
 }
@@ -1377,12 +1426,17 @@ function rebuildClips() {
       const thumb = runtime.mediaAux.get(c.mediaId)?.thumb;
       if (thumb) body += `<div class="thumbs" style="background-image:url('${thumb}')"></div>`;
     }
-    const hasWave = c.kind === "audio" && runtime.wavePeaks.get(c.mediaId) instanceof Float32Array;
+    const hasWave = c.kind === "audio" && !!wavePeaksFor(c);
     if (hasWave) body += `<canvas class="wave"></canvas>`;
-    const badge = c.keyframes && Object.keys(c.keyframes).length ? "◆ " : "";
+    const badge = (c.keyframes && Object.keys(c.keyframes).length ? "◆ " : "") +
+                  (c.transitionIn || c.transitionOut ? "⇄ " : "");
+    const chTag = c.props?.audioChannel === 0 ? "L · "
+                : c.props?.audioChannel === 1 ? "R · " : "";
     body += `<div class="fade"></div>
       <div class="clip-label">${badge}${c.kind === "text" ? "T · " + (c.props.text || "").split("\n")[0]
-        : c.kind === "adjust" ? "FX · " + c.name : c.name}</div>`;
+        : c.kind === "adjust" ? "FX · " + c.name
+        : c.kind === "audio" ? chTag + c.name
+        : c.name}</div>`;
     let inner = `<div class="clip-body">${body}</div>`;
     inner += transitionMarksHtml(c, tr.h);
     inner += `<div class="handle l"></div><div class="handle r"></div>`;
@@ -1397,7 +1451,7 @@ function rebuildClips() {
 
 /* Render decoded peaks for the [in, in+duration] slice of the clip's media */
 function drawClipWave(cv, c, trackH) {
-  const peaks = runtime.wavePeaks.get(c.mediaId);
+  const peaks = wavePeaksFor(c);
   if (!(peaks instanceof Float32Array)) return;
   const w = Math.min(2400, Math.max(8, Math.round(c.duration * state.pps)));
   const h = trackH - 8;
@@ -2082,7 +2136,10 @@ function renderInspector(lite) {
     </div>`;
   }
   if (c.kind === "video" || c.kind === "audio") {
+    const chLabel = c.props?.audioChannel === 0 ? "Left"
+                  : c.props?.audioChannel === 1 ? "Right" : null;
     html += `<div class="insp-section"><h3>Audio / Time</h3>
+      ${chLabel ? row("Channel", `<span style="opacity:.75">${chLabel}</span>`) : ""}
       ${slider("volume", 0, 2, 0.01, p.volume)}
       ${slider("speed", 0.25, 4, 0.05, p.speed, "×")}
     </div>`;
@@ -2283,7 +2340,12 @@ function releaseClipEl(id) {
   const el = runtime.clipEls.get(id);
   if (el) { try { el.pause(); el.src = ""; } catch { } runtime.clipEls.delete(id); }
   const g = runtime.clipGain.get(id);
-  if (g) { try { g.disconnect(); } catch { } runtime.clipGain.delete(id); }
+  if (g) {
+    try { g.disconnect(); } catch {}
+    if (g._fcOut) { try { g._fcOut.disconnect(); } catch {} }
+    if (g._fcSplit) { try { g._fcSplit.disconnect(); } catch {} }
+    runtime.clipGain.delete(id);
+  }
 }
 function ensureAudio() {
   if (runtime.audio) return runtime.audio;
@@ -2317,9 +2379,23 @@ function hookAudio(c, el) {
   if (!runtime.audio || runtime.clipGain.has(c.id)) return;
   if (c.kind !== "video" && c.kind !== "audio") return;
   try {
-    const src = runtime.audio.ctx.createMediaElementSource(el);
-    const g = runtime.audio.ctx.createGain();
-    src.connect(g);
+    const ctx = runtime.audio.ctx;
+    const src = ctx.createMediaElementSource(el);
+    const g = ctx.createGain();
+    const ch = c.props?.audioChannel;
+    if (ch === 0 || ch === 1) {
+      // Isolate one stereo channel and place it on L or R of the track bus
+      const splitter = ctx.createChannelSplitter(2);
+      const merger = ctx.createChannelMerger(2);
+      src.connect(splitter);
+      splitter.connect(g, ch);
+      g.connect(merger, 0, ch);
+      g._fcSplit = splitter;
+      g._fcOut = merger;
+      g._fcChannel = ch;
+    } else {
+      src.connect(g);
+    }
     runtime.clipGain.set(c.id, g);
     routeClipGain(c);
   } catch {}
@@ -2329,10 +2405,11 @@ function routeClipGain(c) {
   const g = runtime.clipGain.get(c.id);
   if (!g || !runtime.audio) return;
   const bus = runtime.audio.trackBus[c.track] || runtime.audio.master;
-  if (g._fcBus === bus) return;
-  try { g.disconnect(); } catch {}
-  g.connect(bus);
-  g._fcBus = bus;
+  const out = g._fcOut || g;
+  if (out._fcBus === bus) return;
+  try { out.disconnect(); } catch {}
+  out.connect(bus);
+  out._fcBus = bus;
 }
 
 /* ── Per-track meters: RMS / LUFS-M / Peak (AudioWorklet) ── */
@@ -3765,7 +3842,17 @@ async function renderAudioMix(dur) {
     for (let i = 0; i < n; i++)
       curve[i] = clamp(evalProps(c, c.start + (i / (n - 1)) * c.duration).volume, 0, 4);
     g.gain.setValueCurveAtTime(curve, Math.max(0, c.start), Math.max(0.01, c.duration));
-    src.connect(g); g.connect(off.destination);
+    const ch = c.props?.audioChannel;
+    if (ch === 0 || ch === 1) {
+      const splitter = off.createChannelSplitter(2);
+      const merger = off.createChannelMerger(2);
+      src.connect(splitter);
+      splitter.connect(g, ch);
+      g.connect(merger, 0, ch);
+      merger.connect(off.destination);
+    } else {
+      src.connect(g); g.connect(off.destination);
+    }
     if (hasSpeedRamp(c)) {
       const rc = new Float32Array(n);
       for (let i = 0; i < n; i++)
