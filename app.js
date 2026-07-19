@@ -1481,8 +1481,49 @@ function rebuildClips() {
     row.appendChild(div);
     if (hasWave) drawClipWave(div.querySelector(".wave"), c, tr.h);
   }
+  paintAudioOverlaps();
   state.dirtyTimeline = false;
   updateWorkArea();
+}
+/* Hatched bands where two+ audio clips share a track (CSS draw, O(n²) per track). */
+function paintAudioOverlaps() {
+  const byTrack = new Map();
+  for (const c of project.clips) {
+    if (c.kind !== "audio") continue;
+    let list = byTrack.get(c.track);
+    if (!list) byTrack.set(c.track, list = []);
+    list.push(c);
+  }
+  for (const [trackId, clips] of byTrack) {
+    if (clips.length < 2) continue;
+    const row = els.tracks.querySelector(`[data-track="${trackId}"]`);
+    if (!row) continue;
+    const intervals = [];
+    for (let i = 0; i < clips.length; i++) {
+      for (let j = i + 1; j < clips.length; j++) {
+        const t0 = Math.max(clips[i].start, clips[j].start);
+        const t1 = Math.min(clipEnd(clips[i]), clipEnd(clips[j]));
+        if (t1 - t0 > 1e-4) intervals.push([t0, t1]);
+      }
+    }
+    if (!intervals.length) continue;
+    intervals.sort((a, b) => a[0] - b[0]);
+    const merged = [[intervals[0][0], intervals[0][1]]];
+    for (let k = 1; k < intervals.length; k++) {
+      const last = merged[merged.length - 1];
+      const cur = intervals[k];
+      if (cur[0] <= last[1] + 1e-6) last[1] = Math.max(last[1], cur[1]);
+      else merged.push([cur[0], cur[1]]);
+    }
+    for (const [t0, t1] of merged) {
+      const el = document.createElement("div");
+      el.className = "track-overlap";
+      el.style.left = (t0 * state.pps) + "px";
+      el.style.width = Math.max(2, (t1 - t0) * state.pps) + "px";
+      el.title = "Overlapping audio";
+      row.appendChild(el);
+    }
+  }
 }
 
 /* Render decoded peaks for the [in, in+duration] slice of the clip's media */
@@ -1717,12 +1758,14 @@ function startClipGesture(e, c, mode, collapseOnClick) {
   }]));
   const groupIds = new Set(group.map((x) => x.id));
   const t0 = timeAtEvent(e);
+  const x0 = e.clientX, y0 = e.clientY;
   let moved = false;
   const snapshot = JSON.stringify(project.clips);
 
   const onMove = (ev) => {
     const dt = timeAtEvent(ev) - t0;
-    if (Math.abs(dt * state.pps) > 3) moved = true;
+    // Count vertical motion too — track changes are often pure Y drags
+    if (!moved && (Math.abs(ev.clientX - x0) > 3 || Math.abs(ev.clientY - y0) > 3)) moved = true;
     if (!moved) return;
     if (mode === "move") {
       // Snap whichever edge is closer to a target. A non-snapping edge has
