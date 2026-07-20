@@ -3161,8 +3161,11 @@ function justifyLineBySpaces(ctx, ln, targetW) {
   }
   return best;
 }
+function textFontWeight(p) {
+  return +p.weight || (p.bold ? 700 : 400);
+}
 function setTextFont(ctx, p, size) {
-  const weight = +p.weight || (p.bold ? 700 : 400);
+  const weight = textFontWeight(p);
   ctx.font = `${p.italic ? "italic " : ""}${weight} ${size}px "${p.font || "Segoe UI"}", sans-serif`;
   try { ctx.letterSpacing = `${+p.letterSpacing || 0}px`; } catch { }
 }
@@ -3240,6 +3243,7 @@ function drawText(c, p, local) {
   const boxW = +p.boxW, boxH = +p.boxH;
   const scaleToFit = useBox && !!p.boxFit;
   const src = textSourceString(p);
+  const weight = textFontWeight(p);
   let size = p.fontSize || 72;
   if (useBox) {
     if (scaleToFit) size = fitFontSizeToBox(ctx2d, p, boxW, boxH, p.fontSize || 72);
