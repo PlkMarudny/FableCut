@@ -365,6 +365,19 @@ body.track-size-s .clip.selected {
   border-bottom: 1px solid var(--border);
 }
 
+.panel-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.panel-head-title .btn {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 600;
+}
+
 .panel-head-actions {
   display: flex;
   gap: 6px;
