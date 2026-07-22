@@ -146,6 +146,7 @@ const project = {
 };
 const state = {
   time: 0, playing: false, pps: 60, snap: true,
+  previewRate: 1,        // playback speed for PREVIEW only — never affects export
   selId: null,           // primary selection (drives the inspector)
   selIds: new Set(),     // full multi-selection (includes selId)
   trackSize: "l",        // s | m | l — timeline track density preset
@@ -221,6 +222,7 @@ const els = {
   exportTitle: $("exportTitle"), exportNote: $("exportNote"),
   projectName: $("projectName"), monitorRes: $("monitorRes"),
   aspectSel: $("aspectSel"), btnGuides: $("btnGuides"), safeOverlay: $("safeOverlay"),
+  btnSpeed: $("btnSpeed"),
   monitorStage: $("monitorStage"),
   exportSetup: $("exportSetup"), engineFast: $("engineFast"), engineRealtime: $("engineRealtime"),
 };
@@ -2751,6 +2753,24 @@ function pause() {
   if (state.exporting) finishExport(false);
 }
 
+/* ── Preview playback speed — affects the PREVIEW player only, never the export ── */
+const PREVIEW_RATES = [1, 1.5, 2, 4];
+// Effective preview rate: forced to 1 during any export so renders/captures stay real-time.
+function playRate() { return state.exporting ? 1 : state.previewRate; }
+function setPreviewRate(r) {
+  state.previewRate = r;
+  els.btnSpeed.textContent = r + "×";
+  els.btnSpeed.classList.toggle("on", r !== 1);
+}
+function cyclePreviewRate(dir) { // wrap around — for the toolbar button
+  const i = Math.max(0, PREVIEW_RATES.indexOf(state.previewRate));
+  setPreviewRate(PREVIEW_RATES[(i + dir + PREVIEW_RATES.length) % PREVIEW_RATES.length]);
+}
+function stepPreviewRate(dir) { // clamp at the ends — for the J/L shortcuts
+  const i = Math.max(0, PREVIEW_RATES.indexOf(state.previewRate));
+  setPreviewRate(PREVIEW_RATES[clamp(i + dir, 0, PREVIEW_RATES.length - 1)]);
+}
+
 function activeAt(c, t) { return t >= c.start && t < clipEnd(c); }
 
 function syncMedia() {
@@ -2763,9 +2783,10 @@ function syncMedia() {
     const sp = clamp(+p.speed || 1, 0.1, 8);
     const mt = mediaTimeAt(c, t);
     if (state.playing && enabled && activeAt(c, t)) {
-      if (el.playbackRate !== sp) { try { el.playbackRate = sp; } catch {} }
+      const eff = clamp(sp * playRate(), 0.0625, 16); // preview speed rides on top of clip speed
+      if (el.playbackRate !== eff) { try { el.playbackRate = eff; } catch {} }
       if (el.paused) el.play().catch(() => {});
-      if (Math.abs(el.currentTime - mt) > 0.25 * sp) { try { el.currentTime = mt; } catch {} }
+      if (Math.abs(el.currentTime - mt) > 0.25 * eff) { try { el.currentTime = mt; } catch {} }
       const vol = clamp(p.volume, 0, 4);
       const g = runtime.clipGain.get(c.id);
       if (g) g.gain.value = vol;
@@ -4019,7 +4040,7 @@ function loop(ts) {
   const dt = Math.min(0.1, (ts - lastTs) / 1000);
   lastTs = ts;
   if (state.playing) {
-    state.time += dt;
+    state.time += dt * playRate();
     const end = playStopAt();
     if (state.time >= end) {
       state.time = end;
@@ -4323,6 +4344,7 @@ $("btnCancelExport").addEventListener("click", () => {
   else finishExport(false);
 });
 $("btnPlay").addEventListener("click", () => state.playing ? pause() : play());
+els.btnSpeed.addEventListener("click", () => cyclePreviewRate(1));
 $("btnHome").addEventListener("click", gotoHome);
 $("btnEnd").addEventListener("click", gotoEnd);
 $("btnBack").addEventListener("click", () => setTime(state.time - 1 / project.fps));
@@ -4387,6 +4409,18 @@ window.addEventListener("keydown", (e) => {
   }
   if (isTypingTarget(document.activeElement)) return;
   if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
+  // JKL shuttle — bare keys only, so Cmd/Ctrl+J/K/L stay with the browser
+  else if ((k === "k" || k === "K") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault(); setPreviewRate(1); state.playing ? pause() : play(); // stop + reset to 1×
+  }
+  else if ((k === "l" || k === "L") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    if (!state.playing) play(); else stepPreviewRate(1);  // tap again = faster
+  }
+  else if ((k === "j" || k === "J") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    if (!state.playing) play(); else stepPreviewRate(-1); // tap again = slower
+  }
   else if (k === "s" || k === "S") splitAtPlayhead();
   else if ((k === "g" || k === "G") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
