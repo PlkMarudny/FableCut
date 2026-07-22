@@ -558,7 +558,7 @@ function wavePeaksFor(c) {
   if (w instanceof Float32Array) return w;
   if (!w.max) return null;
   const ch = c.props?.audioChannel;
-  if ((ch === 0 || ch === 1) && w.channels?.[ch]) return w.channels[ch];
+  if (Number.isInteger(ch) && ch >= 0 && w.channels?.[ch]) return w.channels[ch];
   return w.max;
 }
 
@@ -811,7 +811,7 @@ function linkedClip(c) {
   return c?.linkedId ? getClip(c.linkedId) : null;
 }
 /* Expand a clip list so each AV-linked partner is included once.
-   Supports N-way `linkGroup` (video + L + R) and legacy pairwise `linkedId`. */
+   Supports N-way `linkGroup` (video + per-channel stems) and legacy pairwise `linkedId`. */
 function withLinked(clips) {
   const out = new Map();
   const groups = new Set();
@@ -844,7 +844,7 @@ function syncLinkedTiming(c) {
 }
 /* Rebuild AV linkGroups after load. Unlinking isn't supported, so any video +
    audio clips that share mediaId and the same start/in/duration belong together
-   (e.g. picture + L/R stems from one file). Legacy pairwise linkedId is cleared
+   (e.g. picture + L/R/C stems from one file). Legacy pairwise linkedId is cleared
    in favor of linkGroup. */
 function relinkClips() {
   const near = (a, b) => Math.abs((+a || 0) - (+b || 0)) < 1e-3;
@@ -873,6 +873,60 @@ function relinkClips() {
   }
 }
 
+/* Discrete-channel labels for linked stems (WAV / Web Audio order). */
+const CHANNEL_SHORT = ["L", "R", "C", "LFE", "Ls", "Rs", "Lb", "Rb"];
+const CHANNEL_LONG = ["Left", "Right", "Center", "LFE", "Surround L", "Surround R", "Back L", "Back R"];
+const AUDIO_TRACK_IDS = TRACKS.filter((t) => t.kind === "audio").map((t) => t.id);
+function audioChannelShort(ch) {
+  if (!Number.isInteger(ch) || ch < 0) return "";
+  return CHANNEL_SHORT[ch] || `Ch${ch + 1}`;
+}
+function audioChannelLong(ch) {
+  if (!Number.isInteger(ch) || ch < 0) return null;
+  return CHANNEL_LONG[ch] || `Channel ${ch + 1}`;
+}
+/** How many linked A-track stems we can create for a media item. */
+function linkedAudioChannelCount(m) {
+  const n = Math.max(1, m.channels | 0);
+  return Math.min(n, AUDIO_TRACK_IDS.length);
+}
+/** Attach one audio clip per source channel (A1…A4), sharing the video's linkGroup. */
+function attachLinkedAudioChannels(videoClip, m, nCh) {
+  if (!videoClip?.linkGroup || !getClip(videoClip.id)) return [];
+  const lg = videoClip.linkGroup;
+  // Drop any prior stems for this group (e.g. stereo placeholder → 3.0 upgrade).
+  project.clips = project.clips.filter((x) => !(x.linkGroup === lg && x.kind === "audio"));
+  const n = Math.min(Math.max(1, nCh | 0), AUDIO_TRACK_IDS.length);
+  const out = [];
+  for (let ch = 0; ch < n; ch++) {
+    const a = {
+      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: AUDIO_TRACK_IDS[ch],
+      start: videoClip.start, in: videoClip.in, duration: videoClip.duration,
+      name: videoClip.name,
+      props: { ...DEFAULT_PROPS, audioChannel: ch },
+      linkGroup: lg,
+    };
+    if (videoClip.props?.speed != null) a.props.speed = videoClip.props.speed;
+    project.clips.push(a);
+    out.push(a);
+  }
+  return out;
+}
+/** Wire a single source channel into the stereo bus: L→left, R→right, else→center. */
+function connectIsolatedChannel(ctx, srcNode, gainNode, ch, nCh) {
+  const outputs = Math.max(2, nCh | 0, (ch | 0) + 1);
+  const splitter = ctx.createChannelSplitter(outputs);
+  const merger = ctx.createChannelMerger(2);
+  srcNode.connect(splitter);
+  splitter.connect(gainNode, ch);
+  if (ch === 0) gainNode.connect(merger, 0, 0);
+  else if (ch === 1) gainNode.connect(merger, 0, 1);
+  else { gainNode.connect(merger, 0, 0); gainNode.connect(merger, 0, 1); }
+  gainNode._fcSplit = splitter;
+  gainNode._fcOut = merger;
+  gainNode._fcChannel = ch;
+}
+
 function addClipFromMedia(m, trackId, at) {
   pushUndo();
   const kind = m.kind;
@@ -888,25 +942,25 @@ function addClipFromMedia(m, trackId, at) {
     props: { ...DEFAULT_PROPS },
   };
   project.clips.push(c);
-  // Video+audio: picture on a V track; stereo L/R as separate linked clips on A1/A2.
+  // Video+audio: picture on a V track; one linked stem per source channel on A1…A4.
   // Mute the video clip so audio isn't doubled.
   if (kind === "video") {
     c.props.volume = 0;
-    const lg = "lg_" + uid();
-    c.linkGroup = lg;
-    const aL = {
-      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A1",
-      start, in: 0, duration, name,
-      props: { ...DEFAULT_PROPS, audioChannel: 0 },
-      linkGroup: lg,
+    c.linkGroup = "lg_" + uid();
+    const finish = (nCh) => {
+      if (!getClip(c.id) || !c.linkGroup) return;
+      m.channels = nCh;
+      attachLinkedAudioChannels(c, m, linkedAudioChannelCount(m));
+      state.dirtyTimeline = true;
+      scheduleSave();
+      renderInspector();
     };
-    const aR = {
-      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A2",
-      start, in: 0, duration, name,
-      props: { ...DEFAULT_PROPS, audioChannel: 1 },
-      linkGroup: lg,
-    };
-    project.clips.push(aL, aR);
+    if (m.channels > 0) {
+      finish(m.channels);
+    } else {
+      getAudioBuffer(m).then((buf) => finish(buf.numberOfChannels))
+        .catch(() => finish(2)); // unknown → stereo fallback
+    }
     ensureWave(m);
   }
   selectClip(c.id); scheduleSave();
@@ -1479,8 +1533,10 @@ function rebuildClips() {
     if (hasWave) body += `<canvas class="wave"></canvas>`;
     const badge = (c.keyframes && Object.keys(c.keyframes).length ? "◆ " : "") +
                   (c.transitionIn || c.transitionOut ? "⇄ " : "");
-    const chTag = c.props?.audioChannel === 0 ? "L · "
-                : c.props?.audioChannel === 1 ? "R · " : "";
+    const chTag = (() => {
+      const s = audioChannelShort(c.props?.audioChannel);
+      return s ? s + " · " : "";
+    })();
     const label = c.kind === "text" ? "T · " + (c.props.text || "").split("\n")[0]
       : c.kind === "adjust" ? "FX · " + (c.name || "")
       : c.kind === "audio" ? chTag + (c.name || "")
@@ -2229,8 +2285,7 @@ function renderInspector(lite) {
     </div>`;
   }
   if (c.kind === "video" || c.kind === "audio") {
-    const chLabel = c.props?.audioChannel === 0 ? "Left"
-                  : c.props?.audioChannel === 1 ? "Right" : null;
+    const chLabel = audioChannelLong(c.props?.audioChannel);
     html += `<div class="insp-section"><h3>Audio / Time</h3>
       ${chLabel ? row("Channel", `<span style="opacity:.75">${chLabel}</span>`) : ""}
       ${slider("volume", 0, 2, 0.01, p.volume)}
@@ -2484,16 +2539,11 @@ function hookAudio(c, el) {
     const src = ctx.createMediaElementSource(el);
     const g = ctx.createGain();
     const ch = c.props?.audioChannel;
-    if (ch === 0 || ch === 1) {
-      // Isolate one stereo channel and place it on L or R of the track bus
-      const splitter = ctx.createChannelSplitter(2);
-      const merger = ctx.createChannelMerger(2);
-      src.connect(splitter);
-      splitter.connect(g, ch);
-      g.connect(merger, 0, ch);
-      g._fcSplit = splitter;
-      g._fcOut = merger;
-      g._fcChannel = ch;
+    if (Number.isInteger(ch) && ch >= 0) {
+      const m = getMedia(c.mediaId);
+      const nCh = Math.max(m?.channels || 0, ch + 1, 2);
+      try { src.channelInterpretation = "discrete"; } catch { }
+      connectIsolatedChannel(ctx, src, g, ch, nCh);
     } else {
       src.connect(g);
     }
@@ -4171,13 +4221,10 @@ async function renderAudioMix(dur) {
       curve[i] = clamp(evalProps(c, c.start + (i / (n - 1)) * c.duration).volume, 0, 4);
     g.gain.setValueCurveAtTime(curve, Math.max(0, c.start), Math.max(0.01, c.duration));
     const ch = c.props?.audioChannel;
-    if (ch === 0 || ch === 1) {
-      const splitter = off.createChannelSplitter(2);
-      const merger = off.createChannelMerger(2);
-      src.connect(splitter);
-      splitter.connect(g, ch);
-      g.connect(merger, 0, ch);
-      merger.connect(off.destination);
+    if (Number.isInteger(ch) && ch >= 0) {
+      const nCh = Math.max(buf.numberOfChannels, ch + 1, 2);
+      connectIsolatedChannel(off, src, g, ch, nCh);
+      g._fcOut.connect(off.destination);
     } else {
       src.connect(g); g.connect(off.destination);
     }
