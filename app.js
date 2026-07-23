@@ -172,6 +172,7 @@ function ensureTracksCoverClips() {
     if (!c.track || TRACK_IDS.has(c.track)) continue;
     const kind = c.kind === "audio" || /^A\d+$/i.test(c.track) ? "audio" : "video";
     TRACKS.push(makeTrack(c.track, kind));
+    TRACK_IDS.add(c.track); // mark present before later clips (avoids duplicate makeTrack)
     added = true;
   }
   if (added) {
@@ -1672,7 +1673,7 @@ function buildTrackDOM() {
       `<button type="button" class="track-toggle" aria-pressed="${on}" ` +
       `title="${on ? "Disable track" : "Enable track"}" style="color:${t.color}">` +
       `${trackToggleIcon(t.kind)}</button>` +
-      `<span class="track-id">${t.id}</span>` +
+      `<span class="track-id">${escapeHtml(t.id)}</span>` +
       `<button type="button" class="track-solo${solo ? " on" : ""}" aria-pressed="${solo}" ` +
       `title="${solo ? "Unsolo track" : "Solo track (mute all others)"}">S</button>`;
     h.querySelector(".track-toggle").addEventListener("click", (ev) => {
