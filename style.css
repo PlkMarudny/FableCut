@@ -948,7 +948,7 @@ input[type=range] {
 }
 
 .track-headers {
-  width: 64px;
+  width: 68px;
   flex: none;
   border-right: 1px solid var(--border);
   padding-top: 0;
@@ -987,8 +987,8 @@ input[type=range] {
 .track-head {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 6px;
+  gap: 2px;
+  padding: 0 4px;
   border-bottom: 1px solid #232328;
   font-size: 11px;
   font-weight: 700;
@@ -996,8 +996,50 @@ input[type=range] {
   letter-spacing: .5px;
 }
 
+.track-head .track-id {
+  flex: 1;
+  min-width: 0;
+  max-width: 3ch;
+}
+
+.track-solo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.track-solo:hover {
+  color: #fff;
+  background: #ffffff12;
+}
+
+.track-solo.on {
+  color: #111;
+  background: #ffd166;
+  border-color: #ffd166;
+}
+
 .track-head.disabled {
   opacity: .55;
+}
+
+.track-head.solo:not(.disabled) {
+  opacity: 1;
 }
 
 .ctx-menu {

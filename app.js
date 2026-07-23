@@ -204,6 +204,10 @@ function addTimelineTrack(kind) {
   sortTracksInPlace();
   applyTrackHeights();
   project.tracks = serializeTracks();
+  if (state.soloId && state.soloId !== id) {
+    state.disabledTracks.add(id);
+    project.disabledTracks = [...state.disabledTracks].sort();
+  }
   if (kind === "audio") syncAudioGraphTracks();
   buildTrackDOM();
   syncAllTrackDisabledUI();
@@ -234,11 +238,15 @@ function removeTimelineTrack(trackId) {
   const wasAudio = TRACKS.find((t) => t.id === trackId)?.kind === "audio";
   const idx = TRACKS.findIndex((t) => t.id === trackId);
   if (idx < 0) return false;
+  if (state.soloId === trackId) clearTrackSolo({ restore: true });
   TRACKS.splice(idx, 1);
   syncTrackIds();
   if (state.disabledTracks.has(trackId)) {
     state.disabledTracks.delete(trackId);
     project.disabledTracks = [...state.disabledTracks].sort();
+  }
+  if (Array.isArray(state.soloRestore)) {
+    state.soloRestore = state.soloRestore.filter((id) => id !== trackId);
   }
   project.tracks = serializeTracks();
   if (wasAudio) syncAudioGraphTracks();
@@ -319,6 +327,8 @@ const state = {
   workAreaPlay: false,   // when true, play + Home/End stay inside IN/OUT
   binTab: "project",     // project | elements | sfx | svg
   disabledTracks: new Set(), // mirror of project.disabledTracks for fast lookup
+  soloId: null,              // track id when solo is active, else null
+  soloRestore: null,         // disabledTracks snapshot taken when solo engaged
   transFocus: null,      // "in" | "out" — inspector transition row highlighted
 };
 function normalizeDisabledTracks(raw) {
@@ -331,27 +341,62 @@ function isTrackEnabled(id) {
 }
 function syncTrackDisabledUI(id) {
   const on = isTrackEnabled(id);
+  const solo = state.soloId === id;
   const head = els.trackHeaders.querySelector(`.track-head[data-track="${id}"]`);
   const row = els.tracks.querySelector(`.track[data-track="${id}"]`);
   if (head) {
     head.classList.toggle("disabled", !on);
+    head.classList.toggle("solo", solo);
     const btn = head.querySelector(".track-toggle");
     if (btn) {
       btn.setAttribute("aria-pressed", on ? "true" : "false");
       btn.title = on ? "Disable track" : "Enable track";
     }
+    const sBtn = head.querySelector(".track-solo");
+    if (sBtn) {
+      sBtn.setAttribute("aria-pressed", solo ? "true" : "false");
+      sBtn.classList.toggle("on", solo);
+      sBtn.title = solo ? "Unsolo track" : "Solo track (mute all others)";
+    }
   }
-  if (row) row.classList.toggle("disabled", !on);
+  if (row) {
+    row.classList.toggle("disabled", !on);
+    row.classList.toggle("solo", solo);
+  }
 }
 function syncAllTrackDisabledUI() {
   for (const t of TRACKS) syncTrackDisabledUI(t.id);
 }
+function clearTrackSolo({ restore = false } = {}) {
+  if (!state.soloId) return;
+  if (restore && Array.isArray(state.soloRestore)) {
+    state.disabledTracks = new Set(state.soloRestore.filter((id) => TRACK_IDS.has(id)));
+    project.disabledTracks = [...state.disabledTracks].sort();
+  }
+  state.soloId = null;
+  state.soloRestore = null;
+}
+function toggleTrackSolo(id) {
+  if (!TRACK_IDS.has(id)) return;
+  if (state.soloId === id) {
+    clearTrackSolo({ restore: true });
+  } else {
+    if (!state.soloId) state.soloRestore = [...state.disabledTracks];
+    state.soloId = id;
+    state.disabledTracks = new Set(TRACKS.filter((t) => t.id !== id).map((t) => t.id));
+    project.disabledTracks = [...state.disabledTracks].sort();
+  }
+  syncAllTrackDisabledUI();
+  scheduleSave();
+}
 function toggleTrackEnabled(id) {
   if (!TRACK_IDS.has(id)) return;
+  // Manual mute exits solo without restoring the pre-solo snapshot
+  if (state.soloId) clearTrackSolo({ restore: false });
   if (state.disabledTracks.has(id)) state.disabledTracks.delete(id);
   else state.disabledTracks.add(id);
   project.disabledTracks = [...state.disabledTracks].sort();
-  syncTrackDisabledUI(id);
+  syncAllTrackDisabledUI();
   scheduleSave();
 }
 const runtime = {
@@ -533,6 +578,8 @@ function applyProject(data) {
   const disabledTracks = normalizeDisabledTracks(data.disabledTracks);
   project.disabledTracks = disabledTracks;
   state.disabledTracks = new Set(disabledTracks);
+  state.soloId = null;
+  state.soloRestore = null;
   for (const c of project.clips) {
     c.props = { ...DEFAULT_PROPS, ...(c.props || {}) };
     if (c.keyframes) for (const arr of Object.values(c.keyframes))
@@ -1616,19 +1663,27 @@ function buildTrackDOM() {
   els.tracks.innerHTML = "";
   for (const t of TRACKS) {
     const on = isTrackEnabled(t.id);
+    const solo = state.soloId === t.id;
     const h = document.createElement("div");
-    h.className = "track-head" + (on ? "" : " disabled");
+    h.className = "track-head" + (on ? "" : " disabled") + (solo ? " solo" : "");
     h.dataset.track = t.id;
     h.style.height = t.h + "px";
     h.innerHTML =
       `<button type="button" class="track-toggle" aria-pressed="${on}" ` +
       `title="${on ? "Disable track" : "Enable track"}" style="color:${t.color}">` +
       `${trackToggleIcon(t.kind)}</button>` +
-      `<span class="track-id">${t.id}</span>`;
+      `<span class="track-id">${t.id}</span>` +
+      `<button type="button" class="track-solo${solo ? " on" : ""}" aria-pressed="${solo}" ` +
+      `title="${solo ? "Unsolo track" : "Solo track (mute all others)"}">S</button>`;
     h.querySelector(".track-toggle").addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       toggleTrackEnabled(t.id);
+    });
+    h.querySelector(".track-solo").addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleTrackSolo(t.id);
     });
     h.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
@@ -1637,7 +1692,7 @@ function buildTrackDOM() {
     });
     inner.appendChild(h);
     const row = document.createElement("div");
-    row.className = "track" + (on ? "" : " disabled");
+    row.className = "track" + (on ? "" : " disabled") + (solo ? " solo" : "");
     row.dataset.track = t.id;
     row.style.height = t.h + "px";
     els.tracks.appendChild(row);
