@@ -131,6 +131,37 @@ const ASPECT_PRESETS = [
 const WAVE_PEAKS_PER_SEC = 50;
 const TRACK_IDS = new Set(TRACKS.map((t) => t.id));
 
+/* ── User settings (localStorage; optional behavior toggles) ── */
+const SETTINGS_KEY = "fablecut-settings";
+const DEFAULT_SETTINGS = {
+  linkSelect: false, // timeline ↔ project bin selection sync
+};
+let settings = { ...DEFAULT_SETTINGS };
+function loadSettings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
+    if (!raw || typeof raw !== "object") { settings = { ...DEFAULT_SETTINGS }; return; }
+    const next = { ...DEFAULT_SETTINGS };
+    for (const k of Object.keys(DEFAULT_SETTINGS)) {
+      if (Object.hasOwn(raw, k)) next[k] = raw[k];
+    }
+    settings = next;
+  } catch {
+    settings = { ...DEFAULT_SETTINGS };
+  }
+}
+function saveSettings() {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { }
+}
+function getSetting(key) {
+  return settings[key];
+}
+function setSetting(key, value) {
+  if (!Object.hasOwn(DEFAULT_SETTINGS, key)) return;
+  settings[key] = value;
+  saveSettings();
+}
+
 /* ── State ─────────────────────────────────────────────────────────────── */
 const project = {
   name: "Untitled Project",
@@ -628,6 +659,7 @@ function renderBin() {
   for (const m of project.media) {
     const item = document.createElement("div");
     item.className = "bin-item"; item.draggable = true;
+    item.dataset.mediaId = m.id;
     const aux = runtime.mediaAux.get(m.id) || {};
     const icon = m.kind === "audio" ? "🎵" : m.kind === "image" ? "🖼" : m.kind === "svg" ? "✨" : "🎞";
     const thumbSrc = aux.thumb || (m.kind === "image" || m.kind === "svg" ? m.src : null);
@@ -642,6 +674,13 @@ function renderBin() {
       e.dataTransfer.setData("text/fablecut-media", m.id);
       e.dataTransfer.effectAllowed = "copy";
     });
+    item.addEventListener("click", (e) => {
+      if (e.target.closest(".bin-del")) return;
+      if (e.ctrlKey || e.metaKey) return; // reserved for import
+      if (!getSetting("linkSelect")) return;
+      e.preventDefault();
+      selectClipsByMediaId(m.id);
+    });
     item.addEventListener("dblclick", () => addClipFromMedia(m, null, state.time));
     item.querySelector(".bin-del").addEventListener("click", () => {
       pushUndo();
@@ -651,6 +690,7 @@ function renderBin() {
     });
     els.binList.appendChild(item);
   }
+  syncBinSelectionFromTimeline();
 }
 
 /* Open the native file dialog. Windows anchors it to the <input>'s screen
@@ -1709,6 +1749,7 @@ els.tracksContent.addEventListener("pointerdown", (e) => {
     selectClip(c.id);
   } else if (state.selId !== c.id) {
     // grabbing inside an existing multi-selection: keep the group, retarget the inspector
+    // (bin link-select unchanged — same media set)
     state.selId = c.id;
     state.dirtyTimeline = true;
     renderInspector();
@@ -1904,6 +1945,7 @@ function startMarquee(e) {
       if (!state.selIds.has(state.selId)) state.selId = [...state.selIds].pop() ?? null;
       state.dirtyTimeline = true;
       renderInspector();
+      syncBinSelectionFromTimeline();
     }
     if (runtime.pendingSync) syncFromServer();
   };
@@ -2108,12 +2150,47 @@ els.timelineScroll.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 /* ═══════════════════════════ SELECTION & INSPECTOR ═══════════════════════ */
+function selectedMediaIds() {
+  const ids = new Set();
+  for (const c of selectedClips()) {
+    if (c.mediaId) ids.add(c.mediaId);
+  }
+  return ids;
+}
+/** Clear Project-bin link-select highlights (used when the setting turns off). */
+function clearBinSelectionHighlight() {
+  if (!els.binList) return;
+  for (const item of els.binList.querySelectorAll(".bin-item.selected"))
+    item.classList.remove("selected");
+}
+/** Highlight Project-bin items that match the timeline selection (when linkSelect is on). */
+function syncBinSelectionFromTimeline() {
+  if (!els.binList || !getSetting("linkSelect")) return; // no-op when off — avoids DOM work on every selection
+  const mediaIds = selectedMediaIds();
+  for (const item of els.binList.querySelectorAll(".bin-item[data-media-id]")) {
+    item.classList.toggle("selected", mediaIds.has(item.dataset.mediaId));
+  }
+}
+/** Select every timeline clip that uses this media (video primary when present). */
+function selectClipsByMediaId(mediaId) {
+  const clips = project.clips.filter((c) => c.mediaId === mediaId);
+  if (!clips.length) {
+    setSelection([]);
+    toast("No clips on the timeline use this media");
+    return;
+  }
+  clips.sort((a, b) => a.start - b.start || String(a.id).localeCompare(String(b.id)));
+  const primary = clips.find((c) => c.kind === "video") || clips[0];
+  if (state.binTab !== "project") setBinTab("project");
+  setSelection(clips.map((c) => c.id), primary.id);
+}
 function setSelection(ids, primary) {
   state.selIds = new Set(ids);
   state.selId = primary !== undefined ? primary : ([...state.selIds].pop() ?? null);
   if (state.selId && !state.selIds.has(state.selId)) state.selIds.add(state.selId);
   state.dirtyTimeline = true;
   renderInspector();
+  syncBinSelectionFromTimeline();
 }
 /* Plain call replaces the selection; {toggle:true} (ctrl/cmd/shift+click)
    adds/removes the clip from it. */
@@ -2134,6 +2211,7 @@ function selectClip(id, opts) {
 function pruneSelection() {
   state.selIds = new Set([...state.selIds].filter((id) => getClip(id)));
   if (!state.selIds.has(state.selId)) state.selId = [...state.selIds].pop() ?? null;
+  syncBinSelectionFromTimeline();
 }
 const selectedClips = () => project.clips.filter((c) => state.selIds.has(c.id));
 function renderInspector(lite) {
@@ -4480,6 +4558,54 @@ $("btnBack").addEventListener("click", () => setTime(state.time - 1 / project.fp
 $("btnFwd").addEventListener("click", () => setTime(state.time + 1 / project.fps));
 $("btnHelp").addEventListener("click", () => $("helpOverlay").classList.remove("hidden"));
 $("btnCloseHelp").addEventListener("click", () => $("helpOverlay").classList.add("hidden"));
+function settingsFocusables() {
+  const root = $("settingsDialog");
+  if (!root) return [];
+  return [...root.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])")]
+    .filter((el) => !el.disabled && el.getClientRects().length);
+}
+function onSettingsTabTrap(e) {
+  if (e.key !== "Tab") return;
+  const list = settingsFocusables();
+  if (!list.length) return;
+  const first = list[0], last = list[list.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+function openSettings() {
+  const cb = $("setLinkSelect");
+  if (cb) cb.checked = !!getSetting("linkSelect");
+  const overlay = $("settingsOverlay");
+  overlay.classList.remove("hidden");
+  overlay.addEventListener("keydown", onSettingsTabTrap);
+  const dialog = $("settingsDialog");
+  (cb || dialog)?.focus();
+}
+function closeSettings() {
+  const overlay = $("settingsOverlay");
+  overlay.removeEventListener("keydown", onSettingsTabTrap);
+  overlay.classList.add("hidden");
+  $("btnSettings")?.focus();
+}
+$("btnSettings").addEventListener("click", openSettings);
+$("btnCloseSettings").addEventListener("click", closeSettings);
+$("settingsOverlay").addEventListener("click", (e) => {
+  if (e.target === $("settingsOverlay")) closeSettings();
+});
+$("setLinkSelect").addEventListener("change", (e) => {
+  setSetting("linkSelect", !!e.target.checked);
+  if (!getSetting("linkSelect")) {
+    clearBinSelectionHighlight();
+    return;
+  }
+  if (selectedMediaIds().size && state.binTab !== "project") setBinTab("project");
+  syncBinSelectionFromTimeline();
+});
 els.btnSnap.addEventListener("click", () => {
   state.snap = !state.snap;
   els.btnSnap.classList.toggle("on", state.snap);
@@ -4583,7 +4709,17 @@ window.addEventListener("keydown", (e) => {
     e.shiftKey ? clearOutPoint() : setOutPoint();
   }
   else if (k === "n" || k === "N") els.btnSnap.click();
-  else if (k === "Escape") selectClip(null);
+  else if (k === "Escape") {
+    if (!$("settingsOverlay").classList.contains("hidden")) {
+      e.preventDefault();
+      closeSettings();
+    } else if (!$("helpOverlay").classList.contains("hidden")) {
+      e.preventDefault();
+      $("helpOverlay").classList.add("hidden");
+    } else {
+      selectClip(null);
+    }
+  }
   else if ((e.ctrlKey || e.metaKey) && (k === "a" || k === "A")) {
     e.preventDefault();
     setSelection(project.clips.map((c) => c.id));
@@ -4719,6 +4855,7 @@ function initPanelSplit() {
 }
 
 /* ── Boot ── */
+loadSettings();
 initPanelSplit();
 buildTrackDOM();
 rebuildClips();
