@@ -153,6 +153,7 @@ const state = {
   connected: false, exporting: false,
   rendering: false,      // fast (server/ffmpeg) export in progress
   guides: false,         // safe-area overlay on the monitor
+  audioHold: false,      // while paused, loop one frame of audio at the playhead
   ffmpeg: false,         // server reports ffmpeg available
   dirtyTimeline: true, gesture: false,
   workAreaPlay: false,   // when true, play + Home/End stay inside IN/OUT
@@ -218,6 +219,7 @@ const els = {
   trackHeaders: $("trackHeaders"), timelineScroll: $("timelineScroll"),
   tracksContent: $("tracksContent"), tracks: $("tracks"), playhead: $("playhead"),
   ruler: $("ruler"), zoomSlider: $("zoomSlider"), btnSnap: $("btnSnap"),
+  btnAudioHold: $("btnAudioHold"),
   exportOverlay: $("exportOverlay"), exportProgress: $("exportProgress"),
   exportTitle: $("exportTitle"), exportNote: $("exportNote"),
   projectName: $("projectName"), monitorRes: $("monitorRes"),
@@ -376,6 +378,8 @@ function applyProject(data) {
   // AV links aren't always on disk (older saves / agents) — rebuild from matching timing.
   relinkClips();
   // reset runtime playback elements so they rebuild against new data
+  if (state.audioHold) setAudioHold(false);
+  else stopAudioHoldNodes();
   for (const el of runtime.clipEls.values()) { try { el.pause(); el.src = ""; } catch { } }
   runtime.clipEls.clear(); runtime.clipGain.clear();
   els.preview.width = project.width; els.preview.height = project.height;
@@ -1927,6 +1931,7 @@ els.ruler.addEventListener("pointerdown", startScrub);
 function setTime(t) {
   state.time = clamp(t, 0, Math.max(projDur(), 0));
   seekMediaWhilePaused();
+  if (state.audioHold) scheduleAudioHoldRefresh();
 }
 
 /* Add a marker at the playhead, or remove one already there (M key).
@@ -2692,7 +2697,7 @@ function meterReadingDb(id) {
 function updateMeterUI(dt) {
   const ids = meterState.trackIds;
   if (!ids.length) return;
-  const playing = state.playing && runtime.audio?.meterReady;
+  const metering = (state.playing || state.audioHold) && runtime.audio?.meterReady;
   const mode = meterState.mode;
   // Peak: snappy; LUFS already smoothed in-worklet (400 ms); RMS: classic VU feel
   const atkMs = mode === "peak" ? 0.005 : mode === "lufs" ? 0.04 : 0.015;
@@ -2701,7 +2706,7 @@ function updateMeterUI(dt) {
   const release = 1 - Math.exp(-dt / relMs);
   const now = performance.now();
   for (const id of ids) {
-    const target = playing ? meterReadingDb(id) : METER_DB_MIN;
+    const target = metering ? meterReadingDb(id) : METER_DB_MIN;
     const cur = meterState.disp[id] ?? METER_DB_MIN;
     const a = target > cur ? attack : release;
     const next = cur + (target - cur) * a;
@@ -2730,6 +2735,7 @@ function updateMeterUI(dt) {
 }
 
 function play() {
+  if (state.audioHold) setAudioHold(false);
   if (state.playing) return;
   ensureAudio();
   runtime.audio.ctx.resume();
@@ -2746,11 +2752,133 @@ function play() {
   els.btnPlay.classList.add("on");
 }
 function pause() {
+  if (state.audioHold) setAudioHold(false);
   state.playing = false;
   els.btnPlay.textContent = "▶";
   els.btnPlay.classList.remove("on");
   for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
   if (state.exporting) finishExport(false);
+}
+
+/* ── Audio Hold: while paused, loop one project-frame of audio at the playhead ── */
+let audioHoldGen = 0;
+let audioHoldNodes = [];
+let audioHoldRaf = 0;
+function disposeAudioHoldNode(n) {
+  if (!n) return;
+  try { n.src.stop(); } catch { }
+  try { n.src.disconnect(); } catch { }
+  try { if (n.src) n.src.buffer = null; } catch { }
+  try { n.gain.disconnect(); } catch { }
+  if (n.split) { try { n.split.disconnect(); } catch { } }
+  if (n.merge) { try { n.merge.disconnect(); } catch { } }
+}
+function stopAudioHoldNodes() {
+  audioHoldGen++;
+  if (audioHoldRaf) { cancelAnimationFrame(audioHoldRaf); audioHoldRaf = 0; }
+  for (const n of audioHoldNodes) disposeAudioHoldNode(n);
+  audioHoldNodes = [];
+}
+function scheduleAudioHoldRefresh() {
+  if (!state.audioHold || state.playing) return;
+  if (audioHoldRaf) return;
+  audioHoldRaf = requestAnimationFrame(() => {
+    audioHoldRaf = 0;
+    refreshAudioHold();
+  });
+}
+/** Copy one timeline-frame of samples from `buf` starting at `startSec`. */
+function sliceAudioFrame(ctx, buf, startSec, durSec) {
+  const sr = buf.sampleRate;
+  const start = clamp(Math.floor(startSec * sr), 0, Math.max(0, buf.length - 1));
+  const n = Math.max(1, Math.min(buf.length - start, Math.round(durSec * sr)));
+  const out = ctx.createBuffer(buf.numberOfChannels, n, sr);
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    out.getChannelData(ch).set(buf.getChannelData(ch).subarray(start, start + n));
+  }
+  return out;
+}
+function refreshAudioHold() {
+  if (!state.audioHold || state.playing || state.exporting || state.rendering) {
+    stopAudioHoldNodes();
+    return;
+  }
+  const audio = ensureAudio();
+  try { audio.ctx.resume(); } catch { }
+  const t = state.time;
+  const frameDur = 1 / Math.max(1, project.fps || 30);
+  const gen = ++audioHoldGen;
+  // Stop previous voices before starting the new slice
+  for (const n of audioHoldNodes) disposeAudioHoldNode(n);
+  audioHoldNodes = [];
+
+  // Keep media-element preview silent while holding (BufferSource owns the sound).
+  for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
+  for (const g of runtime.clipGain.values()) g.gain.value = 0;
+
+  for (const c of project.clips) {
+    if (c.kind !== "audio" && c.kind !== "video") continue;
+    if (!isTrackEnabled(c.track) || !activeAt(c, t)) continue;
+    const m = getMedia(c.mediaId);
+    if (!m || (m.kind !== "audio" && m.kind !== "video")) continue;
+    const p = evalProps(c, t);
+    const vol = clamp(+p.volume || 0, 0, 4);
+    if (vol <= 1e-4) continue; // skip muted picture track (linked stems carry the sound)
+    getAudioBuffer(m).then((buf) => {
+      if (gen !== audioHoldGen || !state.audioHold || state.playing) return;
+      const mt = mediaTimeAt(c, t);
+      if (!(buf.duration > 0) || mt >= buf.duration) return;
+      // Slice exactly one frame — looping the whole short buffer (not loopStart on
+      // the full file, which would play from 0 until the loop region first).
+      const slice = sliceAudioFrame(audio.ctx, buf, mt, frameDur);
+      const src = audio.ctx.createBufferSource();
+      src.buffer = slice;
+      src.loop = true;
+      const g = audio.ctx.createGain();
+      g.gain.value = vol;
+      const ch = c.props?.audioChannel;
+      let split = null, merge = null, out = g;
+      if (ch === 0 || ch === 1) {
+        split = audio.ctx.createChannelSplitter(2);
+        merge = audio.ctx.createChannelMerger(2);
+        src.connect(split);
+        split.connect(g, ch);
+        g.connect(merge, 0, ch);
+        out = merge;
+      } else {
+        src.connect(g);
+      }
+      const bus = audio.trackBus[c.track] || audio.master;
+      out.connect(bus);
+      const node = { src, gain: g, split, merge };
+      try { src.start(0); } catch { disposeAudioHoldNode(node); return; }
+      // Re-check after start: a newer refresh/stop may have run while we built the graph.
+      if (gen !== audioHoldGen || !state.audioHold || state.playing) {
+        disposeAudioHoldNode(node);
+        return;
+      }
+      audioHoldNodes.push(node);
+    }).catch(() => { });
+  }
+}
+function setAudioHold(on) {
+  on = !!on;
+  if (on) {
+    if (state.playing) {
+      // Pause without going through pause() (that would clear hold).
+      state.playing = false;
+      els.btnPlay.textContent = "▶";
+      els.btnPlay.classList.remove("on");
+      for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
+    }
+    state.audioHold = true;
+    if (els.btnAudioHold) els.btnAudioHold.classList.add("on");
+    refreshAudioHold();
+  } else {
+    state.audioHold = false;
+    if (els.btnAudioHold) els.btnAudioHold.classList.remove("on");
+    stopAudioHoldNodes();
+  }
 }
 
 /* ── Preview playback speed — affects the PREVIEW player only, never the export ── */
@@ -4355,6 +4483,9 @@ els.btnSnap.addEventListener("click", () => {
   state.snap = !state.snap;
   els.btnSnap.classList.toggle("on", state.snap);
 });
+if (els.btnAudioHold) {
+  els.btnAudioHold.addEventListener("click", () => setAudioHold(!state.audioHold));
+}
 $("btnLayoutReset").addEventListener("click", restoreDefaultLayout);
 $("trackSizeGroup").addEventListener("click", (e) => {
   const b = e.target.closest("[data-track-size]");
