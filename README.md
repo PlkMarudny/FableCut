@@ -9,6 +9,7 @@
 [![Official MCP registry](https://img.shields.io/badge/MCP%20registry-io.github.ronak--create%2Ffablecut-7b6cff?logo=modelcontextprotocol&logoColor=white)](https://registry.modelcontextprotocol.io/v0/servers?search=fablecut)
 [![Mentioned in Awesome MCP Servers](https://awesome.re/mentioned-badge.svg)](https://github.com/punkpeye/awesome-mcp-servers)
 [![Glama score](https://glama.ai/mcp/servers/ronak-create/FableCut/badges/score.svg)](https://glama.ai/mcp/servers/ronak-create/FableCut)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ronak-create/FableCut)
 
 <https://github.com/user-attachments/assets/2430b854-168b-4a9a-af2e-489e5efa7543>
 
@@ -158,6 +159,11 @@ export.
 Everything an agent needs is in **[CLAUDE.md](CLAUDE.md)** — the complete
 schema, semantics and recipes. Point any capable model at that file and it can
 operate the editor end to end.
+
+> 📖 **Browsable docs:** for a conversational, auto-generated tour of the
+> codebase — architecture, the `project.json` schema, the MCP surface — see
+> **[FableCut on DeepWiki](https://deepwiki.com/ronak-create/FableCut)**. Ask it
+> questions about the repo in natural language.
 
 Three equivalent control surfaces:
 
