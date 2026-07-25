@@ -46,6 +46,10 @@ same time.
 - Beat & cue markers (tap <kbd>⇧m</kbd> on the beat during playback) with edge snapping
 - Press <kbd>Alt+t</kbd> to add an in/out transition based on the playhead position over the selected clip. The last used transition is remembered as the default. Drag the overlay triangle to adjust duration; <kbd>Delete</kbd> clears the focused transition.
 - Real decoded audio waveforms on clips
+- **Audio Hold** — timeline toolbar toggle: while paused, loops **one frame** of
+  audio at the playhead (useful when stepping frame-by-frame). Scrubbing or
+  frame-step retargets the held slice; meters stay live. **Play** / **Pause**
+  turns it off.
 - Canvas aspect presets (16:9, 9:16 reels, 4:5, 1:1) + safe-area guides
 - Preview playback speed — shuttle the monitor through 1×/1.5×/2×/4× with **J**/**K**/**L**
   (from a stop <kbd>J</kbd>/<kbd>L</kbd> start playback; while playing <kbd>L</kbd> steps faster
