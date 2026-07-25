@@ -2864,6 +2864,7 @@ function refreshAudioHold() {
 function setAudioHold(on) {
   on = !!on;
   if (on) {
+    if (state.exporting || state.rendering) return;
     if (state.playing) {
       // Pause without going through pause() (that would clear hold).
       state.playing = false;
