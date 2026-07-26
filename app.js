@@ -1387,11 +1387,14 @@ function playRange() {
 function playLimited() {
   return state.workAreaPlay && !state.exporting && hasWorkArea();
 }
-/* Stop time while Limit is on. Playhead past OUT = manual override → full timeline. */
-function playStopAt() {
-  if (!playLimited()) return Math.max(projDur(), 0);
+/* Stop time while Limit is on. Playhead past OUT = manual override → full timeline.
+   `dur`, if given, is a precomputed projDur() (callers already looping every
+   clip once per frame can reuse it instead of triggering a second full scan). */
+function playStopAt(dur) {
+  const d = Math.max(dur ?? projDur(), 0);
+  if (!playLimited()) return d;
   const { end } = playRange();
-  if (state.time > end + 1e-4) return Math.max(projDur(), 0);
+  if (state.time > end + 1e-4) return d;
   return end;
 }
 function gotoHome() {
@@ -1603,13 +1606,46 @@ function drawClipWave(cv, c, trackH) {
   }
 }
 
-/* ── Ruler ── */
+/* ── Ruler ──
+   Pure vector 2D drawing with no <video>/DOM dependency (unlike the program
+   monitor), so it's a clean fit to move off the main thread: transfer the
+   canvas to a Worker once and post it a handful of numbers per frame instead
+   of running the drawing code here. Falls back to drawing directly on the
+   main thread (drawRulerMainThread) when OffscreenCanvas/
+   transferControlToOffscreen isn't available. */
+let rulerWorker = null, rulerWorkerTried = false;
+function ensureRulerWorker() {
+  if (rulerWorkerTried) return;
+  rulerWorkerTried = true;
+  try {
+    if (window.Worker && els.ruler.transferControlToOffscreen) {
+      const offscreen = els.ruler.transferControlToOffscreen();
+      const w = new Worker("ruler-worker.js");
+      w.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
+      rulerWorker = w;
+    }
+  } catch { rulerWorker = null; }
+}
 function drawRuler() {
-  const cv = els.ruler, dpr = window.devicePixelRatio || 1;
+  ensureRulerWorker();
+  const dpr = window.devicePixelRatio || 1;
   const w = els.timelineScroll.clientWidth, h = RULER_H;
+  els.ruler.style.width = w + "px"; els.ruler.style.height = h + "px";
+  if (rulerWorker) {
+    rulerWorker.postMessage({
+      type: "draw", w, h, dpr,
+      sl: els.timelineScroll.scrollLeft, pps: state.pps,
+      markers: project.markers, inPoint: project.inPoint, outPoint: project.outPoint,
+      time: state.time, fps: project.fps,
+    });
+    return;
+  }
+  drawRulerMainThread(w, h, dpr);
+}
+function drawRulerMainThread(w, h, dpr) {
+  const cv = els.ruler;
   if (cv.width !== w * dpr || cv.height !== h * dpr) {
     cv.width = w * dpr; cv.height = h * dpr;
-    cv.style.width = w + "px"; cv.style.height = h + "px";
   }
   const g = cv.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -2604,6 +2640,46 @@ const METER_DB_MAX = 0;
 const METER_DB_MARKS = [0, -6, -12, -24, -36, -48];
 const METER_MODES = ["rms", "lufs", "peak"];
 const METER_MODE_LABEL = { rms: "RMS", lufs: "LUFS", peak: "PEAK" };
+/* Each channel's segment ladder is one <canvas> instead of METER_SEGS separate
+   DOM nodes (was up to 16 tracks × 16 <div>s = 256 live elements, all touched
+   via classList every time the reading changed). Geometry matches the old
+   flex layout: 16 × 12px segments, 2px gaps, column-reverse (index 0 = bottom
+   = quietest). */
+const METER_SEG_W = 8, METER_SEG_H = 12, METER_SEG_GAP = 2;
+const METER_COL_W = METER_SEG_W;
+const METER_COL_H = METER_SEGS * METER_SEG_H + (METER_SEGS - 1) * METER_SEG_GAP;
+function makeMeterCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  cv.style.width = METER_COL_W + "px";
+  cv.style.height = METER_COL_H + "px";
+  cv.width = Math.round(METER_COL_W * dpr);
+  cv.height = Math.round(METER_COL_H * dpr);
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { canvas: cv, ctx };
+}
+/** Paint the full 16-segment ladder for one channel in a single pass. `hold`
+ * is the peak-hold tick's segment index (-1 = none). */
+function paintMeterSegs(entry, lit, hold) {
+  const ctx = entry.ctx;
+  ctx.clearRect(0, 0, METER_COL_W, METER_COL_H);
+  for (let i = 0; i < METER_SEGS; i++) {
+    const y = METER_COL_H - (i + 1) * METER_SEG_H - i * METER_SEG_GAP;
+    const on = i < lit || i === hold;
+    const u = i / (METER_SEGS - 1);
+    ctx.beginPath();
+    ctx.roundRect(0, y, METER_SEG_W, METER_SEG_H, 1);
+    if (on) {
+      ctx.fillStyle = u < 0.6 ? "#3dd68c" : u < 0.85 ? "#f0c14a" : "#e5484d";
+      ctx.fill();
+    } else {
+      ctx.fillStyle = "#2a2a33";
+      ctx.fill();
+      ctx.strokeStyle = "#0006"; ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+}
 const meterState = {
   mode: (() => {
     try {
@@ -2619,6 +2695,8 @@ const meterState = {
   peakHold: {},
   peakHoldT: {},
   segs: {},
+  lastLit: {},   // id -> last-painted lit/hold seg indices, to skip redundant DOM writes
+  lastHold: {},
   modeBtn: null,
 };
 function audioMeterTracks() {
@@ -2728,6 +2806,8 @@ function buildMeterDOM() {
   row.appendChild(scale);
 
   meterState.segs = {};
+  meterState.lastLit = {};
+  meterState.lastHold = {};
   meterState.trackIds = tracks.map((t) => t.id);
   for (const t of tracks) {
     if (meterState.disp[t.id] == null) {
@@ -2741,20 +2821,15 @@ function buildMeterDOM() {
     const col = document.createElement("div");
     col.className = "vu-channel";
     col.dataset.track = t.id;
-    const segs = document.createElement("div");
-    segs.className = "vu-segs";
-    meterState.segs[t.id] = [];
-    for (let i = 0; i < METER_SEGS; i++) {
-      const seg = document.createElement("div");
-      const u = i / (METER_SEGS - 1);
-      seg.className = "vu-seg " + (u < 0.6 ? "g" : u < 0.85 ? "y" : "r");
-      segs.appendChild(seg);
-      meterState.segs[t.id].push(seg);
-    }
+    const segsCv = document.createElement("canvas");
+    segsCv.className = "vu-segs";
+    const entry = makeMeterCanvas(segsCv);
+    meterState.segs[t.id] = entry;
+    paintMeterSegs(entry, 0, -1); // start fully off
     const label = document.createElement("span");
     label.className = "vu-label";
     label.textContent = t.id;
-    col.appendChild(segs);
+    col.appendChild(segsCv);
     col.appendChild(label);
     row.appendChild(col);
   }
@@ -2800,15 +2875,19 @@ function updateMeterUI(dt) {
     }
 
     const segs = meterState.segs[id];
-    if (!segs || !segs.length) continue;
+    if (!segs) continue;
     const level = (next - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN);
     const lit = Math.round(clamp(level, 0, 1) * METER_SEGS);
     const hold = Math.round(clamp(
       ((meterState.peakHold[id] ?? METER_DB_MIN) - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN), 0, 1
     ) * (METER_SEGS - 1));
-    for (let i = 0; i < METER_SEGS; i++) {
-      segs[i].classList.toggle("on", i < lit || i === hold);
-    }
+    // The ballistics above still run every frame (needed for smooth decay),
+    // but the canvas only needs repainting when the result actually differs —
+    // skips a redraw for most tracks most frames.
+    if (meterState.lastLit[id] === lit && meterState.lastHold[id] === hold) continue;
+    meterState.lastLit[id] = lit;
+    meterState.lastHold[id] = hold;
+    paintMeterSegs(segs, lit, hold);
   }
 }
 
@@ -2986,10 +3065,13 @@ function syncMedia() {
     if (c.kind === "text" || c.kind === "image" || c.kind === "svg" || c.kind === "adjust") continue;
     const el = getClipEl(c); if (!el) continue;
     const enabled = isTrackEnabled(c.track);
-    const p = evalProps(c, t);
-    const sp = clamp(+p.speed || 1, 0.1, 8);
     const mt = mediaTimeAt(c, t);
     if (state.playing && enabled && activeAt(c, t)) {
+      // Only the active-under-playhead branch needs the full evaluated props
+      // (speed/volume incl. keyframes+transitions) — skip that work for every
+      // other clip on the timeline, which is the common case each frame.
+      const p = evalProps(c, t);
+      const sp = clamp(+p.speed || 1, 0.1, 8);
       const eff = clamp(sp * playRate(), 0.0625, 16); // preview speed rides on top of clip speed
       if (el.playbackRate !== eff) { try { el.playbackRate = eff; } catch {} }
       if (el.paused) el.play().catch(() => {});
@@ -3034,7 +3116,10 @@ const EASE = {
 /* Effective properties of a clip at timeline time t: static props, overridden by
    keyframe curves, then shaped by in/out transition envelopes. */
 function evalProps(c, t) {
-  const p = { ...DEFAULT_PROPS, ...c.props };
+  // c.props is always fully populated with DEFAULT_PROPS's keys already (on
+  // load and at every clip-creation site), so a plain shallow clone suffices —
+  // merging DEFAULT_PROPS in again here would just double the copy work.
+  const p = { ...c.props };
   const local = t - c.start;
   if (c.keyframes) {
     for (const [k, kfs] of Object.entries(c.keyframes)) {
@@ -4246,9 +4331,12 @@ function loop(ts) {
   if (lastTs == null) lastTs = ts;
   const dt = Math.min(0.1, (ts - lastTs) / 1000);
   lastTs = ts;
+  // projDur() is an O(clips) scan — compute it once per tick and reuse below
+  // instead of the 2-4 independent recomputations this loop used to trigger.
+  const dur = projDur();
   if (state.playing) {
     state.time += dt * playRate();
-    const end = playStopAt();
+    const end = playStopAt(dur);
     if (state.time >= end) {
       state.time = end;
       if (state.exporting) finishExport(true);
@@ -4269,9 +4357,9 @@ function loop(ts) {
   updateSafeOverlay();
   updateMeterUI(dt);
   els.tcCurrent.textContent = fmt(state.time);
-  els.tcTotal.textContent = fmt(projDur());
+  els.tcTotal.textContent = fmt(dur);
   if (state.exporting && !state.rendering) {
-    const pct = projDur() ? (state.time / projDur()) * 100 : 0;
+    const pct = dur ? (state.time / dur) * 100 : 0;
     els.exportProgress.style.width = pct.toFixed(1) + "%";
     els.exportTitle.textContent = `Exporting… ${pct.toFixed(0)}%`;
   }
