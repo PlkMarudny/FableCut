@@ -486,23 +486,34 @@ async function syncFromServer(force) {
     await probeMissingMeta();
   } catch { }
 }
+/** Populate a media entry's duration/dimensions (and cache preview assets) by
+ * dispatching on kind: svg loads its markup, image loads for width/height,
+ * audio/video probes duration+size via a throwaway <video>/<audio> element.
+ * Throws on failure — callers decide whether that's fatal or best-effort.
+ * Shared by importFiles, addLibraryItem and probeMissingMeta. */
+async function loadMediaMetadata(m) {
+  if (m.kind === "svg") { await loadSvgMedia(m); return; }
+  if (m.kind === "image") {
+    const img = await loadImage(m.src);
+    runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img });
+    m.width = img.naturalWidth; m.height = img.naturalHeight;
+    return;
+  }
+  Object.assign(m, await probeAV(m.src, m.kind));
+}
 /* Fill in duration/size for media entries added externally without metadata */
 async function probeMissingMeta() {
   let changed = false;
   for (const m of project.media) {
     if (m.kind === "svg") {
-      if (!runtime.mediaAux.get(m.id)?.svgText) { try { await loadSvgMedia(m); changed = true; } catch { } }
+      if (!runtime.mediaAux.get(m.id)?.svgText) { try { await loadMediaMetadata(m); changed = true; } catch { } }
       continue;
     }
     if (m.kind !== "image" && (m.duration == null || isNaN(m.duration))) {
-      try { Object.assign(m, await probeAV(m.src, m.kind)); changed = true; } catch { }
+      try { await loadMediaMetadata(m); changed = true; } catch { }
     }
     if (m.kind === "image" && !runtime.mediaAux.get(m.id)?.img) {
-      try {
-        const img = await loadImage(m.src);
-        runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img });
-        m.width = img.naturalWidth; m.height = img.naturalHeight; changed = true;
-      } catch { }
+      try { await loadMediaMetadata(m); changed = true; } catch { }
     }
     if (m.kind === "video" && !runtime.mediaAux.get(m.id)?.thumb) {
       grabThumb(m).catch(() => { });
@@ -631,17 +642,9 @@ async function importFiles(fileList) {
     }
     const m = { id: "m_" + uid(), name: file.name, kind, src, transient };
     try {
-      if (kind === "svg") {
-        await loadSvgMedia(m);
-      } else if (kind === "image") {
-        const img = await loadImage(src);
-        runtime.mediaAux.set(m.id, { img });
-        m.width = img.naturalWidth; m.height = img.naturalHeight;
-      } else {
-        Object.assign(m, await probeAV(src, kind));
-        if (kind === "video") grabThumb(m).catch(() => { });
-        ensureWave(m);
-      }
+      await loadMediaMetadata(m);
+      if (kind === "video") grabThumb(m).catch(() => { });
+      ensureWave(m);
     } catch { skipped++; continue; }
     project.media.push(m);
     added++;
@@ -661,7 +664,7 @@ function renderBin() {
     item.className = "bin-item"; item.draggable = true;
     item.dataset.mediaId = m.id;
     const aux = runtime.mediaAux.get(m.id) || {};
-    const icon = m.kind === "audio" ? "🎵" : m.kind === "image" ? "🖼" : m.kind === "svg" ? "✨" : "🎞";
+    const icon = mediaKindIcon(m.kind, "🎞");
     const thumbSrc = aux.thumb || (m.kind === "image" || m.kind === "svg" ? m.src : null);
     item.innerHTML = `
       <div class="bin-thumb" ${thumbSrc ? `style="background-image:url('${thumbSrc}')"` : ""}>${thumbSrc ? "" : icon}</div>
@@ -730,6 +733,13 @@ function libKind(name) {
   if (IMAGE_EXT.test(name)) return "image";
   return null;
 }
+/** Emoji shown for a bin/library item without a thumbnail preview. `other` is
+ * the fallback for kinds not explicitly mapped here (image/svg items always
+ * render a real thumbnail in both callers, so their icon is never actually
+ * shown). Shared by renderBin and renderLibrary. */
+function mediaKindIcon(kind, other) {
+  return kind === "audio" ? "🎵" : kind === "svg" ? "✨" : kind === "image" ? "🖼" : kind === "video" ? "🎞" : other;
+}
 /* Find-or-create the project media entry for a library file (dedup by src). */
 function mediaForLibraryItem(f) {
   let m = project.media.find((x) => x.src === f.src);
@@ -745,19 +755,15 @@ async function addLibraryItem(f, trackId, at) {
   const m = mediaForLibraryItem(f);
   if (!m) { toast("Unsupported file type: " + f.name); return; }
   if ((m.kind === "audio" || m.kind === "video") && (m.duration == null || isNaN(m.duration))) {
-    try { Object.assign(m, await probeAV(m.src, m.kind)); } catch { }
+    try { await loadMediaMetadata(m); } catch { }
     ensureWave(m);
     if (m.kind === "video") grabThumb(m).catch(() => { });
   }
   if (m.kind === "svg" && !runtime.mediaAux.get(m.id)?.svgText) {
-    try { await loadSvgMedia(m); } catch { }
+    try { await loadMediaMetadata(m); } catch { }
   }
   if (m.kind === "image" && !runtime.mediaAux.get(m.id)?.img) {
-    try {
-      const img = await loadImage(m.src);
-      runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img });
-      m.width = img.naturalWidth; m.height = img.naturalHeight;
-    } catch { }
+    try { await loadMediaMetadata(m); } catch { }
   }
   addClipFromMedia(m, trackId, at);
 }
@@ -795,7 +801,7 @@ function renderLibrary() {
     item.className = "bin-item lib-item";
     item.draggable = true;
     const visual = kind === "image" || kind === "svg";
-    const icon = kind === "audio" ? "🎵" : kind === "video" ? "🎞" : kind === "svg" ? "✨" : "🧩";
+    const icon = mediaKindIcon(kind, "🧩");
     item.innerHTML = `
       <div class="bin-thumb${kind === "svg" ? " svg" : ""}" ${visual ? `style="background-image:url('${f.src}')"` : ""}>${visual ? "" : icon}</div>
       <div class="bin-meta">
@@ -1086,9 +1092,12 @@ function gapAtPlayhead(trackId, t) {
 }
 /* Sync-safe close: every enabled track must have a gap at the playhead; close
    the intersection of those gaps by shifting later clips on all enabled tracks. */
+function enabledTracks() {
+  return TRACKS.filter((tr) => isTrackEnabled(tr.id));
+}
 function closeGapAtPlayhead() {
   const t = state.time;
-  const enabled = TRACKS.filter((tr) => isTrackEnabled(tr.id));
+  const enabled = enabledTracks();
   if (!enabled.length) { toast("No enabled tracks"); return; }
   let L = 0, R = Infinity;
   for (const tr of enabled) {
@@ -1172,7 +1181,7 @@ function gapSearchRange() {
 }
 /* Aligned gaps on enabled tracks inside [t0, t1] — same notion as closeGapAtPlayhead. */
 function listAlignedGaps(t0, t1) {
-  const enabled = TRACKS.filter((tr) => isTrackEnabled(tr.id));
+  const enabled = enabledTracks();
   if (!enabled.length || t1 - t0 <= GAP_EPS) return [];
   const edges = new Set([t0, t1]);
   for (const c of project.clips) {
@@ -2559,6 +2568,25 @@ function ensureAudio() {
   }
   return runtime.audio;
 }
+/** Route `src -> g -> (channel-isolated ->) out` on `ctx`. When `ch` is 0/1,
+ * `src` is split to stereo, only channel `ch` is fed through `g`, then
+ * re-merged onto the same side — used to isolate one stereo audio stem onto
+ * a single track bus. Returns the node to connect downstream (`g` when no
+ * isolation applies) plus the split/merge nodes (null when unused) so callers
+ * can track them for later disconnect/dispose. Shared by hookAudio,
+ * refreshAudioHold and the offline export mixdown. */
+function connectChannelIsolated(ctx, src, g, ch) {
+  if (ch === 0 || ch === 1) {
+    const split = ctx.createChannelSplitter(2);
+    const merge = ctx.createChannelMerger(2);
+    src.connect(split);
+    split.connect(g, ch);
+    g.connect(merge, 0, ch);
+    return { out: merge, split, merge };
+  }
+  src.connect(g);
+  return { out: g, split: null, merge: null };
+}
 function hookAudio(c, el) {
   if (!runtime.audio || runtime.clipGain.has(c.id)) return;
   if (c.kind !== "video" && c.kind !== "audio") return;
@@ -2567,18 +2595,11 @@ function hookAudio(c, el) {
     const src = ctx.createMediaElementSource(el);
     const g = ctx.createGain();
     const ch = c.props?.audioChannel;
-    if (ch === 0 || ch === 1) {
-      // Isolate one stereo channel and place it on L or R of the track bus
-      const splitter = ctx.createChannelSplitter(2);
-      const merger = ctx.createChannelMerger(2);
-      src.connect(splitter);
-      splitter.connect(g, ch);
-      g.connect(merger, 0, ch);
-      g._fcSplit = splitter;
-      g._fcOut = merger;
+    const { split, merge } = connectChannelIsolated(ctx, src, g, ch);
+    if (split) {
+      g._fcSplit = split;
+      g._fcOut = merge;
       g._fcChannel = ch;
-    } else {
-      src.connect(g);
     }
     runtime.clipGain.set(c.id, g);
     routeClipGain(c);
@@ -2915,17 +2936,7 @@ function refreshAudioHold() {
       const g = audio.ctx.createGain();
       g.gain.value = vol;
       const ch = c.props?.audioChannel;
-      let split = null, merge = null, out = g;
-      if (ch === 0 || ch === 1) {
-        split = audio.ctx.createChannelSplitter(2);
-        merge = audio.ctx.createChannelMerger(2);
-        src.connect(split);
-        split.connect(g, ch);
-        g.connect(merge, 0, ch);
-        out = merge;
-      } else {
-        src.connect(g);
-      }
+      const { out, split, merge } = connectChannelIsolated(audio.ctx, src, g, ch);
       const bus = audio.trackBus[c.track] || audio.master;
       out.connect(bus);
       const node = { src, gain: g, split, merge };
@@ -3411,19 +3422,27 @@ function buildFilter(p) {
   if (p.invert) parts.push(`invert(${p.invert}%)`);
   return parts.length ? parts.join(" ") : "none";
 }
+/** Active clips across enabled video tracks at time `t`, in compositing order
+ * (bottom-to-top: V1 first, then V2, V3), each track's clips sorted by
+ * `start`. Shared by drawFrame (renders it as-is) and pickClipAt (hit-tests
+ * it top-down, filtered to visual clips only). */
+function visibleClipsAt(t) {
+  const out = [];
+  const videoTracks = TRACKS.filter((tr) => tr.kind === "video" && isTrackEnabled(tr.id)).reverse();
+  for (const tr of videoTracks) {
+    out.push(...project.clips
+      .filter((c) => c.track === tr.id && activeAt(c, t))
+      .sort((a, b) => a.start - b.start));
+  }
+  return out;
+}
 function drawFrame(t = state.time) {
   const W = els.preview.width, H = els.preview.height;
   ctx2d.setTransform(1, 0, 0, 1, 0, 0);
   ctx2d.filter = "none"; ctx2d.globalAlpha = 1;
   ctx2d.fillStyle = project.background || "#000"; ctx2d.fillRect(0, 0, W, H);
   // render video tracks bottom-up (V1 under V2)
-  const videoTracks = TRACKS.filter((tr) => tr.kind === "video" && isTrackEnabled(tr.id)).reverse();
-  for (const tr of videoTracks) {
-    const clips = project.clips
-      .filter((c) => c.track === tr.id && activeAt(c, t))
-      .sort((a, b) => a.start - b.start);
-    for (const c of clips) drawClip(c, W, H, t);
-  }
+  for (const c of visibleClipsAt(t)) drawClip(c, W, H, t);
   // on-canvas selection handles (never during export or playback)
   if (!state.exporting && !state.playing) drawSelectionOverlay(W, H, t);
 }
@@ -3500,11 +3519,7 @@ function toLocal(pt, b) {
   return { x: dx * cs - dy * sn, y: dx * sn + dy * cs };
 }
 function pickClipAt(pt, W, H) {
-  const seq = [];
-  for (const tr of TRACKS.filter((tk) => tk.kind === "video" && isTrackEnabled(tk.id)).slice().reverse()) {
-    for (const c of project.clips.filter((c) => c.track === tr.id && activeAt(c, state.time)).sort((a, b) => a.start - b.start))
-      if (isVisualClip(c)) seq.push(c);
-  }
+  const seq = visibleClipsAt(state.time).filter(isVisualClip);
   for (let i = seq.length - 1; i >= 0; i--) {
     const c = seq[i], b = clipBounds(c, evalProps(c, state.time), W, H), lp = toLocal(pt, b);
     if (Math.abs(lp.x) <= b.hw && Math.abs(lp.y) <= b.hh) return c;
@@ -3896,9 +3911,10 @@ function wrapTextToWidth(ctx, text, maxW) {
   }
   return out.length ? out : [""];
 }
+const lineHeightOf = (p) => clamp(+p.lineHeight || 1.2, 0.6, 3);
 /* Largest font size ≤ maxSize that wraps into boxW×boxH. */
 function fitFontSizeToBox(ctx, p, boxW, boxH, maxSize) {
-  const lhMul = clamp(+p.lineHeight || 1.2, 0.6, 3);
+  const lhMul = lineHeightOf(p);
   const justify = p.align === "justify";
   const src = textSourceString(p);
   let lo = 8, hi = Math.max(8, Math.round(maxSize || 72)), best = 8;
@@ -3925,7 +3941,7 @@ function measureTextHalfSize(p) {
     lines = lines.map((l) => justifyLineBySpaces(ctx2d, l, target));
   }
   const tw = Math.max(1, ...lines.map((l) => ctx2d.measureText(l).width));
-  const lh = size * clamp(+p.lineHeight || 1.2, 0.6, 3);
+  const lh = size * lineHeightOf(p);
   ctx2d.restore();
   const sc = +p.scale || 1;
   return { hw: (tw / 2 + size * 0.25) * sc, hh: (lines.length * lh / 2 + size * 0.14) * sc };
@@ -3962,7 +3978,7 @@ function drawText(c, p, local) {
     const target = useBox ? boxW : textJustifyTarget(p, Math.max(1, ...rawLines.map((ln) => ctx2d.measureText(ln).width)));
     rawLines = rawLines.map((ln) => justifyLineBySpaces(ctx2d, ln, target));
   }
-  const lh = size * (clamp(+p.lineHeight || 1.2, 0.6, 3));
+  const lh = size * lineHeightOf(p);
   const nLines = Math.max(1, rawLines.length);
   const vAlign = p.vAlign === "top" || p.vAlign === "bottom" ? p.vAlign : "middle";
   // y0 = first line center. With a box, place the whole block by vAlign; without, center on clip origin.
@@ -4378,16 +4394,8 @@ async function renderAudioMix(dur) {
       curve[i] = clamp(evalProps(c, c.start + (i / (n - 1)) * c.duration).volume, 0, 4);
     g.gain.setValueCurveAtTime(curve, Math.max(0, c.start), Math.max(0.01, c.duration));
     const ch = c.props?.audioChannel;
-    if (ch === 0 || ch === 1) {
-      const splitter = off.createChannelSplitter(2);
-      const merger = off.createChannelMerger(2);
-      src.connect(splitter);
-      splitter.connect(g, ch);
-      g.connect(merger, 0, ch);
-      merger.connect(off.destination);
-    } else {
-      src.connect(g); g.connect(off.destination);
-    }
+    const { out } = connectChannelIsolated(off, src, g, ch);
+    out.connect(off.destination);
     if (hasSpeedRamp(c)) {
       const rc = new Float32Array(n);
       for (let i = 0; i < n; i++)
