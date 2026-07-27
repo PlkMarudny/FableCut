@@ -199,7 +199,7 @@ body.resizing-panels * {
 
 body.track-size-s .clip .clip-label {
   font-size: 10px;
-  padding: 1px 6px;
+  padding: 0 6px;
 }
 
 body.track-size-s .clip .fade {
@@ -268,6 +268,37 @@ body.track-size-s .clip.selected {
 .style-opt.on {
   color: #cfc8ff;
   background: #7b6cff14;
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 160px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 12px 32px #000c;
+}
+.ctx-opt {
+  padding: 7px 12px;
+  border-radius: 5px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-opt:hover {
+  background: #7b6cff26;
+}
+/* media-replace picker reuses .style-menu/.style-opt but lists plain file
+   names, not font previews — match the app's normal UI text size */
+.style-opt.media-opt {
+  font-size: 12px;
+  line-height: 1.3;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── Buttons ── */
@@ -429,7 +460,7 @@ body.track-size-s .clip.selected {
   padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .lib-item .lib-play,
@@ -466,23 +497,139 @@ body.track-size-s .clip.selected {
   opacity: .7;
 }
 
-.bin-item {
+.bin-item,
+.bin-folder {
   display: flex;
   gap: 8px;
   align-items: center;
   padding: 6px;
+  padding-left: calc(6px + var(--bin-depth, 0) * 14px);
   border-radius: 6px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   cursor: grab;
 }
 
-.bin-item:hover {
+.bin-item:hover,
+.bin-folder:hover {
   border-color: #454552;
 }
 
-.bin-item:active {
+.bin-item.selected {
+  border-color: var(--accent);
+  background: #7b6cff18;
+  box-shadow: inset 0 0 0 1px #7b6cff44;
+}
+
+.bin-item:active,
+.bin-folder:active {
   cursor: grabbing;
+}
+
+.bin-item.bin-dragging,
+.bin-folder.bin-dragging {
+  opacity: .45;
+}
+
+.bin-folder {
+  background: #1a1a20;
+  cursor: default;
+}
+
+.bin-folder .bin-folder-twist {
+  flex: none;
+  width: 18px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 22px;
+}
+
+.bin-folder-icon {
+  flex: none;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.bin-folder-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  outline: none;
+  border-radius: 3px;
+}
+
+.bin-folder-name[contenteditable="true"] {
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  padding: 1px 4px;
+  cursor: text;
+}
+
+.bin-folder-count {
+  flex: none;
+  font-size: 10px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.bin-folder-add {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  opacity: 0;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.bin-folder:hover .bin-folder-add {
+  opacity: 1;
+}
+
+.bin-folder-add:hover {
+  color: var(--text);
+  background: #2a2a33;
+}
+
+.bin-item.bin-drop-over,
+.bin-folder.bin-drop-over,
+.bin-drop-root.bin-drop-over {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: #7b6cff18;
+}
+
+.bin-drop-root {
+  margin-top: 4px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px dashed transparent;
+  color: var(--dim);
+  font-size: 11px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity .12s, border-color .12s;
+  pointer-events: none;
+}
+
+.bin-list:has(.bin-dragging) .bin-drop-root {
+  opacity: 1;
+  pointer-events: auto;
+  border-color: #454552;
 }
 
 .bin-thumb {
@@ -531,7 +678,8 @@ body.track-size-s .clip.selected {
   transition: opacity .12s;
 }
 
-.bin-item:hover .bin-del {
+.bin-item:hover .bin-del,
+.bin-folder:hover .bin-del {
   opacity: 1;
   pointer-events: auto;
 }
@@ -635,6 +783,77 @@ body.track-size-s .clip.selected {
   font-size: 8px;
   opacity: .7;
 }
+/* ── Per-track VU (RMS / LUFS / Peak) ── */
+.vu-meter {
+  position: absolute;
+  right: 2px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  z-index: 4;
+  pointer-events: auto;
+  padding: 5px 5px 4px;
+  background: #000a;
+  user-select: none;
+}
+.vu-mode {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 2px 0 2px;
+  border: 0;
+  background: transparent;
+  color: #c8c8d0;
+  font: 700 9px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: .6px;
+  text-align: center;
+  cursor: pointer;
+  opacity: .85;
+}
+.vu-mode:hover { opacity: 1; color: #fff; }
+.vu-channels {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+.vu-scale {
+  position: relative;
+  /* Match .vu-segs height: 16×12px + 15×2px gap */
+  width: 16px;
+  height: 222px;
+  margin-right: 0px;
+  pointer-events: none;
+}
+.vu-scale-tick {
+  position: absolute;
+  right: 0;
+  transform: translateY(-50%);
+  font: 700 8px/1 ui-sans-serif, system-ui, sans-serif;
+  color: #8b8b93;
+  letter-spacing: .2px;
+  white-space: nowrap;
+}
+.vu-scale-tick:first-child { transform: translateY(0); }
+.vu-scale-tick:last-child { transform: translateY(-100%); }
+.vu-channel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+.vu-segs {
+  display: block;
+  /* size is set inline via JS (makeMeterCanvas) to match devicePixelRatio */
+}
+.vu-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: #8b8b93;
+  letter-spacing: .3px;
+  line-height: 1;
+}
 
 .head-select {
   background: var(--panel-2);
@@ -702,13 +921,48 @@ body.track-size-s .clip.selected {
 
 .transport-btns {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 4px;
+}
+
+.transport-btns .btn.icon {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.transport-btns .btn.icon.big {
+  width: 40px;
+  height: 34px;
+  font-size: 16px;
+}
+
+#btnPlay.on {
+  background: #7b6cff;
+  border-color: #9a8fff;
+  color: #fff;
+  font-size: 19.2px; /* 16px × 1.2 — pause glyph reads smaller than ▶ */
+  /* ⏸ sits low in the em-box; padding shifts the flex content up to optical center */
+  padding-bottom: 3px;
+}
+
+#btnPlay.on:hover {
+  background: #8d80ff;
+  border-color: #b0a6ff;
 }
 
 .timecode {
   font: 600 14px/1 "Consolas", monospace;
   color: #b9b3ff;
   min-width: 86px;
+  height: 14px;
+  line-height: 14px;
+  align-self: center;
 }
 
 .timecode.dim {
@@ -768,6 +1022,14 @@ body.track-size-s .clip.selected {
   flex: 0 0 72px;
   font-size: 12px;
   color: var(--dim);
+}
+
+.insp-row label.insp-reset {
+  cursor: help;
+}
+
+.insp-row label.insp-reset:hover {
+  color: #cfc8ff;
 }
 
 .insp-ctrls {
@@ -1013,6 +1275,22 @@ input[type=range] {
   background-color: #7b6cff14;
 }
 
+/* Same-track audio overlap — hatched band over the shared time range */
+.track-overlap {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: 3px;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 3px,
+    #ff5a5a55 3px 6px
+  );
+  box-shadow: inset 0 0 0 1px #ff6b6bcc;
+}
+
 /* ── Clips ── */
 .clip {
   position: absolute;
@@ -1061,9 +1339,12 @@ input[type=range] {
 .clip .clip-label {
   position: absolute;
   inset: 0;
-  padding: 3px 8px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
   font-size: 11px;
   font-weight: 600;
+  line-height: 1;
   color: #fff;
   text-shadow: 0 1px 2px #000c;
   white-space: nowrap;
@@ -1394,21 +1675,110 @@ body.track-size-s .clip .clip-kf-n {
   display: none;
 }
 
+.dialog.help {
+  width: min(820px, 94vw);
+  max-height: min(90vh, 640px);
+  overflow: auto;
+}
+
+.dialog.settings {
+  width: min(440px, 92vw);
+}
+
+.dialog.settings .settings-intro {
+  margin-bottom: 14px;
+  font-size: 12px;
+}
+
+.dialog.settings .settings-section h3 {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .4px;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin: 0 0 8px;
+}
+
+.settings-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--panel-2);
+}
+
+.settings-row:hover {
+  border-color: #454552;
+}
+
+.settings-row input {
+  margin-top: 2px;
+  flex: none;
+}
+
+.settings-label {
+  display: block;
+  color: #e8e8ec;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.settings-hint {
+  display: block;
+  font-size: 12px;
+  color: var(--dim);
+  line-height: 1.35;
+}
+
+#btnSettings {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  padding: 6px 0;
+}
+
+#btnSettings .ico {
+  margin: 0;
+  vertical-align: 0;
+}
+
+.dialog.help .keys-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 28px;
+  margin-bottom: 12px;
+  align-items: start;
+}
+
 .dialog.help .keys {
   width: 100%;
   border-collapse: collapse;
-  margin-bottom: 16px;
+  margin-bottom: 0;
 }
 
 .dialog.help .keys td {
   padding: 5px 6px;
   border-bottom: 1px solid #26262c;
   font-size: 12px;
+  vertical-align: top;
 }
 
 .dialog.help .keys td:first-child {
-  width: 46%;
+  width: 40%;
   color: var(--dim);
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .dialog.help .keys-cols {
+    grid-template-columns: 1fr;
+  }
 }
 
 kbd {
