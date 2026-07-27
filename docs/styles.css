@@ -418,3 +418,119 @@ h3 { font-family: var(--sans); font-size: 1.08rem; font-weight: 650; letter-spac
   .cell::before, .reveal.zoom { transition: none; }
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   LIQUID GLASS THEME
+   Overlay pass that re-materials every surface as frosted "liquid
+   glass": translucent panels that blur + saturate the graded aurora
+   behind them, a bright specular top edge, a soft inner floor shadow
+   and a lifted outer shadow. The brand palette, timeline motifs and
+   background FX are untouched - they are what the glass refracts.
+   Appended last so it wins the cascade without editing the base rules.
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  --r: 16px;
+  --glass: rgba(255, 255, 255, 0.055);
+  --glass-2: rgba(255, 255, 255, 0.085);
+  --glass-brd: rgba(255, 255, 255, 0.16);
+  --glass-code: rgba(6, 6, 14, 0.42);
+  --glass-blur: saturate(180%) blur(22px);
+  /* outer lift + inset specular top + inset dark floor = the lens look */
+  --glass-shadow:
+    0 10px 34px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    inset 0 -14px 30px rgba(0, 0, 0, 0.16);
+}
+
+/* Shared frosted material */
+.cell, .cmd-card, .status-card, .code-card, .window,
+.demo-video, .marquee, .nav-cta, .btn-ghost, .copy, .stars-badge {
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-brd);
+  box-shadow: var(--glass-shadow);
+}
+
+/* A moving specular sheen sweeps the top edge of the big panels */
+.cell, .cmd-card, .status-card, .code-card, .window, .demo-video {
+  position: relative;
+  isolation: isolate;
+}
+.cell::after, .cmd-card::after, .status-card::after,
+.code-card::after, .window::after, .demo-video::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  pointer-events: none; z-index: 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.02) 26%, transparent 55%);
+  mix-blend-mode: screen;
+}
+.cell > *, .cmd-card > *, .status-card > *,
+.code-card > *, .window > *, .demo-video > * { position: relative; z-index: 1; }
+
+/* Tinted glass variants keep their hue but gain the frost */
+.cell.accent {
+  background:
+    radial-gradient(130% 130% at 100% 0%, rgba(79, 140, 255, 0.20), transparent 56%),
+    var(--glass-2);
+  border-color: rgba(140, 130, 255, 0.34);
+}
+.cell.dark { background: rgba(6, 6, 14, 0.40); }
+
+/* Code / command surfaces read best as darker glass for contrast */
+.code-card, .cmd { background: var(--glass-code); }
+.cmd {
+  -webkit-backdrop-filter: saturate(150%) blur(14px);
+  backdrop-filter: saturate(150%) blur(14px);
+  border: 1px solid var(--glass-brd);
+}
+.code-top, .code-card pre { background: transparent; }
+.demo-video figcaption { background: rgba(6, 6, 14, 0.34); }
+
+/* Nav: a floating glass bar */
+.nav {
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  background: rgba(10, 10, 16, 0.42);
+}
+.nav.scrolled {
+  background: rgba(10, 10, 16, 0.6);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28), inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Glass buttons: hover lifts + brightens the frost */
+.btn-ghost:hover, .nav-cta:hover, .copy:hover {
+  background: var(--glass-2);
+  border-color: rgba(255, 255, 255, 0.30);
+}
+.cell:hover { border-color: rgba(255, 255, 255, 0.28); }
+
+/* ── Live GitHub stars ── */
+.star-ico { width: 15px; height: 15px; fill: var(--gold); flex: none; filter: drop-shadow(0 0 6px rgba(255, 210, 74, 0.5)); }
+.nav-cta { display: inline-flex; align-items: center; gap: 8px; }
+.nav-star-count {
+  font-family: var(--num); font-size: 0.95rem; letter-spacing: 0.03em;
+  color: var(--gold); min-width: 1.5ch; text-align: center;
+  padding-left: 8px; margin-left: 2px; border-left: 1px solid var(--glass-brd);
+}
+.stars-badge {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 13px 20px; border-radius: 999px;
+  color: var(--text); font-size: 0.96rem; line-height: 1;
+  transition: transform 0.2s var(--ease), border-color 0.2s, background 0.2s;
+}
+.stars-badge:hover { transform: translateY(-2px); border-color: rgba(255, 255, 255, 0.30); background: var(--glass-2); }
+.stars-num { font-family: var(--num); font-size: 1.3rem; letter-spacing: 0.02em; color: var(--gold); }
+.stars-lbl { color: var(--text-dim); font-weight: 500; }
+
+/* Glass leans on backdrop blur; degrade gracefully where unsupported */
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .cell, .cmd-card, .status-card, .code-card, .window,
+  .demo-video, .marquee, .nav-cta, .btn-ghost, .copy, .stars-badge { background: var(--surface); }
+  .code-card, .cmd { background: #0c0c12; }
+  .nav { background: rgba(11, 11, 14, 0.92); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stars-badge { transition: none; }
+}
+

@@ -90,6 +90,39 @@
       });
   }
 
+  /* Live GitHub star count from the public API. Fills every [data-gh-stars]
+     target (nav pill + hero badge) and counts up for a "live" feel. */
+  var starEls = document.querySelectorAll("[data-gh-stars]");
+  if (starEls.length) {
+    var fmt = function (v) {
+      return v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace(/\.0$/, "") + "k" : String(v);
+    };
+    var countUp = function (el, target) {
+      if (reduce || target <= 0) { el.textContent = fmt(target); return; }
+      var start = performance.now(), dur = 1100;
+      (function frame(now) {
+        var p = Math.min(1, (now - start) / dur);
+        var eased = 1 - Math.pow(1 - p, 3);
+        el.textContent = fmt(Math.round(target * eased));
+        if (p < 1) requestAnimationFrame(frame);
+      })(start);
+    };
+    fetch("https://api.github.com/repos/ronak-create/FableCut", {
+      headers: { Accept: "application/vnd.github+json" }
+    })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (repo) {
+        var n = typeof repo.stargazers_count === "number" ? repo.stargazers_count : 0;
+        starEls.forEach(function (el) {
+          el.setAttribute("title", n.toLocaleString() + " stars on GitHub");
+          countUp(el, n);
+        });
+      })
+      .catch(function () {
+        starEls.forEach(function (el) { el.textContent = el.getAttribute("data-fallback") || "★"; });
+      });
+  }
+
   /* ── FontKit: load any Google Font on demand ──
      The same "any font by name" idea the editor uses. Core page type is
      self-hosted; this pulls extra faces for the type-cut showcase. */
