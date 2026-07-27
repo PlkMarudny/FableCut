@@ -23,6 +23,9 @@ const TRACK_SIZE_PRESETS = {
   m: { thumbs: true, h: { V3: 36, V2: 44, V1: 44, A1: 32, A2: 32, A3: 32, A4: 32 } },
   l: { thumbs: true, h: { V3: 44, V2: 58, V1: 58, A1: 42, A2: 42, A3: 42, A4: 42 } },
 };
+// Generous cap on how many audio tracks can be auto-added for a multi-channel
+// source (e.g. 7.1 surround = 8 channels) — see ensureAudioTrackCount().
+const MAX_AUDIO_TRACKS = 16;
 const TRACK_SIZE_KEY = "fablecut-track-size";
 const LAST_TRANS_KEY = { in: "fablecut-last-trans-in", out: "fablecut-last-trans-out" };
 const DEFAULT_LAST_TRANS = { type: "fade", duration: 1 };
@@ -130,6 +133,63 @@ const ASPECT_PRESETS = [
 ];
 const WAVE_PEAKS_PER_SEC = 50;
 const TRACK_IDS = new Set(TRACKS.map((t) => t.id));
+// Audio lanes available for a video's per-channel linked audio (index = props.audioChannel).
+// Starts as the 4 built-in tracks; ensureAudioTrackCount() grows both this and
+// TRACKS/TRACK_IDS at runtime for sources with more channels (5.1, 7.1, …).
+const AUDIO_TRACK_IDS = TRACKS.filter((t) => t.kind === "audio").map((t) => t.id);
+/* Add A5, A6, … until there are `need` audio tracks (capped at
+   MAX_AUDIO_TRACKS), so multi-channel sources beyond stereo/quad (5.1, 7.1…)
+   each get their own linked audio track. Returns how many were added. */
+function ensureAudioTrackCount(need) {
+  need = Math.min(need, MAX_AUDIO_TRACKS);
+  const palette = ["#7ec249", "#5a9e3a", "#4a8a2f", "#3a7226"];
+  const newIds = [];
+  while (AUDIO_TRACK_IDS.length < need) {
+    const n = AUDIO_TRACK_IDS.length + 1;
+    const id = "A" + n;
+    const preset = TRACK_SIZE_PRESETS[state.trackSize] || TRACK_SIZE_PRESETS.l;
+    TRACKS.push({ id, kind: "audio", h: preset.h.A1 || 42, color: palette[(n - 1) % palette.length] });
+    TRACK_IDS.add(id);
+    AUDIO_TRACK_IDS.push(id);
+    newIds.push(id);
+  }
+  if (newIds.length) {
+    buildTrackDOM();
+    if (runtime.audio) addLiveAudioTrackBuses(newIds);
+  }
+  return newIds.length;
+}
+/* Wire newly-added tracks into an already-running audio graph (playback may
+   have started before a multi-channel replace/add grew the track set). All
+   buses are created up front, then the meter is reinstalled at most once —
+   its AudioWorkletNode input count is fixed at creation, so adding several
+   tracks in one go (e.g. 4 new lanes for a 7.1 source) must snapshot the
+   full updated track list before rebuilding it, not one track at a time. */
+function addLiveAudioTrackBuses(ids) {
+  const audio = runtime.audio;
+  if (!audio) return;
+  for (const id of ids) {
+    if (audio.trackBus[id]) continue;
+    audio.trackBus[id] = audio.ctx.createGain();
+    audio.audioTrackIds.push(id);
+  }
+  if (!audio.meterReady) {
+    for (const id of ids) audio.trackBus[id]?.connect(audio.master);
+    return;
+  }
+  // Feed every bus (old + new) through master directly before tearing down
+  // the old meter — if the rebuild below fails, all tracks stay audible via
+  // this fallback instead of feeding an orphaned, disconnected meter node.
+  for (const id of Object.keys(audio.trackBus)) {
+    try { audio.trackBus[id].disconnect(); } catch {}
+    audio.trackBus[id].connect(audio.master);
+  }
+  try { audio.meter.port.onmessage = null; } catch {}
+  try { audio.meter.disconnect(); } catch {}
+  audio.meter = null;
+  audio.meterReady = false;
+  installMeterWorklet(audio).catch(() => {});
+}
 
 /* ── User settings (localStorage; optional behavior toggles) ── */
 const SETTINGS_KEY = "fablecut-settings";
@@ -406,6 +466,15 @@ function applyProject(data) {
       if (Array.isArray(arr)) arr.sort((a, b) => a.t - b.t);
     if (c.kind === "text") ensureFont(c.props.font);
   }
+  // TRACKS isn't persisted — any extra audio lanes (A5+, from a multi-channel
+  // source) only exist as clip.track references on disk. Recreate them so
+  // those clips don't silently vanish from the timeline on reload.
+  let maxAudioTrack = AUDIO_TRACK_IDS.length;
+  for (const c of project.clips) {
+    const am = /^A(\d+)$/.exec(c.track || "");
+    if (am) maxAudioTrack = Math.max(maxAudioTrack, +am[1]);
+  }
+  if (maxAudioTrack > AUDIO_TRACK_IDS.length) ensureAudioTrackCount(maxAudioTrack);
   // AV links aren't always on disk (older saves / agents) — rebuild from matching timing.
   relinkClips();
   // reset runtime playback elements so they rebuild against new data
@@ -593,7 +662,7 @@ function wavePeaksFor(c) {
   if (w instanceof Float32Array) return w;
   if (!w.max) return null;
   const ch = c.props?.audioChannel;
-  if ((ch === 0 || ch === 1) && w.channels?.[ch]) return w.channels[ch];
+  if (Number.isInteger(ch) && w.channels?.[ch]) return w.channels[ch];
   return w.max;
 }
 
@@ -614,8 +683,9 @@ function mediaKindFromFile(file) {
 }
 async function importFiles(fileList) {
   const files = [...fileList];
-  if (!files.length) return;
+  if (!files.length) return [];
   let added = 0, skipped = 0;
+  const addedMedia = [];
   for (const file of files) {
     const kind = mediaKindFromFile(file);
     if (!kind) { skipped++; continue; }
@@ -644,6 +714,7 @@ async function importFiles(fileList) {
       }
     } catch { skipped++; continue; }
     project.media.push(m);
+    addedMedia.push(m);
     added++;
   }
   renderBin(); scheduleSave();
@@ -651,6 +722,7 @@ async function importFiles(fileList) {
     toast("Couldn't import — unsupported or unreadable file type");
   else if (skipped)
     toast(`Imported ${added}, skipped ${skipped}`);
+  return addedMedia;
 }
 
 function renderBin() {
@@ -952,9 +1024,73 @@ function addClipFromMedia(m, trackId, at) {
     };
     project.clips.push(aL, aR);
     ensureWave(m);
+    reconcileAudioChannels(c);
   }
   selectClip(c.id); scheduleSave();
   return c;
+}
+/* Resolve (and cache) a media's real channel count via Web Audio decode —
+   <video>/<audio> metadata (probeAV) doesn't expose it, only decodeAudioData
+   does. Shares the getAudioBuffer() cache, so this never decodes twice. */
+async function detectChannelCount(m) {
+  if (m.channels != null) return m.channels;
+  try {
+    const buf = await getAudioBuffer(m);
+    if (m.channels == null) m.channels = buf.numberOfChannels;
+  } catch { if (m.channels == null) m.channels = 2; }
+  return m.channels;
+}
+/* Keep a video clip's linked per-channel audio clips in sync with its
+   media's actual channel count. Channels 0/1 (A1/A2) are created
+   synchronously by addClipFromMedia; this handles channel 3+ once the async
+   channel-count decode resolves, growing the audio track set (A5, A6, …) via
+   ensureAudioTrackCount() for sources beyond 4 channels (5.1, 7.1…), and is
+   also re-run after replaceClipMedia swaps the source. Drops linked clips
+   for channels the (new) source no longer has, and warns only if a source
+   has more channels than MAX_AUDIO_TRACKS. */
+async function reconcileAudioChannels(videoClip) {
+  if (videoClip.kind !== "video" || !videoClip.linkGroup) return;
+  const mediaId = videoClip.mediaId;
+  const m = getMedia(mediaId);
+  if (!m) return;
+  const chCount = await detectChannelCount(m);
+  const live = getClip(videoClip.id);
+  if (!live || live.mediaId !== mediaId) return; // superseded by a newer add/replace
+  const lg = live.linkGroup;
+  const tracksBefore = AUDIO_TRACK_IDS.length;
+  if (chCount > tracksBefore) ensureAudioTrackCount(chCount);
+  const newTracks = AUDIO_TRACK_IDS.length - tracksBefore;
+  const wantCh = Math.min(chCount, AUDIO_TRACK_IDS.length);
+  const have = project.clips.filter((c) => c.linkGroup === lg && c.kind === "audio");
+  let added = 0, removed = 0;
+  for (const c of have) {
+    if ((c.props?.audioChannel ?? 0) >= wantCh) {
+      releaseClipEl(c.id);
+      project.clips = project.clips.filter((x) => x !== c);
+      removed++;
+    }
+  }
+  for (let ch = 0; ch < wantCh; ch++) {
+    if (have.some((c) => c.props?.audioChannel === ch)) continue;
+    project.clips.push({
+      id: "c_" + uid(), mediaId, kind: "audio", track: AUDIO_TRACK_IDS[ch],
+      start: live.start, in: live.in, duration: live.duration, name: live.name,
+      props: { ...DEFAULT_PROPS, audioChannel: ch },
+      linkGroup: lg,
+    });
+    added++;
+  }
+  if (!added && !removed) return;
+  state.dirtyTimeline = true;
+  scheduleSave(); renderInspector();
+  if (chCount > AUDIO_TRACK_IDS.length)
+    toast(`${m.name}: ${chCount} audio channels, only ${MAX_AUDIO_TRACKS} tracks supported — extra channel(s) dropped`);
+  else if (added)
+    toast(newTracks
+      ? `${m.name}: added ${newTracks} audio track${newTracks === 1 ? "" : "s"} and linked ${wantCh} channels`
+      : `Linked ${wantCh} audio channel${wantCh === 1 ? "" : "s"} from ${m.name}`);
+  else if (removed)
+    toast(`${m.name} has fewer channels — removed ${removed} linked audio clip(s)`);
 }
 /* Apply a named title style: reset the props a style owns, merge the style,
    place it (canvas-aware), and make sure its fonts are loaded.
@@ -1033,6 +1169,122 @@ function openStylePicker(anchor, c) {
   runtime.styleMenu = { close };
 }
 function closeStylePicker() { if (runtime.styleMenu) runtime.styleMenu.close(); }
+/* Swap a clip's source media in place: position, trim, keyframes, transitions,
+   props and name are all untouched. If the clip is part of a linkGroup (video
+   + its L/R audio companions extracted from the same file), replacing the
+   video member cascades the new mediaId to those companions too, since they
+   represent channels of the same source. If the new source is shorter than
+   the clip's current in/duration window, the trim is clamped to fit. */
+function replaceClipMedia(clip, media) {
+  if (!media || (clip.mediaId === media.id)) return;
+  pushUndo();
+  const targets = (clip.kind === "video" && clip.linkGroup)
+    ? project.clips.filter((c) => c.linkGroup === clip.linkGroup)
+    : [clip];
+  let trimmed = false;
+  for (const c of targets) {
+    c.mediaId = media.id;
+    // the clip's cached <video>/<audio> element (and its Web Audio graph node)
+    // is keyed by clip id and still points at the old src — drop it so
+    // getClipEl() rebuilds it against the new media on the next sync/frame.
+    releaseClipEl(c.id);
+    if (media.duration == null) continue;
+    const speed = c.props?.speed || 1;
+    // in + duration×speed ≤ media.duration (see CLAUDE.md props reference)
+    const maxIn = Math.max(0, media.duration - 0.001);
+    if (c.in > maxIn) { c.in = maxIn; trimmed = true; }
+    const maxDur = Math.max(0.05, (media.duration - c.in) / speed);
+    if (c.duration > maxDur) { c.duration = maxDur; trimmed = true; }
+  }
+  if (media.kind === "video" || media.kind === "audio") ensureWave(media);
+  if (clip.kind === "video") reconcileAudioChannels(clip); // add/drop A3+ channel clips once decoded
+  state.dirtyTimeline = true;
+  scheduleSave(); renderInspector();
+  toast(trimmed ? "Media replaced — trimmed to fit shorter source" : "Media replaced");
+}
+/* A dedicated, lazily-created file input for the "Browse file…" replace
+   action — deliberately NOT the shared #fileInput (also driven by the global
+   "+ Import" button): that one carries no target-clip state of its own, so
+   if this flow set a pending-replace flag on it and the user then cancelled
+   the OS file dialog (no "change" event fires on cancel), the flag would
+   stay stuck and hijack the next *unrelated* normal import. This input's
+   pending target lives in its own closure instead, so it can never leak
+   into a different import path. */
+let replaceFileInput = null, replaceFileTargetId = null;
+function pickReplacementFile(clip) {
+  if (!replaceFileInput) {
+    replaceFileInput = document.createElement("input");
+    replaceFileInput.type = "file";
+    replaceFileInput.accept = els.fileInput.accept;
+    replaceFileInput.className = "sr-only";
+    document.body.appendChild(replaceFileInput);
+    replaceFileInput.addEventListener("change", async () => {
+      const files = replaceFileInput.files;
+      replaceFileInput.value = "";
+      const targetId = replaceFileTargetId;
+      replaceFileTargetId = null;
+      if (!files.length) return;
+      const added = await importFiles(files);
+      const c = getClip(targetId);
+      if (!c || !added.length) return;
+      const m = added.find((x) => x.kind === c.kind) || added[0];
+      if (m.kind === c.kind) replaceClipMedia(c, m);
+      else toast(`Imported, but can't replace a ${c.kind} clip with ${m.kind === "audio" ? "an" : "a"} ${m.kind}`);
+    });
+  }
+  replaceFileTargetId = clip.id;
+  replaceFileInput.click();
+}
+/* Media-replace dropdown for the Inspector's "Source" button — same widget
+   pattern as openStylePicker (floating menu, click outside to cancel). Lists
+   bin/library media of the same kind as the clip, plus a "Browse file…" entry
+   that imports a new file and replaces with it directly. */
+function openMediaPicker(anchor, c) {
+  const compatible = project.media.filter((m) => m.kind === c.kind && m.id !== c.mediaId);
+  const menu = document.createElement("div");
+  menu.className = "style-menu";
+  const browse = document.createElement("div");
+  browse.className = "style-opt media-opt";
+  browse.textContent = "📂 Browse file…";
+  browse.addEventListener("click", () => {
+    close();
+    pickReplacementFile(c);
+  });
+  menu.appendChild(browse);
+  if (compatible.length) {
+    const sep = document.createElement("div");
+    sep.style.cssText = "height:1px;background:var(--border);margin:4px 2px;";
+    menu.appendChild(sep);
+    for (const m of compatible) {
+      const it = document.createElement("div");
+      it.className = "style-opt media-opt";
+      it.textContent = m.name;
+      it.title = m.name;
+      it.addEventListener("click", () => { close(); replaceClipMedia(c, m); });
+      menu.appendChild(it);
+    }
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "style-opt media-opt";
+    empty.style.opacity = ".6";
+    empty.style.cursor = "default";
+    empty.textContent = `No other ${c.kind} in bin`;
+    menu.appendChild(empty);
+  }
+  const onDoc = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
+  function close() {
+    menu.remove();
+    document.removeEventListener("pointerdown", onDoc, true);
+    runtime.mediaMenu = null;
+  }
+  document.addEventListener("pointerdown", onDoc, true);
+  const r = anchor.getBoundingClientRect();
+  menu.style.left = Math.round(Math.min(r.left, innerWidth - 220)) + "px";
+  menu.style.top = Math.round(Math.min(r.bottom + 4, innerHeight - 340)) + "px";
+  document.body.appendChild(menu);
+  runtime.mediaMenu = { close };
+}
+function closeMediaPicker() { if (runtime.mediaMenu) runtime.mediaMenu.close(); }
 function addTitle() {
   pushUndo();
   const c = {
@@ -1523,8 +1775,9 @@ function rebuildClips() {
     if (hasWave) body += `<canvas class="wave"></canvas>`;
     const badge = (c.keyframes && Object.keys(c.keyframes).length ? "◆ " : "") +
                   (c.transitionIn || c.transitionOut ? "⇄ " : "");
-    const chTag = c.props?.audioChannel === 0 ? "L · "
-                : c.props?.audioChannel === 1 ? "R · " : "";
+    const chN = c.props?.audioChannel;
+    const chTag = chN === 0 ? "L · " : chN === 1 ? "R · "
+                : Number.isInteger(chN) ? `Ch${chN + 1} · ` : "";
     const label = c.kind === "text" ? "T · " + (c.props.text || "").split("\n")[0]
       : c.kind === "adjust" ? "FX · " + (c.name || "")
       : c.kind === "audio" ? chTag + (c.name || "")
@@ -2248,6 +2501,7 @@ function renderInspector(lite) {
     ? `<div class="insp-multi">${state.selIds.size} clips selected — drag moves them together, Del deletes all. Fields below edit the primary (white-outlined) clip.</div>`
     : "") + `<div class="insp-section"><h3>Clip — ${c.kind}</h3>
     ${row("Name", `<input type="text" data-k="name" value="${c.name.replace(/"/g, "&quot;")}">`)}
+    ${c.mediaId ? row("Source", `<button type="button" class="btn tiny style-picker-btn" data-media-open title="Replace this clip's media — keeps position, trim, keyframes and effects">${escapeHtml((getMedia(c.mediaId) || {}).name || "Missing media")} ▾</button>`) : ""}
     ${row("Start (s)", `<input type="number" data-k="start" step="0.01" value="${c.start.toFixed(2)}">`)}
     ${row("Length (s)", `<input type="number" data-k="duration" step="0.01" value="${c.duration.toFixed(2)}">`)}
   </div>`;
@@ -2312,8 +2566,9 @@ function renderInspector(lite) {
     </div>`;
   }
   if (c.kind === "video" || c.kind === "audio") {
-    const chLabel = c.props?.audioChannel === 0 ? "Left"
-                  : c.props?.audioChannel === 1 ? "Right" : null;
+    const chIdx = c.props?.audioChannel;
+    const chLabel = chIdx === 0 ? "Left" : chIdx === 1 ? "Right"
+                  : Number.isInteger(chIdx) ? `Channel ${chIdx + 1}` : null;
     html += `<div class="insp-section"><h3>Audio / Time</h3>
       ${chLabel ? row("Channel", `<span style="opacity:.75">${chLabel}</span>`) : ""}
       ${slider("volume", 0, 2, 0.01, p.volume)}
@@ -2475,6 +2730,13 @@ function renderInspector(lite) {
       openStylePicker(btn, c);
     });
   });
+  els.inspector.querySelectorAll("[data-media-open]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (runtime.mediaMenu) { closeMediaPicker(); return; }
+      openMediaPicker(btn, c);
+    });
+  });
   els.inspector.querySelectorAll("[data-kf]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const k = btn.dataset.kf;
@@ -2559,6 +2821,24 @@ function ensureAudio() {
   }
   return runtime.audio;
 }
+/* Isolate one channel of a (possibly >2-channel) source onto its own gain
+   node — shared math for the live preview graph (hookAudio, real
+   AudioContext) and the offline export mixdown (renderAudioMix,
+   OfflineAudioContext). Channels 0/1 keep their original stereo side via a
+   2-ch merger (so soloing/panning still reads as L or R); channel 2+ has no
+   natural side and comes out centered (mono → default stereo upmix).
+   Returns {out, splitter}: `out` is the node to connect downstream
+   (destination or a track bus); `splitter` must be kept referenced so it
+   isn't GC'd/disconnected early. */
+function connectChannelIsolated(ctx, src, g, ch) {
+  const splitter = ctx.createChannelSplitter(Math.max(2, ch + 1));
+  src.connect(splitter);
+  splitter.connect(g, ch);
+  if (ch !== 0 && ch !== 1) return { out: g, splitter };
+  const merger = ctx.createChannelMerger(2);
+  g.connect(merger, 0, ch);
+  return { out: merger, splitter };
+}
 function hookAudio(c, el) {
   if (!runtime.audio || runtime.clipGain.has(c.id)) return;
   if (c.kind !== "video" && c.kind !== "audio") return;
@@ -2567,15 +2847,10 @@ function hookAudio(c, el) {
     const src = ctx.createMediaElementSource(el);
     const g = ctx.createGain();
     const ch = c.props?.audioChannel;
-    if (ch === 0 || ch === 1) {
-      // Isolate one stereo channel and place it on L or R of the track bus
-      const splitter = ctx.createChannelSplitter(2);
-      const merger = ctx.createChannelMerger(2);
-      src.connect(splitter);
-      splitter.connect(g, ch);
-      g.connect(merger, 0, ch);
+    if (Number.isInteger(ch) && ch >= 0) {
+      const { out, splitter } = connectChannelIsolated(ctx, src, g, ch);
       g._fcSplit = splitter;
-      g._fcOut = merger;
+      if (out !== g) g._fcOut = out;
       g._fcChannel = ch;
     } else {
       src.connect(g);
@@ -2916,13 +3191,10 @@ function refreshAudioHold() {
       g.gain.value = vol;
       const ch = c.props?.audioChannel;
       let split = null, merge = null, out = g;
-      if (ch === 0 || ch === 1) {
-        split = audio.ctx.createChannelSplitter(2);
-        merge = audio.ctx.createChannelMerger(2);
-        src.connect(split);
-        split.connect(g, ch);
-        g.connect(merge, 0, ch);
-        out = merge;
+      if (Number.isInteger(ch) && ch >= 0) {
+        const iso = connectChannelIsolated(audio.ctx, src, g, ch);
+        split = iso.splitter;
+        if (iso.out !== g) { merge = iso.out; out = iso.out; }
       } else {
         src.connect(g);
       }
@@ -4378,13 +4650,8 @@ async function renderAudioMix(dur) {
       curve[i] = clamp(evalProps(c, c.start + (i / (n - 1)) * c.duration).volume, 0, 4);
     g.gain.setValueCurveAtTime(curve, Math.max(0, c.start), Math.max(0.01, c.duration));
     const ch = c.props?.audioChannel;
-    if (ch === 0 || ch === 1) {
-      const splitter = off.createChannelSplitter(2);
-      const merger = off.createChannelMerger(2);
-      src.connect(splitter);
-      splitter.connect(g, ch);
-      g.connect(merger, 0, ch);
-      merger.connect(off.destination);
+    if (Number.isInteger(ch) && ch >= 0) {
+      connectChannelIsolated(off, src, g, ch).out.connect(off.destination);
     } else {
       src.connect(g); g.connect(off.destination);
     }
@@ -4787,7 +5054,10 @@ function syncTrackSizeButtons() {
 function applyTrackHeights() {
   const preset = TRACK_SIZE_PRESETS[state.trackSize] || TRACK_SIZE_PRESETS.l;
   for (const t of TRACKS) {
-    if (preset.h[t.id] != null) t.h = preset.h[t.id];
+    // tracks beyond the static set (e.g. A5+, auto-added for >4-channel audio)
+    // aren't named in the preset map — size them like the first track of their kind.
+    const h = preset.h[t.id] ?? preset.h[t.kind === "audio" ? "A1" : "V1"];
+    if (h != null) t.h = h;
   }
 }
 /* Switch S/M/L track density, rebuild the timeline, and grow/shrink the pane
