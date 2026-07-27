@@ -10,6 +10,7 @@
 [![Mentioned in Awesome MCP Servers](https://awesome.re/mentioned-badge.svg)](https://github.com/punkpeye/awesome-mcp-servers)
 [![Glama score](https://glama.ai/mcp/servers/ronak-create/FableCut/badges/score.svg)](https://glama.ai/mcp/servers/ronak-create/FableCut)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ronak-create/FableCut)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/WBKScy52F)
 
 <https://github.com/user-attachments/assets/2430b854-168b-4a9a-af2e-489e5efa7543>
 
@@ -272,6 +273,12 @@ examples in [`library/svg/`](library/svg/).
   `library/sfx/README.md` lists good free sources.
 - Export runs in the browser because the compositor *is* the browser; agents
   ask you to click Export (or render directly with ffmpeg from `media/`).
+
+## Community
+
+Questions, ideas, showing off an edit, or want to help shape what's next? Join
+the **[FableCut Discord](https://discord.gg/WBKScy52F)**. Bugs and feature
+requests are still best filed as [GitHub issues](https://github.com/ronak-create/FableCut/issues).
 
 ## License
 
