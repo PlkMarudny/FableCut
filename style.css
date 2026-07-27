@@ -270,6 +270,27 @@ body.track-size-s .clip.selected {
   background: #7b6cff14;
 }
 
+.ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 160px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 12px 32px #000c;
+}
+.ctx-opt {
+  padding: 7px 12px;
+  border-radius: 5px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-opt:hover {
+  background: #7b6cff26;
+}
 /* media-replace picker reuses .style-menu/.style-opt but lists plain file
    names, not font previews — match the app's normal UI text size */
 .style-opt.media-opt {
@@ -452,7 +473,7 @@ body.track-size-s .clip.selected {
   padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .lib-item .lib-play,
@@ -489,18 +510,21 @@ body.track-size-s .clip.selected {
   opacity: .7;
 }
 
-.bin-item {
+.bin-item,
+.bin-folder {
   display: flex;
   gap: 8px;
   align-items: center;
   padding: 6px;
+  padding-left: calc(6px + var(--bin-depth, 0) * 14px);
   border-radius: 6px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   cursor: grab;
 }
 
-.bin-item:hover {
+.bin-item:hover,
+.bin-folder:hover {
   border-color: #454552;
 }
 
@@ -510,8 +534,115 @@ body.track-size-s .clip.selected {
   box-shadow: inset 0 0 0 1px #7b6cff44;
 }
 
-.bin-item:active {
+.bin-item:active,
+.bin-folder:active {
   cursor: grabbing;
+}
+
+.bin-item.bin-dragging,
+.bin-folder.bin-dragging {
+  opacity: .45;
+}
+
+.bin-folder {
+  background: #1a1a20;
+  cursor: default;
+}
+
+.bin-folder .bin-folder-twist {
+  flex: none;
+  width: 18px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 9px;
+  line-height: 22px;
+}
+
+.bin-folder-icon {
+  flex: none;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.bin-folder-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  outline: none;
+  border-radius: 3px;
+}
+
+.bin-folder-name[contenteditable="true"] {
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  padding: 1px 4px;
+  cursor: text;
+}
+
+.bin-folder-count {
+  flex: none;
+  font-size: 10px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.bin-folder-add {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  opacity: 0;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.bin-folder:hover .bin-folder-add {
+  opacity: 1;
+}
+
+.bin-folder-add:hover {
+  color: var(--text);
+  background: #2a2a33;
+}
+
+.bin-item.bin-drop-over,
+.bin-folder.bin-drop-over,
+.bin-drop-root.bin-drop-over {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: #7b6cff18;
+}
+
+.bin-drop-root {
+  margin-top: 4px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px dashed transparent;
+  color: var(--dim);
+  font-size: 11px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity .12s, border-color .12s;
+  pointer-events: none;
+}
+
+.bin-list:has(.bin-dragging) .bin-drop-root {
+  opacity: 1;
+  pointer-events: auto;
+  border-color: #454552;
 }
 
 .bin-thumb {
@@ -560,7 +691,8 @@ body.track-size-s .clip.selected {
   transition: opacity .12s;
 }
 
-.bin-item:hover .bin-del {
+.bin-item:hover .bin-del,
+.bin-folder:hover .bin-del {
   opacity: 1;
   pointer-events: auto;
 }
@@ -633,6 +765,80 @@ body.track-size-s .clip.selected {
   max-height: none;
 }
 
+/* ── Keyframe graphs (left gutter of program monitor) ── */
+.kf-graphs {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  bottom: 6px;
+  width: min(168px, 28%);
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  pointer-events: none;
+}
+.kf-graphs[hidden] { display: none; }
+.kf-graph {
+  pointer-events: auto;
+  flex: 0 0 auto;
+  background: #000a;
+  border: 1px solid #ffffff18;
+  border-radius: 4px;
+  padding: 4px 5px 3px;
+  user-select: none;
+}
+.kf-graph-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-bottom: 2px;
+  font: 700 9px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: .35px;
+  color: #c8c8d0;
+}
+.kf-graph-head button {
+  margin: 0;
+  padding: 0 3px;
+  border: 0;
+  background: transparent;
+  color: #8b8b93;
+  font: 700 11px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+  opacity: .75;
+}
+.kf-graph-head button:hover { color: #fff; opacity: 1; }
+.kf-graph canvas {
+  display: block;
+  width: 100%;
+  height: 52px;
+  cursor: crosshair;
+  border-radius: 2px;
+  background: #0a0a0ccc;
+}
+
+.insp-row label.kf-graph-toggle {
+  cursor: pointer;
+  border-radius: 3px;
+  margin: -1px -2px;
+  padding: 1px 2px;
+}
+.insp-row label.kf-graph-toggle:hover {
+  color: #cfc8ff;
+  background: #7b6cff22;
+}
+.insp-row label.kf-graph-toggle.on {
+  color: #b9baff;
+  background: #7b6cff33;
+}
+.insp-row label.kf-graph-toggle.has-kf::after {
+  content: " ◆";
+  font-size: 8px;
+  opacity: .7;
+}
 /* ── Per-track VU (RMS / LUFS / Peak) ── */
 .vu-meter {
   position: absolute;
@@ -1202,6 +1408,54 @@ input[type=range] {
   text-overflow: ellipsis;
   pointer-events: none;
   z-index: 3;
+}
+
+/* Keyframe diamonds on the clip — same size/color as ruler beat markers */
+.clip .clip-kfs {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 1px;
+  height: 8px;
+  pointer-events: none;
+  z-index: 4;
+}
+.clip .clip-kf {
+  position: absolute;
+  top: 0;
+  /* rotated square → ~8×8 tip-to-tip, matching ruler markers */
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  background: #ffd166;
+  transform: rotate(45deg);
+  pointer-events: auto;
+  cursor: pointer;
+}
+.clip .clip-kf:hover {
+  background: #ffe28a;
+}
+/* Count badge when ≥2 channels share this time (diamond stays rotated; numeral counter-rotates) */
+.clip .clip-kf.multi {
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  top: -1px;
+}
+.clip .clip-kf-n {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: rotate(-45deg);
+  font: 700 7px/1 ui-sans-serif, system-ui, sans-serif;
+  color: #1a1a1e;
+  pointer-events: none;
+  user-select: none;
+}
+body.track-size-s .clip .clip-kf-n {
+  font-size: 6px;
 }
 
 /* transition wedges — width from transition duration × pps (see transitionMarksHtml) */

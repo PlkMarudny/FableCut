@@ -49,7 +49,7 @@
         </span>
       </div>
       <div class="bin-tabs" id="binTabs">
-        <button type="button" data-tab="project" class="on" title="Media used by this project">Project</button>
+        <button type="button" data-tab="project" class="on" title="Media used by this project — right-click for New folder">Project</button>
         <button type="button" data-tab="elements" title="Overlay art from library/elements">Elements</button>
         <button type="button" data-tab="sfx" title="Sound effects from library/sfx">Sound FX</button>
         <button type="button" data-tab="svg" title="Vector animations from library/svg">SVG</button>
@@ -90,6 +90,7 @@
             </div>
           </div>
         </div>
+        <div class="kf-graphs" id="kfGraphs" hidden></div>
         <div class="vu-meter" id="vuMeter" title="Click to switch RMS / LUFS / Peak"></div>
       </div>
       <div class="transport">
@@ -215,6 +216,7 @@
         <tr><td><kbd>Ctrl</kbd>+click clip</td><td>Add / remove from selection</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd> / <kbd>Esc</kbd></td><td>Select all / deselect</td></tr>
         <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Step 1 frame (⇧ = 1 second)</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd></td><td>Go to previous / next keyframe</td></tr>
         <tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td>Trim selected in / out to playhead</td></tr>
         <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>Jump to start / end</td></tr>
       </table>

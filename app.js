@@ -228,7 +228,8 @@ const project = {
   width: 1280, height: 720, fps: 30,
   background: "#000000",
   revision: 0,
-  media: [],   // {id, name, kind:'video'|'audio'|'image', src, duration, width?, height?}
+  folders: [], // {id, name, parentId:null|string, open:true} — Project-bin tree (virtual)
+  media: [],   // {id, name, kind, src, duration, width?, height?, folderId?}
   clips: [],   // {id, mediaId, kind, track, start, in, duration, name, props:{}}
   markers: [], // {t, label?} — beat/cue markers on the ruler; snap targets
   inPoint: null,  // timeline work-area IN (seconds), or null
@@ -252,6 +253,7 @@ const state = {
   binTab: "project",     // project | elements | sfx | svg
   disabledTracks: new Set(), // mirror of project.disabledTracks for fast lookup
   transFocus: null,      // "in" | "out" — inspector transition row highlighted
+  kfGraphs: new Set(),   // animatable prop keys with open monitor graphs
 };
 function normalizeDisabledTracks(raw) {
   if (raw == null) return [];
@@ -299,6 +301,9 @@ const runtime = {
   audio: null,          // {ctx, master, recDest, meter?, meterReady?}
   saveTimer: null, pendingSync: false,
   sfxPreview: null,     // <audio> element for library sound previews
+  importFolderId: null, // Project-bin folder to place the next import into
+  binDragFolderId: null, // folder id currently being dragged (cycle checks)
+  binCtxMenu: null,     // Project-tab context menu element
 };
 
 /* ── DOM ───────────────────────────────────────────────────────────────── */
@@ -318,7 +323,7 @@ const els = {
   aspectSel: $("aspectSel"), btnGuides: $("btnGuides"), btnZoom100: $("btnZoom100"),
   safeOverlay: $("safeOverlay"), btnSpeed: $("btnSpeed"),
   monitorStage: $("monitorStage"), monitorScroll: $("monitorScroll"),
-  monitorZoomInner: $("monitorZoomInner"),
+  monitorZoomInner: $("monitorZoomInner"), kfGraphs: $("kfGraphs"),
   exportSetup: $("exportSetup"), engineFast: $("engineFast"), engineRealtime: $("engineRealtime"),
 };
 const ctx2d = els.preview.getContext("2d");
@@ -447,6 +452,122 @@ function normalizeWorkArea(i, o, t0 = TIMELINE_START_TIME) {
   }
   return { inPoint, outPoint };
 }
+function getFolder(id) {
+  return id ? project.folders.find((f) => f.id === id) : null;
+}
+function normalizeFolders(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const f of list) {
+    if (!f || !f.id || seen.has(f.id)) continue;
+    seen.add(f.id);
+    out.push({
+      id: String(f.id),
+      name: String(f.name || "Folder").trim() || "Folder",
+      parentId: f.parentId || null,
+      open: f.open !== false,
+    });
+  }
+  // drop parent refs that don't exist
+  for (const f of out) if (f.parentId && !seen.has(f.parentId)) f.parentId = null;
+  return out;
+}
+function normalizeMediaEntry(m) {
+  if (!m || typeof m !== "object") return m;
+  return { ...m, folderId: m.folderId || null };
+}
+function folderChildren(parentId) {
+  return project.folders
+    .filter((f) => (f.parentId || null) === (parentId || null))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+function mediaInFolder(folderId) {
+  return project.media
+    .filter((m) => (m.folderId || null) === (folderId || null))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+/* True if ancestorId is the same as nodeId or an ancestor of nodeId. */
+function isSelfOrFolderAncestor(ancestorId, nodeId) {
+  let cur = getFolder(nodeId);
+  while (cur) {
+    if (cur.id === ancestorId) return true;
+    cur = cur.parentId ? getFolder(cur.parentId) : null;
+  }
+  return false;
+}
+function addFolder(parentId = null) {
+  if (parentId && !getFolder(parentId)) parentId = null;
+  const f = {
+    id: "f_" + uid(),
+    name: "New folder",
+    parentId: parentId || null,
+    open: true,
+  };
+  project.folders.push(f);
+  if (parentId) {
+    const p = getFolder(parentId);
+    if (p) p.open = true;
+  }
+  scheduleSave();
+  renderBin();
+  // defer rename so the row exists
+  requestAnimationFrame(() => startFolderRename(f.id));
+  return f;
+}
+function deleteFolder(id) {
+  const f = getFolder(id); if (!f) return;
+  const parent = f.parentId || null;
+  const doomed = new Set();
+  const walk = (fid) => {
+    doomed.add(fid);
+    for (const c of project.folders) if (c.parentId === fid) walk(c.id);
+  };
+  walk(id);
+  for (const m of project.media) if (m.folderId && doomed.has(m.folderId)) m.folderId = parent;
+  for (const c of project.folders) if (c.parentId && doomed.has(c.parentId) && !doomed.has(c.id)) c.parentId = parent;
+  project.folders = project.folders.filter((x) => !doomed.has(x.id));
+  scheduleSave();
+  renderBin();
+}
+function moveMediaToFolder(mediaId, folderId) {
+  const m = getMedia(mediaId); if (!m) return;
+  if (folderId && !getFolder(folderId)) folderId = null;
+  m.folderId = folderId || null;
+  if (folderId) { const f = getFolder(folderId); if (f) f.open = true; }
+  scheduleSave();
+  renderBin();
+}
+function moveFolderToParent(folderId, parentId) {
+  const f = getFolder(folderId); if (!f) return;
+  if (parentId && (parentId === folderId || isSelfOrFolderAncestor(folderId, parentId))) return;
+  if (parentId && !getFolder(parentId)) parentId = null;
+  f.parentId = parentId || null;
+  if (parentId) { const p = getFolder(parentId); if (p) p.open = true; }
+  scheduleSave();
+  renderBin();
+}
+function startFolderRename(folderId) {
+  const row = els.binList.querySelector(`.bin-folder[data-folder-id="${folderId}"] .bin-folder-name`);
+  if (!row) return;
+  row.contentEditable = "true";
+  row.focus();
+  const sel = window.getSelection(), range = document.createRange();
+  range.selectNodeContents(row); sel.removeAllRanges(); sel.addRange(range);
+  const commit = () => {
+    row.contentEditable = "false";
+    const f = getFolder(folderId); if (!f) return;
+    const name = row.textContent.replace(/\s+/g, " ").trim() || "Folder";
+    f.name = name;
+    row.textContent = name;
+    scheduleSave();
+  };
+  row.addEventListener("blur", commit, { once: true });
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); row.blur(); }
+    if (e.key === "Escape") { e.preventDefault(); row.textContent = getFolder(folderId)?.name || "Folder"; row.blur(); }
+  });
+}
 function applyProject(data) {
   const wa = normalizeWorkArea(data.inPoint, data.outPoint);
   const disabledTracks = normalizeDisabledTracks(data.disabledTracks);
@@ -455,12 +576,18 @@ function applyProject(data) {
     width: data.width || 1280, height: data.height || 720, fps: data.fps || 30,
     background: data.background || "#000000",
     revision: data.revision || 0,
-    media: data.media || [], clips: data.clips || [],
+    folders: normalizeFolders(data.folders),
+    media: (data.media || []).map(normalizeMediaEntry),
+    clips: data.clips || [],
     markers: (data.markers || []).filter((m) => m && isFinite(m.t)).sort((a, b) => a.t - b.t),
     inPoint: wa.inPoint,
     outPoint: wa.outPoint,
     disabledTracks,
   });
+  const folderIds = new Set(project.folders.map((f) => f.id));
+  for (const m of project.media) {
+    if (m.folderId && !folderIds.has(m.folderId)) m.folderId = null;
+  }
   state.disabledTracks = new Set(disabledTracks);
   for (const c of project.clips) {
     c.props = { ...DEFAULT_PROPS, ...(c.props || {}) };
@@ -513,11 +640,13 @@ function scheduleSave() {
   }, 400);
 }
 function projectJSON() {
-  const { name, width, height, fps, background, revision, media, clips, markers, inPoint, outPoint, disabledTracks } = project;
+  const { name, width, height, fps, background, revision, folders, media, clips, markers, inPoint, outPoint, disabledTracks } = project;
   return {
     name, width, height, fps, background, revision,
-    media: media.filter((m) => !m.transient).map(({ id, name, kind, src, duration, width, height }) =>
-      ({ id, name, kind, src, duration, width, height })),
+    folders: (folders || []).map(({ id, name, parentId, open }) =>
+      ({ id, name, parentId: parentId || null, open: open !== false })),
+    media: media.filter((m) => !m.transient).map(({ id, name, kind, src, duration, width, height, folderId }) =>
+      ({ id, name, kind, src, duration, width, height, folderId: folderId || null })),
     clips: clips.map(({ id, mediaId, kind, track, start, in: inn, duration, name, props, keyframes, transitionIn, transitionOut, linkedId, linkGroup }) => {
       const out = { id, mediaId, kind, track, start, in: inn, duration, name, props, keyframes, transitionIn, transitionOut };
       if (linkGroup) out.linkGroup = linkGroup;
@@ -697,6 +826,9 @@ function mediaKindFromFile(file) {
 async function importFiles(fileList) {
   const files = [...fileList];
   if (!files.length) return [];
+  const folderId = runtime.importFolderId && getFolder(runtime.importFolderId)
+    ? runtime.importFolderId : null;
+  runtime.importFolderId = null;
   let added = 0, skipped = 0;
   const addedMedia = [];
   for (const file of files) {
@@ -712,7 +844,7 @@ async function importFiles(fileList) {
     } else {
       src = URL.createObjectURL(file); transient = true;
     }
-    const m = { id: "m_" + uid(), name: file.name, kind, src, transient };
+    const m = { id: "m_" + uid(), name: file.name, kind, src, transient, folderId };
     try {
       await loadMediaMetadata(m);
       if (kind === "video") grabThumb(m).catch(() => { });
@@ -731,26 +863,99 @@ async function importFiles(fileList) {
 }
 
 function renderBin() {
-  els.binList.querySelectorAll(".bin-item").forEach((n) => n.remove());
-  els.binEmpty.style.display = project.media.length ? "none" : "";
-  for (const m of project.media) {
+  els.binList.querySelectorAll(".bin-item, .bin-folder, .bin-drop-root").forEach((n) => n.remove());
+  const empty = !project.media.length && !project.folders.length;
+  els.binEmpty.style.display = empty ? "" : "none";
+  if (empty) return;
+
+  const clearBinDropHints = () => {
+    els.binList.querySelectorAll(".bin-drop-over").forEach((n) => n.classList.remove("bin-drop-over"));
+  };
+
+  const bindFolderDropTarget = (el, folderId /* null = root */) => {
+    el.addEventListener("dragover", (e) => {
+      const types = [...(e.dataTransfer?.types || [])];
+      const hasMedia = types.includes("text/fablecut-media");
+      const hasFolder = types.includes("text/fablecut-folder");
+      const hasFiles = types.includes("Files");
+      if (!hasMedia && !hasFolder && !hasFiles) return;
+      if (hasFolder) {
+        const dragId = runtime.binDragFolderId;
+        if (dragId && folderId && isSelfOrFolderAncestor(dragId, folderId)) return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = hasFiles ? "copy" : "move";
+      clearBinDropHints();
+      el.classList.add("bin-drop-over");
+      if (hasFiles) runtime.importFolderId = folderId;
+    });
+    el.addEventListener("dragleave", (e) => {
+      if (el.contains(e.relatedTarget)) return;
+      el.classList.remove("bin-drop-over");
+      if (runtime.importFolderId === folderId) runtime.importFolderId = null;
+    });
+    el.addEventListener("drop", (e) => {
+      const mid = e.dataTransfer.getData("text/fablecut-media");
+      const fid = e.dataTransfer.getData("text/fablecut-folder");
+      const files = e.dataTransfer.files;
+      clearBinDropHints();
+      if (files?.length) {
+        e.preventDefault();
+        e.stopPropagation();
+        runtime.importFolderId = folderId;
+        importFiles(files);
+        return;
+      }
+      if (mid) {
+        e.preventDefault();
+        e.stopPropagation();
+        moveMediaToFolder(mid, folderId);
+        return;
+      }
+      if (fid) {
+        e.preventDefault();
+        e.stopPropagation();
+        moveFolderToParent(fid, folderId);
+      }
+    });
+  };
+
+  const makeMediaItem = (m, depth) => {
     const item = document.createElement("div");
-    item.className = "bin-item"; item.draggable = true;
+    item.className = "bin-item";
+    item.draggable = true;
     item.dataset.mediaId = m.id;
+    item.style.setProperty("--bin-depth", depth);
     const aux = runtime.mediaAux.get(m.id) || {};
     const icon = mediaKindIcon(m.kind, "🎞");
     const thumbSrc = aux.thumb || (m.kind === "image" || m.kind === "svg" ? m.src : null);
     item.innerHTML = `
-      <div class="bin-thumb" ${thumbSrc ? `style="background-image:url('${thumbSrc}')"` : ""}>${thumbSrc ? "" : icon}</div>
+      <div class="bin-thumb"></div>
       <div class="bin-meta">
-        <div class="bin-name" title="${m.name}">${m.name}</div>
+        <div class="bin-name"></div>
         <div class="bin-sub">${m.kind}${m.duration ? " · " + fmt(m.duration) : ""}</div>
       </div>
       <span class="bin-del" title="Remove (and its clips)">✕</span>`;
+    const thumbEl = item.querySelector(".bin-thumb");
+    if (thumbSrc) thumbEl.style.backgroundImage = `url(${JSON.stringify(thumbSrc)})`;
+    else thumbEl.textContent = icon;
+    const nameEl = item.querySelector(".bin-name");
+    nameEl.textContent = m.name;
+    nameEl.title = m.name;
     item.addEventListener("dragstart", (e) => {
+      runtime.binDragFolderId = null;
       e.dataTransfer.setData("text/fablecut-media", m.id);
-      e.dataTransfer.effectAllowed = "copy";
+      e.dataTransfer.effectAllowed = "copyMove";
+      item.classList.add("bin-dragging");
     });
+    item.addEventListener("dragend", () => {
+      item.classList.remove("bin-dragging");
+      clearBinDropHints();
+      runtime.importFolderId = null;
+    });
+    // Don't bubble to the root drop zone while hovering a media row
+    item.addEventListener("dragover", (e) => e.stopPropagation());
     item.addEventListener("click", (e) => {
       if (e.target.closest(".bin-del")) return;
       if (e.ctrlKey || e.metaKey) return; // reserved for import
@@ -759,14 +964,81 @@ function renderBin() {
       selectClipsByMediaId(m.id);
     });
     item.addEventListener("dblclick", () => addClipFromMedia(m, null, state.time));
-    item.querySelector(".bin-del").addEventListener("click", () => {
+    item.querySelector(".bin-del").addEventListener("click", (e) => {
+      e.stopPropagation();
       pushUndo();
       project.media = project.media.filter((x) => x.id !== m.id);
       project.clips = project.clips.filter((c) => c.mediaId !== m.id);
       renderBin(); scheduleSave(); renderInspector();
     });
-    els.binList.appendChild(item);
-  }
+    return item;
+  };
+
+  const renderLevel = (parentId, depth) => {
+    for (const f of folderChildren(parentId)) {
+      const row = document.createElement("div");
+      row.className = "bin-folder" + (f.open ? " open" : "");
+      row.dataset.folderId = f.id;
+      row.draggable = true;
+      row.style.setProperty("--bin-depth", depth);
+      const count = mediaInFolder(f.id).length + folderChildren(f.id).length;
+      row.innerHTML = `
+        <button type="button" class="bin-folder-twist" title="${f.open ? "Collapse" : "Expand"}" aria-expanded="${f.open}">${f.open ? "▼" : "▶"}</button>
+        <span class="bin-folder-icon">📁</span>
+        <span class="bin-folder-name"></span>
+        <span class="bin-folder-count">${count}</span>
+        <button type="button" class="bin-folder-add" title="New subfolder">+</button>
+        <button type="button" class="bin-del bin-folder-del" title="Delete folder (keeps media)">✕</button>`;
+      const nameEl = row.querySelector(".bin-folder-name");
+      nameEl.textContent = f.name;
+      nameEl.title = f.name;
+      row.querySelector(".bin-folder-twist").addEventListener("click", (e) => {
+        e.stopPropagation();
+        f.open = !f.open;
+        scheduleSave();
+        renderBin();
+      });
+      row.querySelector(".bin-folder-name").addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        startFolderRename(f.id);
+      });
+      row.querySelector(".bin-folder-add").addEventListener("click", (e) => {
+        e.stopPropagation();
+        addFolder(f.id);
+      });
+      row.querySelector(".bin-folder-del").addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteFolder(f.id);
+      });
+      row.addEventListener("dragstart", (e) => {
+        // don't start folder drag from action buttons
+        if (e.target.closest("button")) { e.preventDefault(); return; }
+        runtime.binDragFolderId = f.id;
+        e.dataTransfer.setData("text/fablecut-folder", f.id);
+        e.dataTransfer.effectAllowed = "move";
+        row.classList.add("bin-dragging");
+      });
+      row.addEventListener("dragend", () => {
+        runtime.binDragFolderId = null;
+        row.classList.remove("bin-dragging");
+        clearBinDropHints();
+        runtime.importFolderId = null;
+      });
+      bindFolderDropTarget(row, f.id);
+      els.binList.appendChild(row);
+      if (f.open) renderLevel(f.id, depth + 1);
+    }
+    for (const m of mediaInFolder(parentId)) els.binList.appendChild(makeMediaItem(m, depth));
+  };
+
+  renderLevel(null, 0);
+
+  // Root drop zone at the bottom so items can be moved out of folders
+  const root = document.createElement("div");
+  root.className = "bin-drop-root";
+  root.textContent = "Drop here to move to root";
+  bindFolderDropTarget(root, null);
+  els.binList.appendChild(root);
   syncBinSelectionFromTimeline();
 }
 
@@ -820,7 +1092,7 @@ function mediaForLibraryItem(f) {
   if (m) return m;
   const kind = libKind(f.name);
   if (!kind) return null;
-  m = { id: "m_" + uid(), name: f.name, kind, src: f.src };
+  m = { id: "m_" + uid(), name: f.name, kind, src: f.src, folderId: null };
   project.media.push(m);
   renderBin(); scheduleSave();
   return m;
@@ -877,13 +1149,19 @@ function renderLibrary() {
     const visual = kind === "image" || kind === "svg";
     const icon = mediaKindIcon(kind, "🧩");
     item.innerHTML = `
-      <div class="bin-thumb${kind === "svg" ? " svg" : ""}" ${visual ? `style="background-image:url('${f.src}')"` : ""}>${visual ? "" : icon}</div>
+      <div class="bin-thumb${kind === "svg" ? " svg" : ""}"></div>
       <div class="bin-meta">
-        <div class="bin-name" title="${f.rel}">${f.name}</div>
+        <div class="bin-name"></div>
         <div class="bin-sub">${(f.size / 1024).toFixed(0)} KB</div>
       </div>
       ${dir === "sfx" ? `<button class="btn tiny lib-play" title="Preview">▶</button>` : ""}
       <button class="btn tiny accent lib-add" title="Add at playhead">＋</button>`;
+    const thumbEl = item.querySelector(".bin-thumb");
+    if (visual) thumbEl.style.backgroundImage = `url(${JSON.stringify(f.src)})`;
+    else thumbEl.textContent = icon;
+    const nameEl = item.querySelector(".bin-name");
+    nameEl.textContent = f.name;
+    nameEl.title = f.rel || f.name;
     item.addEventListener("dragstart", (e) => {
       const m = mediaForLibraryItem(f);
       if (!m) { e.preventDefault(); return; }
@@ -1766,6 +2044,39 @@ function transitionMarksHtml(c, trackH) {
   wedge(c.transitionOut, "out");
   return html;
 }
+/* Group keyframes by clip-local time → [{ t, keys: ["opacity","scale"] }, …]. */
+function clipKeyframeGroups(c) {
+  if (!c?.keyframes) return [];
+  const byT = new Map();
+  for (const [channel, arr] of Object.entries(c.keyframes)) {
+    if (!Array.isArray(arr)) continue;
+    for (const kf of arr) {
+      const t = +kf.t;
+      if (!Number.isFinite(t)) continue;
+      const key = t.toFixed(4);
+      let g = byT.get(key);
+      if (!g) { g = { t, keys: [] }; byT.set(key, g); }
+      if (!g.keys.includes(channel)) g.keys.push(channel);
+    }
+  }
+  return [...byT.values()].sort((a, b) => a.t - b.t);
+}
+const clipKeyframeLocalTimes = (c) => clipKeyframeGroups(c).map((g) => g.t);
+/* Diamond marks on the clip body — one per unique time; count badge if multi-channel. */
+function clipKeyframesHtml(c) {
+  const groups = clipKeyframeGroups(c);
+  if (!groups.length || !(c.duration > 0)) return "";
+  let html = `<div class="clip-kfs">`;
+  for (const { t, keys } of groups) {
+    if (t < -1e-6 || t > c.duration + 1e-6) continue;
+    const pct = Math.max(0, Math.min(100, (t / c.duration) * 100));
+    const label = keys.join(", ") + " @ " + fmt(c.start + t);
+    const badge = keys.length > 1 ? `<span class="clip-kf-n">${keys.length}</span>` : "";
+    const multi = keys.length > 1 ? " multi" : "";
+    html += `<div class="clip-kf${multi}" style="left:${pct}%" data-t="${t}" title="${label}">${badge}</div>`;
+  }
+  return html + `</div>`;
+}
 function rebuildClips() {
   const w = contentWidth();
   els.tracksContent.style.width = w + "px";
@@ -1798,6 +2109,7 @@ function rebuildClips() {
       : (c.name || "");
     body += `<div class="fade"></div>
       <div class="clip-label">${badge}${escapeHtml(label)}</div>`;
+    body += clipKeyframesHtml(c);
     let inner = `<div class="clip-body">${body}</div>`;
     inner += transitionMarksHtml(c, tr.h);
     inner += `<div class="handle l"></div><div class="handle r"></div>`;
@@ -2029,6 +2341,13 @@ els.tracksContent.addEventListener("pointerdown", (e) => {
   }
   const c = getClip(clipDiv.dataset.id);
   if (!c) return;
+  const kfMark = e.target.closest(".clip-kf");
+  if (kfMark) {
+    e.preventDefault();
+    selectClip(c.id);
+    setTime(c.start + (+kfMark.dataset.t || 0));
+    return;
+  }
   const transHandle = e.target.closest(".trans-dur-handle");
   if (transHandle) {
     const wrap = transHandle.closest(".trans-mark");
@@ -2276,6 +2595,47 @@ function setTime(t) {
   if (state.audioHold) scheduleAudioHoldRefresh();
 }
 
+/* Absolute timeline times of every keyframe on the given clips (deduped). */
+function keyframeTimelineTimes(clips) {
+  const seen = new Set();
+  const out = [];
+  for (const c of clips) {
+    for (const local of clipKeyframeLocalTimes(c)) {
+      const t = +(c.start + local).toFixed(4);
+      if (seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  out.sort((a, b) => a - b);
+  return out;
+}
+/* Jump playhead to previous (−1) or next (+1) keyframe.
+   Prefers selected clips; falls back to clips under the playhead.
+   Keyboard counterpart to Avid’s Ctrl/Cmd-click snap-to-audio-keyframe. */
+function goToKeyframe(dir) {
+  let clips = state.selIds.size ? selectedClips() : [];
+  if (!clips.some((c) => clipKeyframeLocalTimes(c).length)) {
+    const t = state.time;
+    clips = project.clips.filter((c) =>
+      clipKeyframeLocalTimes(c).length &&
+      t >= c.start - 1e-6 && t <= c.start + c.duration + 1e-6);
+  }
+  const times = keyframeTimelineTimes(clips);
+  if (!times.length) { toast("No keyframes"); return; }
+  const eps = 0.5 / Math.max(1, project.fps || 30);
+  if (dir > 0) {
+    const next = times.find((t) => t > state.time + eps);
+    if (next == null) { toast("No next keyframe"); return; }
+    setTime(next);
+  } else {
+    let prev = null;
+    for (const t of times) if (t < state.time - eps) prev = t;
+    if (prev == null) { toast("No previous keyframe"); return; }
+    setTime(prev);
+  }
+}
+
 /* Add a marker at the playhead, or remove one already there (M key).
    Works while playing — tap M on the beat to lay down a beat grid. */
 function toggleMarker() {
@@ -2518,6 +2878,7 @@ function renderInspector(lite) {
   const c = getClip(state.selId);
   if (!c) {
     els.inspector.innerHTML = `<div class="inspector-empty">Select a clip to edit its<br>transform, effects &amp; audio.</div>`;
+    renderKfGraphsPanel();
     return;
   }
   if (lite) { // during gestures, just refresh timing numbers if present
@@ -2530,16 +2891,28 @@ function renderInspector(lite) {
   const kfCount = (k) => (c.keyframes && c.keyframes[k] ? c.keyframes[k].length : 0);
   const kfCtl = (k) => !ANIMATABLE.includes(k) ? "" :
     `<span class="kf-ctl"><button class="kf-btn${kfCount(k) ? " has" : ""}" data-kf="${k}" title="Set keyframe at playhead">◆${kfCount(k) || ""}</button>${kfCount(k) ? `<button class="kf-btn" data-kfclear="${k}" title="Clear keyframes">✕</button>` : ""}</span>`;
-  /* reset: prop key(s) for Ctrl-click on the label; defaults to k when that key is in DEFAULT_PROPS. */
-  const row = (label, inner, k = "", reset) => {
+  /* Label carries two affordances that key off different click modifiers:
+     plain click toggles the keyframe graph (animatable props), Ctrl/Cmd-click
+     resets the prop(s). `reset` overrides which keys reset; defaults to k. */
+  const propLabel = (label, k = "", reset) => {
     const keys = reset !== undefined ? reset : k;
     const list = (Array.isArray(keys) ? keys : String(keys || "").split(",")).map((s) => s.trim()).filter(Boolean);
     const canReset = list.some((rk) => Object.hasOwn(DEFAULT_PROPS, rk) || rk === "transIn" || rk === "transOut");
-    const lab = canReset
-      ? `<label class="insp-reset" data-reset="${list.join(",")}" title="Ctrl-click to reset">${label}</label>`
-      : `<label>${label}</label>`;
-    return `<div class="insp-row">${lab}${inner}${k ? kfCtl(k) : ""}</div>`;
+    const isGraph = !!k && ANIMATABLE.includes(k);
+    if (!isGraph && !canReset) return `<label>${label}</label>`;
+    const cls = [
+      isGraph ? "kf-graph-toggle" : "",
+      isGraph && state.kfGraphs.has(k) ? "on" : "",
+      isGraph && kfCount(k) ? "has-kf" : "",
+      canReset ? "insp-reset" : "",
+    ].filter(Boolean).join(" ");
+    const attrs = (isGraph ? ` data-kfgraph="${k}"` : "") + (canReset ? ` data-reset="${list.join(",")}"` : "");
+    const title = isGraph && canReset ? "Click: keyframe graph · Ctrl-click: reset"
+      : isGraph ? "Show / hide keyframe graph" : "Ctrl-click to reset";
+    return `<label class="${cls}"${attrs} title="${title}">${label}</label>`;
   };
+  const row = (label, inner, k = "", reset) =>
+    `<div class="insp-row">${propLabel(label, k, reset)}${inner}${k ? kfCtl(k) : ""}</div>`;
   const slider = (k, min, max, step, val, unit = "") =>
     row(k[0].toUpperCase() + k.slice(1),
       `<input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${val}">
@@ -2814,6 +3187,179 @@ function renderInspector(lite) {
     const k = state.transFocus === "in" ? "transIn" : "transOut";
     const row = els.inspector.querySelector(`[data-k="${k}"]`)?.closest(".insp-row");
     row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  els.inspector.querySelectorAll("[data-kfgraph]").forEach((lab) => {
+    lab.addEventListener("click", (e) => {
+      if (e.ctrlKey || e.metaKey) return; // Ctrl/Cmd-click is reserved for prop reset
+      e.preventDefault();
+      toggleKfGraph(lab.dataset.kfgraph);
+    });
+  });
+  renderKfGraphsPanel();
+}
+
+/* ── Keyframe graphs (program-monitor left gutter) ── */
+const KF_GRAPH_LABEL = {
+  x: "Pos X", y: "Pos Y", scale: "Scale", rotation: "Rotation", opacity: "Opacity",
+  volume: "Volume", speed: "Speed", brightness: "Bright", contrast: "Contrast",
+  saturation: "Sat", hue: "Hue", blur: "Blur", grayscale: "Gray", sepia: "Sepia",
+  invert: "Invert", temperature: "Temp", tint: "Tint", vignette: "Vignette",
+  cornerRadius: "Radius", shake: "Shake", rgbSplit: "RGB", grain: "Grain",
+  fontSize: "Size", letterSpacing: "Track", glow: "Glow",
+};
+function toggleKfGraph(key) {
+  if (!ANIMATABLE.includes(key)) return;
+  if (state.kfGraphs.has(key)) state.kfGraphs.delete(key);
+  else state.kfGraphs.add(key);
+  renderInspector(); // refresh label .on state + panel
+}
+function renderKfGraphsPanel() {
+  const root = els.kfGraphs;
+  if (!root) return;
+  const c = getClip(state.selId);
+  const keys = [...state.kfGraphs].filter((k) => ANIMATABLE.includes(k));
+  if (!c || !keys.length) {
+    root.innerHTML = "";
+    root.hidden = true;
+    return;
+  }
+  root.hidden = false;
+  root.innerHTML = keys.map((k) => {
+    const label = KF_GRAPH_LABEL[k] || k;
+    return `<div class="kf-graph" data-kfgraph-card="${k}">
+      <div class="kf-graph-head"><span>${label}</span>
+        <button type="button" data-kfgraph-close="${k}" title="Close graph">✕</button></div>
+      <canvas width="160" height="52"></canvas>
+    </div>`;
+  }).join("");
+  root.querySelectorAll("[data-kfgraph-close]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.kfGraphs.delete(btn.dataset.kfgraphClose);
+      renderInspector();
+    });
+  });
+  root.querySelectorAll(".kf-graph canvas").forEach((cv) => {
+    const key = cv.closest("[data-kfgraph-card]")?.dataset.kfgraphCard;
+    cv.addEventListener("pointerdown", (e) => seekKfGraph(e, cv, key));
+  });
+  updateKfGraphs();
+}
+function seekKfGraph(e, cv, key) {
+  const c = getClip(state.selId);
+  if (!c || !key) return;
+  const { t0, t1 } = kfGraphRange(c, key);
+  const rect = cv.getBoundingClientRect();
+  const u = clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+  setTime(c.start + t0 + u * Math.max(1e-6, t1 - t0));
+  updateKfGraphs();
+}
+/* Value + time window for a graph. When keyframes exist, zoom X to their span
+   (with padding) instead of the full clip duration. */
+function kfGraphRange(c, key) {
+  const fallback = +(c.props?.[key] ?? DEFAULT_PROPS[key] ?? 0);
+  const dur = Math.max(MIN_DUR, c.duration);
+  const kfs = Array.isArray(c.keyframes?.[key]) ? c.keyframes[key] : [];
+  const vals = kfs.length ? kfs.map((kf) => +kf.v) : [fallback];
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (!isFinite(lo) || !isFinite(hi)) { lo = 0; hi = 1; }
+  if (Math.abs(hi - lo) < 1e-6) {
+    const pad = Math.max(0.05, Math.abs(lo) * 0.1 || 0.5);
+    lo -= pad; hi += pad;
+  } else {
+    const pad = (hi - lo) * 0.12;
+    lo -= pad; hi += pad;
+  }
+
+  let t0 = 0, t1 = dur;
+  if (kfs.length === 1) {
+    const t = clamp(+kfs[0].t || 0, 0, dur);
+    const half = Math.max(0.15, dur * 0.08);
+    t0 = Math.max(0, t - half);
+    t1 = Math.min(dur, t + half);
+  } else if (kfs.length >= 2) {
+    const ts = kfs.map((kf) => +kf.t || 0);
+    const a = Math.min(...ts), b = Math.max(...ts);
+    const pad = Math.max(0.05, (b - a) * 0.1, dur * 0.02);
+    t0 = Math.max(0, a - pad);
+    t1 = Math.min(dur, b + pad);
+  }
+  if (t1 - t0 < 1e-3) { t0 = 0; t1 = dur; }
+  return { lo, hi, fallback, t0, t1, dur };
+}
+function updateKfGraphs() {
+  const root = els.kfGraphs;
+  if (!root || root.hidden) return;
+  const c = getClip(state.selId);
+  if (!c) return;
+  root.querySelectorAll(".kf-graph").forEach((card) => {
+    const key = card.dataset.kfgraphCard;
+    const cv = card.querySelector("canvas");
+    if (key && cv) drawKfGraph(cv, c, key);
+  });
+}
+function drawKfGraph(cv, c, key) {
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = cv.clientWidth || 160, cssH = cv.clientHeight || 52;
+  if (cv.width !== Math.round(cssW * dpr) || cv.height !== Math.round(cssH * dpr)) {
+    cv.width = Math.round(cssW * dpr);
+    cv.height = Math.round(cssH * dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = cssW, H = cssH;
+  g.clearRect(0, 0, W, H);
+  const { lo, hi, fallback, t0, t1 } = kfGraphRange(c, key);
+  const span = Math.max(1e-6, t1 - t0);
+  const yAt = (v) => H - 4 - ((v - lo) / (hi - lo)) * (H - 8);
+  const xAt = (t) => 3 + ((t - t0) / span) * (W - 6);
+
+  // mid / zero guide
+  g.strokeStyle = "#ffffff10";
+  g.lineWidth = 1;
+  g.beginPath();
+  const y0 = yAt(0);
+  if (y0 > 4 && y0 < H - 4) { g.moveTo(3, y0); g.lineTo(W - 3, y0); g.stroke(); }
+
+  // interpolated curve (only the zoomed window)
+  g.strokeStyle = "#7b6cff";
+  g.lineWidth = 1.5;
+  g.beginPath();
+  const steps = Math.max(24, Math.floor(W));
+  for (let i = 0; i <= steps; i++) {
+    const t = t0 + (i / steps) * span;
+    const v = kfChannel(c, key, t, fallback);
+    const x = xAt(t), y = yAt(v);
+    if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+  }
+  g.stroke();
+
+  // keyframe diamonds
+  const kfs = c.keyframes?.[key];
+  if (Array.isArray(kfs)) {
+    g.fillStyle = "#ffd166";
+    for (const kf of kfs) {
+      const x = xAt(kf.t), y = yAt(kf.v);
+      g.beginPath();
+      g.moveTo(x, y - 3.5); g.lineTo(x + 3.5, y); g.lineTo(x, y + 3.5); g.lineTo(x - 3.5, y);
+      g.closePath(); g.fill();
+    }
+  }
+
+  // playhead (drawn only when inside the zoomed window)
+  const lt = state.time - c.start;
+  if (lt >= t0 - 1e-6 && lt <= t1 + 1e-6) {
+    const px = xAt(clamp(lt, t0, t1));
+    g.strokeStyle = "#ff4d6a";
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(px, 1); g.lineTo(px, H - 1);
+    g.stroke();
+    const cur = kfChannel(c, key, clamp(lt, t0, t1), fallback);
+    g.fillStyle = "#ff4d6a";
+    g.beginPath();
+    g.arc(px, yAt(cur), 2.5, 0, Math.PI * 2);
+    g.fill();
   }
 }
 
@@ -4636,6 +5182,7 @@ function loop(ts) {
   els.playhead.style.left = state.time * state.pps + "px";
   drawRuler();
   updateSafeOverlay();
+  updateKfGraphs();
   updateMeterUI(dt);
   els.tcCurrent.textContent = fmt(state.time);
   els.tcTotal.textContent = fmt(dur);
@@ -4983,6 +5530,43 @@ els.binTabs.addEventListener("click", (e) => {
   const b = e.target.closest("[data-tab]");
   if (b) setBinTab(b.dataset.tab);
 });
+/* Right-click the Project tab → New folder */
+function closeBinCtxMenu() {
+  if (!runtime.binCtxMenu) return;
+  runtime.binCtxMenu.remove();
+  runtime.binCtxMenu = null;
+  document.removeEventListener("pointerdown", onBinCtxDoc, true);
+}
+function onBinCtxDoc(e) {
+  if (runtime.binCtxMenu && !runtime.binCtxMenu.contains(e.target)) closeBinCtxMenu();
+}
+function openProjectTabMenu(clientX, clientY) {
+  closeBinCtxMenu();
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+  const item = document.createElement("div");
+  item.className = "ctx-opt";
+  item.textContent = "New folder";
+  item.addEventListener("click", () => {
+    closeBinCtxMenu();
+    if (state.binTab !== "project") setBinTab("project");
+    addFolder(null);
+  });
+  menu.appendChild(item);
+  document.body.appendChild(menu);
+  const pad = 6;
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.min(clientX, window.innerWidth - w - pad) + "px";
+  menu.style.top = Math.min(clientY, window.innerHeight - h - pad) + "px";
+  runtime.binCtxMenu = menu;
+  document.addEventListener("pointerdown", onBinCtxDoc, true);
+}
+els.binTabs.addEventListener("contextmenu", (e) => {
+  const b = e.target.closest("[data-tab]");
+  if (!b || b.dataset.tab !== "project") return;
+  e.preventDefault();
+  openProjectTabMenu(e.clientX, e.clientY);
+});
 
 /* ── Canvas aspect presets + safe-area guides ── */
 function syncAspectSel() {
@@ -5227,6 +5811,10 @@ window.addEventListener("keydown", (e) => {
     e.shiftKey ? trimToWorkArea() : splitAtWorkArea();
   }
   else if (k === "Delete" || k === "Backspace") deleteSelected();
+  else if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "ArrowLeft" || k === "ArrowRight")) {
+    e.preventDefault();
+    goToKeyframe(k === "ArrowRight" ? 1 : -1);
+  }
   else if (k === "ArrowLeft") setTime(state.time - (e.shiftKey ? 1 : 1 / project.fps));
   else if (k === "ArrowRight") setTime(state.time + (e.shiftKey ? 1 : 1 / project.fps));
   else if (k === "Home") gotoHome();
