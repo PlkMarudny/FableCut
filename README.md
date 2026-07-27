@@ -57,6 +57,11 @@ same time.
   frame-step retargets the held slice; meters stay live. **Play** / **Pause**
   turns it off.
 - Canvas aspect presets (16:9, 9:16 reels, 4:5, 1:1) + safe-area guides
+- **Program Monitor zoom** — mouse-wheel over the preview zooms the composition
+  toward the cursor (fit → up to **2 screen pixels per canvas pixel**). Magnified
+  view uses **native scrollbars** so overflow stays reachable; middle-click or
+  <kbd>Alt</kbd>+drag pans. The **Fit** button (shown while zoomed) resets to the
+  fit-to-stage baseline
 - Preview playback speed — shuttle the monitor through 1×/1.5×/2×/4× with **J**/**K**/**L**
   (from a stop <kbd>J</kbd>/<kbd>L</kbd> start playback; while playing <kbd>L</kbd> steps faster
   and <kbd>J</kbd> slower, <kbd>K</kbd> toggles play/pause and resets to 1×); affects the

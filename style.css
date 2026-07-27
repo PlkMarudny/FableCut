@@ -396,6 +396,19 @@ body.track-size-s .clip.selected {
   border-bottom: 1px solid var(--border);
 }
 
+.panel-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.panel-head-title .btn {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 600;
+}
+
 .panel-head-actions {
   display: flex;
   gap: 6px;
@@ -692,8 +705,7 @@ body.track-size-s .clip.selected {
 .monitor-stage {
   flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
   background: #000;
   min-height: 0;
   margin: 8px;
@@ -702,11 +714,55 @@ body.track-size-s .clip.selected {
   position: relative;
 }
 
+.monitor-scroll {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.monitor-scroll.is-zoomed {
+  display: block;
+  overflow: auto;
+  cursor: grab;
+}
+
+.monitor-scroll.is-zoomed.is-panning {
+  cursor: grabbing;
+}
+
+.monitor-zoom-inner {
+  position: relative;
+  line-height: 0;
+  flex-shrink: 0;
+}
+
+/* Fit mode: fill the scrollport so #preview max-% resolves against the stage */
+.monitor-scroll:not(.is-zoomed) .monitor-zoom-inner {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.monitor-scroll.is-zoomed .monitor-zoom-inner {
+  display: inline-block;
+}
+
 #preview {
   max-width: 100%;
   max-height: 100%;
   display: block;
   background: #000;
+}
+
+.monitor-scroll.is-zoomed #preview {
+  max-width: none;
+  max-height: none;
 }
 
 /* ── Keyframe graphs (left gutter of program monitor) ── */
@@ -786,7 +842,7 @@ body.track-size-s .clip.selected {
 /* ── Per-track VU (RMS / LUFS / Peak) ── */
 .vu-meter {
   position: absolute;
-  right: 2px;
+  right: 8px;
   bottom: 10px;
   display: flex;
   flex-direction: column;
@@ -802,7 +858,7 @@ body.track-size-s .clip.selected {
   display: block;
   width: 100%;
   margin: 0;
-  padding: 2px 0 2px;
+  padding: 2px 0 2px 14px;
   border: 0;
   background: transparent;
   color: #c8c8d0;
@@ -816,7 +872,7 @@ body.track-size-s .clip.selected {
 .vu-channels {
   display: flex;
   align-items: flex-start;
-  gap: 4px;
+  gap: 2px;
 }
 .vu-scale {
   position: relative;
