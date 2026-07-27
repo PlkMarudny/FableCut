@@ -555,23 +555,34 @@ async function syncFromServer(force) {
     await probeMissingMeta();
   } catch { }
 }
+/** Populate a media entry's duration/dimensions (and cache preview assets) by
+ * dispatching on kind: svg loads its markup, image loads for width/height,
+ * audio/video probes duration+size via a throwaway <video>/<audio> element.
+ * Throws on failure — callers decide whether that's fatal or best-effort.
+ * Shared by importFiles, addLibraryItem and probeMissingMeta. */
+async function loadMediaMetadata(m) {
+  if (m.kind === "svg") { await loadSvgMedia(m); return; }
+  if (m.kind === "image") {
+    const img = await loadImage(m.src);
+    runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img });
+    m.width = img.naturalWidth; m.height = img.naturalHeight;
+    return;
+  }
+  Object.assign(m, await probeAV(m.src, m.kind));
+}
 /* Fill in duration/size for media entries added externally without metadata */
 async function probeMissingMeta() {
   let changed = false;
   for (const m of project.media) {
     if (m.kind === "svg") {
-      if (!runtime.mediaAux.get(m.id)?.svgText) { try { await loadSvgMedia(m); changed = true; } catch { } }
+      if (!runtime.mediaAux.get(m.id)?.svgText) { try { await loadMediaMetadata(m); changed = true; } catch { } }
       continue;
     }
     if (m.kind !== "image" && (m.duration == null || isNaN(m.duration))) {
-      try { Object.assign(m, await probeAV(m.src, m.kind)); changed = true; } catch { }
+      try { await loadMediaMetadata(m); changed = true; } catch { }
     }
     if (m.kind === "image" && !runtime.mediaAux.get(m.id)?.img) {
-      try {
-        const img = await loadImage(m.src);
-        runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img });
-        m.width = img.naturalWidth; m.height = img.naturalHeight; changed = true;
-      } catch { }
+      try { await loadMediaMetadata(m); changed = true; } catch { }
     }
     if (m.kind === "video" && !runtime.mediaAux.get(m.id)?.thumb) {
       grabThumb(m).catch(() => { });
@@ -701,17 +712,9 @@ async function importFiles(fileList) {
     }
     const m = { id: "m_" + uid(), name: file.name, kind, src, transient };
     try {
-      if (kind === "svg") {
-        await loadSvgMedia(m);
-      } else if (kind === "image") {
-        const img = await loadImage(src);
-        runtime.mediaAux.set(m.id, { img });
-        m.width = img.naturalWidth; m.height = img.naturalHeight;
-      } else {
-        Object.assign(m, await probeAV(src, kind));
-        if (kind === "video") grabThumb(m).catch(() => { });
-        ensureWave(m);
-      }
+      await loadMediaMetadata(m);
+      if (kind === "video") grabThumb(m).catch(() => { });
+      ensureWave(m);
     } catch { skipped++; continue; }
     project.media.push(m);
     addedMedia.push(m);
@@ -733,7 +736,7 @@ function renderBin() {
     item.className = "bin-item"; item.draggable = true;
     item.dataset.mediaId = m.id;
     const aux = runtime.mediaAux.get(m.id) || {};
-    const icon = m.kind === "audio" ? "🎵" : m.kind === "image" ? "🖼" : m.kind === "svg" ? "✨" : "🎞";
+    const icon = mediaKindIcon(m.kind, "🎞");
     const thumbSrc = aux.thumb || (m.kind === "image" || m.kind === "svg" ? m.src : null);
     item.innerHTML = `
       <div class="bin-thumb" ${thumbSrc ? `style="background-image:url('${thumbSrc}')"` : ""}>${thumbSrc ? "" : icon}</div>
@@ -802,6 +805,13 @@ function libKind(name) {
   if (IMAGE_EXT.test(name)) return "image";
   return null;
 }
+/** Emoji shown for a bin/library item without a thumbnail preview. `other` is
+ * the fallback for kinds not explicitly mapped here (image/svg items always
+ * render a real thumbnail in both callers, so their icon is never actually
+ * shown). Shared by renderBin and renderLibrary. */
+function mediaKindIcon(kind, other) {
+  return kind === "audio" ? "🎵" : kind === "svg" ? "✨" : kind === "image" ? "🖼" : kind === "video" ? "🎞" : other;
+}
 /* Find-or-create the project media entry for a library file (dedup by src). */
 function mediaForLibraryItem(f) {
   let m = project.media.find((x) => x.src === f.src);
@@ -817,19 +827,15 @@ async function addLibraryItem(f, trackId, at) {
   const m = mediaForLibraryItem(f);
   if (!m) { toast("Unsupported file type: " + f.name); return; }
   if ((m.kind === "audio" || m.kind === "video") && (m.duration == null || isNaN(m.duration))) {
-    try { Object.assign(m, await probeAV(m.src, m.kind)); } catch { }
+    try { await loadMediaMetadata(m); } catch { }
     ensureWave(m);
     if (m.kind === "video") grabThumb(m).catch(() => { });
   }
   if (m.kind === "svg" && !runtime.mediaAux.get(m.id)?.svgText) {
-    try { await loadSvgMedia(m); } catch { }
+    try { await loadMediaMetadata(m); } catch { }
   }
   if (m.kind === "image" && !runtime.mediaAux.get(m.id)?.img) {
-    try {
-      const img = await loadImage(m.src);
-      runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img });
-      m.width = img.naturalWidth; m.height = img.naturalHeight;
-    } catch { }
+    try { await loadMediaMetadata(m); } catch { }
   }
   addClipFromMedia(m, trackId, at);
 }
@@ -867,7 +873,7 @@ function renderLibrary() {
     item.className = "bin-item lib-item";
     item.draggable = true;
     const visual = kind === "image" || kind === "svg";
-    const icon = kind === "audio" ? "🎵" : kind === "video" ? "🎞" : kind === "svg" ? "✨" : "🧩";
+    const icon = mediaKindIcon(kind, "🧩");
     item.innerHTML = `
       <div class="bin-thumb${kind === "svg" ? " svg" : ""}" ${visual ? `style="background-image:url('${f.src}')"` : ""}>${visual ? "" : icon}</div>
       <div class="bin-meta">
@@ -1338,9 +1344,12 @@ function gapAtPlayhead(trackId, t) {
 }
 /* Sync-safe close: every enabled track must have a gap at the playhead; close
    the intersection of those gaps by shifting later clips on all enabled tracks. */
+function enabledTracks() {
+  return TRACKS.filter((tr) => isTrackEnabled(tr.id));
+}
 function closeGapAtPlayhead() {
   const t = state.time;
-  const enabled = TRACKS.filter((tr) => isTrackEnabled(tr.id));
+  const enabled = enabledTracks();
   if (!enabled.length) { toast("No enabled tracks"); return; }
   let L = 0, R = Infinity;
   for (const tr of enabled) {
@@ -1424,7 +1433,7 @@ function gapSearchRange() {
 }
 /* Aligned gaps on enabled tracks inside [t0, t1] — same notion as closeGapAtPlayhead. */
 function listAlignedGaps(t0, t1) {
-  const enabled = TRACKS.filter((tr) => isTrackEnabled(tr.id));
+  const enabled = enabledTracks();
   if (!enabled.length || t1 - t0 <= GAP_EPS) return [];
   const edges = new Set([t0, t1]);
   for (const c of project.clips) {
@@ -1639,11 +1648,14 @@ function playRange() {
 function playLimited() {
   return state.workAreaPlay && !state.exporting && hasWorkArea();
 }
-/* Stop time while Limit is on. Playhead past OUT = manual override → full timeline. */
-function playStopAt() {
-  if (!playLimited()) return Math.max(projDur(), 0);
+/* Stop time while Limit is on. Playhead past OUT = manual override → full timeline.
+   `dur`, if given, is a precomputed projDur() (callers already looping every
+   clip once per frame can reuse it instead of triggering a second full scan). */
+function playStopAt(dur) {
+  const d = Math.max(dur ?? projDur(), 0);
+  if (!playLimited()) return d;
   const { end } = playRange();
-  if (state.time > end + 1e-4) return Math.max(projDur(), 0);
+  if (state.time > end + 1e-4) return d;
   return end;
 }
 function gotoHome() {
@@ -1856,13 +1868,46 @@ function drawClipWave(cv, c, trackH) {
   }
 }
 
-/* ── Ruler ── */
+/* ── Ruler ──
+   Pure vector 2D drawing with no <video>/DOM dependency (unlike the program
+   monitor), so it's a clean fit to move off the main thread: transfer the
+   canvas to a Worker once and post it a handful of numbers per frame instead
+   of running the drawing code here. Falls back to drawing directly on the
+   main thread (drawRulerMainThread) when OffscreenCanvas/
+   transferControlToOffscreen isn't available. */
+let rulerWorker = null, rulerWorkerTried = false;
+function ensureRulerWorker() {
+  if (rulerWorkerTried) return;
+  rulerWorkerTried = true;
+  try {
+    if (window.Worker && els.ruler.transferControlToOffscreen) {
+      const offscreen = els.ruler.transferControlToOffscreen();
+      const w = new Worker("ruler-worker.js");
+      w.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
+      rulerWorker = w;
+    }
+  } catch { rulerWorker = null; }
+}
 function drawRuler() {
-  const cv = els.ruler, dpr = window.devicePixelRatio || 1;
+  ensureRulerWorker();
+  const dpr = window.devicePixelRatio || 1;
   const w = els.timelineScroll.clientWidth, h = RULER_H;
+  els.ruler.style.width = w + "px"; els.ruler.style.height = h + "px";
+  if (rulerWorker) {
+    rulerWorker.postMessage({
+      type: "draw", w, h, dpr,
+      sl: els.timelineScroll.scrollLeft, pps: state.pps,
+      markers: project.markers, inPoint: project.inPoint, outPoint: project.outPoint,
+      time: state.time, fps: project.fps,
+    });
+    return;
+  }
+  drawRulerMainThread(w, h, dpr);
+}
+function drawRulerMainThread(w, h, dpr) {
+  const cv = els.ruler;
   if (cv.width !== w * dpr || cv.height !== h * dpr) {
     cv.width = w * dpr; cv.height = h * dpr;
-    cv.style.width = w + "px"; cv.style.height = h + "px";
   }
   const g = cv.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -2821,23 +2866,24 @@ function ensureAudio() {
   }
   return runtime.audio;
 }
-/* Isolate one channel of a (possibly >2-channel) source onto its own gain
-   node — shared math for the live preview graph (hookAudio, real
-   AudioContext) and the offline export mixdown (renderAudioMix,
-   OfflineAudioContext). Channels 0/1 keep their original stereo side via a
-   2-ch merger (so soloing/panning still reads as L or R); channel 2+ has no
-   natural side and comes out centered (mono → default stereo upmix).
-   Returns {out, splitter}: `out` is the node to connect downstream
-   (destination or a track bus); `splitter` must be kept referenced so it
-   isn't GC'd/disconnected early. */
+/** Route `src -> g -> (channel-isolated ->) out` on `ctx`. When `ch` is 0/1,
+ * `src` is split to stereo, only channel `ch` is fed through `g`, then
+ * re-merged onto the same side — used to isolate one stereo audio stem onto
+ * a single track bus. Returns the node to connect downstream (`g` when no
+ * isolation applies) plus the split/merge nodes (null when unused) so callers
+ * can track them for later disconnect/dispose. Shared by hookAudio,
+ * refreshAudioHold and the offline export mixdown. */
 function connectChannelIsolated(ctx, src, g, ch) {
-  const splitter = ctx.createChannelSplitter(Math.max(2, ch + 1));
-  src.connect(splitter);
-  splitter.connect(g, ch);
-  if (ch !== 0 && ch !== 1) return { out: g, splitter };
-  const merger = ctx.createChannelMerger(2);
-  g.connect(merger, 0, ch);
-  return { out: merger, splitter };
+  if (ch === 0 || ch === 1) {
+    const split = ctx.createChannelSplitter(2);
+    const merge = ctx.createChannelMerger(2);
+    src.connect(split);
+    split.connect(g, ch);
+    g.connect(merge, 0, ch);
+    return { out: merge, split, merge };
+  }
+  src.connect(g);
+  return { out: g, split: null, merge: null };
 }
 function hookAudio(c, el) {
   if (!runtime.audio || runtime.clipGain.has(c.id)) return;
@@ -2847,13 +2893,11 @@ function hookAudio(c, el) {
     const src = ctx.createMediaElementSource(el);
     const g = ctx.createGain();
     const ch = c.props?.audioChannel;
-    if (Number.isInteger(ch) && ch >= 0) {
-      const { out, splitter } = connectChannelIsolated(ctx, src, g, ch);
-      g._fcSplit = splitter;
-      if (out !== g) g._fcOut = out;
+    const { split, merge } = connectChannelIsolated(ctx, src, g, ch);
+    if (split) {
+      g._fcSplit = split;
+      g._fcOut = merge;
       g._fcChannel = ch;
-    } else {
-      src.connect(g);
     }
     runtime.clipGain.set(c.id, g);
     routeClipGain(c);
@@ -2879,6 +2923,46 @@ const METER_DB_MAX = 0;
 const METER_DB_MARKS = [0, -6, -12, -24, -36, -48];
 const METER_MODES = ["rms", "lufs", "peak"];
 const METER_MODE_LABEL = { rms: "RMS", lufs: "LUFS", peak: "PEAK" };
+/* Each channel's segment ladder is one <canvas> instead of METER_SEGS separate
+   DOM nodes (was up to 16 tracks × 16 <div>s = 256 live elements, all touched
+   via classList every time the reading changed). Geometry matches the old
+   flex layout: 16 × 12px segments, 2px gaps, column-reverse (index 0 = bottom
+   = quietest). */
+const METER_SEG_W = 8, METER_SEG_H = 12, METER_SEG_GAP = 2;
+const METER_COL_W = METER_SEG_W;
+const METER_COL_H = METER_SEGS * METER_SEG_H + (METER_SEGS - 1) * METER_SEG_GAP;
+function makeMeterCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  cv.style.width = METER_COL_W + "px";
+  cv.style.height = METER_COL_H + "px";
+  cv.width = Math.round(METER_COL_W * dpr);
+  cv.height = Math.round(METER_COL_H * dpr);
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { canvas: cv, ctx };
+}
+/** Paint the full 16-segment ladder for one channel in a single pass. `hold`
+ * is the peak-hold tick's segment index (-1 = none). */
+function paintMeterSegs(entry, lit, hold) {
+  const ctx = entry.ctx;
+  ctx.clearRect(0, 0, METER_COL_W, METER_COL_H);
+  for (let i = 0; i < METER_SEGS; i++) {
+    const y = METER_COL_H - (i + 1) * METER_SEG_H - i * METER_SEG_GAP;
+    const on = i < lit || i === hold;
+    const u = i / (METER_SEGS - 1);
+    ctx.beginPath();
+    ctx.roundRect(0, y, METER_SEG_W, METER_SEG_H, 1);
+    if (on) {
+      ctx.fillStyle = u < 0.6 ? "#3dd68c" : u < 0.85 ? "#f0c14a" : "#e5484d";
+      ctx.fill();
+    } else {
+      ctx.fillStyle = "#2a2a33";
+      ctx.fill();
+      ctx.strokeStyle = "#0006"; ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+}
 const meterState = {
   mode: (() => {
     try {
@@ -2894,6 +2978,8 @@ const meterState = {
   peakHold: {},
   peakHoldT: {},
   segs: {},
+  lastLit: {},   // id -> last-painted lit/hold seg indices, to skip redundant DOM writes
+  lastHold: {},
   modeBtn: null,
 };
 function audioMeterTracks() {
@@ -3003,6 +3089,8 @@ function buildMeterDOM() {
   row.appendChild(scale);
 
   meterState.segs = {};
+  meterState.lastLit = {};
+  meterState.lastHold = {};
   meterState.trackIds = tracks.map((t) => t.id);
   for (const t of tracks) {
     if (meterState.disp[t.id] == null) {
@@ -3016,20 +3104,15 @@ function buildMeterDOM() {
     const col = document.createElement("div");
     col.className = "vu-channel";
     col.dataset.track = t.id;
-    const segs = document.createElement("div");
-    segs.className = "vu-segs";
-    meterState.segs[t.id] = [];
-    for (let i = 0; i < METER_SEGS; i++) {
-      const seg = document.createElement("div");
-      const u = i / (METER_SEGS - 1);
-      seg.className = "vu-seg " + (u < 0.6 ? "g" : u < 0.85 ? "y" : "r");
-      segs.appendChild(seg);
-      meterState.segs[t.id].push(seg);
-    }
+    const segsCv = document.createElement("canvas");
+    segsCv.className = "vu-segs";
+    const entry = makeMeterCanvas(segsCv);
+    meterState.segs[t.id] = entry;
+    paintMeterSegs(entry, 0, -1); // start fully off
     const label = document.createElement("span");
     label.className = "vu-label";
     label.textContent = t.id;
-    col.appendChild(segs);
+    col.appendChild(segsCv);
     col.appendChild(label);
     row.appendChild(col);
   }
@@ -3075,15 +3158,19 @@ function updateMeterUI(dt) {
     }
 
     const segs = meterState.segs[id];
-    if (!segs || !segs.length) continue;
+    if (!segs) continue;
     const level = (next - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN);
     const lit = Math.round(clamp(level, 0, 1) * METER_SEGS);
     const hold = Math.round(clamp(
       ((meterState.peakHold[id] ?? METER_DB_MIN) - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN), 0, 1
     ) * (METER_SEGS - 1));
-    for (let i = 0; i < METER_SEGS; i++) {
-      segs[i].classList.toggle("on", i < lit || i === hold);
-    }
+    // The ballistics above still run every frame (needed for smooth decay),
+    // but the canvas only needs repainting when the result actually differs —
+    // skips a redraw for most tracks most frames.
+    if (meterState.lastLit[id] === lit && meterState.lastHold[id] === hold) continue;
+    meterState.lastLit[id] = lit;
+    meterState.lastHold[id] = hold;
+    paintMeterSegs(segs, lit, hold);
   }
 }
 
@@ -3190,14 +3277,7 @@ function refreshAudioHold() {
       const g = audio.ctx.createGain();
       g.gain.value = vol;
       const ch = c.props?.audioChannel;
-      let split = null, merge = null, out = g;
-      if (Number.isInteger(ch) && ch >= 0) {
-        const iso = connectChannelIsolated(audio.ctx, src, g, ch);
-        split = iso.splitter;
-        if (iso.out !== g) { merge = iso.out; out = iso.out; }
-      } else {
-        src.connect(g);
-      }
+      const { out, split, merge } = connectChannelIsolated(audio.ctx, src, g, ch);
       const bus = audio.trackBus[c.track] || audio.master;
       out.connect(bus);
       const node = { src, gain: g, split, merge };
@@ -3258,10 +3338,13 @@ function syncMedia() {
     if (c.kind === "text" || c.kind === "image" || c.kind === "svg" || c.kind === "adjust") continue;
     const el = getClipEl(c); if (!el) continue;
     const enabled = isTrackEnabled(c.track);
-    const p = evalProps(c, t);
-    const sp = clamp(+p.speed || 1, 0.1, 8);
     const mt = mediaTimeAt(c, t);
     if (state.playing && enabled && activeAt(c, t)) {
+      // Only the active-under-playhead branch needs the full evaluated props
+      // (speed/volume incl. keyframes+transitions) — skip that work for every
+      // other clip on the timeline, which is the common case each frame.
+      const p = evalProps(c, t);
+      const sp = clamp(+p.speed || 1, 0.1, 8);
       const eff = clamp(sp * playRate(), 0.0625, 16); // preview speed rides on top of clip speed
       if (el.playbackRate !== eff) { try { el.playbackRate = eff; } catch {} }
       if (el.paused) el.play().catch(() => {});
@@ -3306,7 +3389,10 @@ const EASE = {
 /* Effective properties of a clip at timeline time t: static props, overridden by
    keyframe curves, then shaped by in/out transition envelopes. */
 function evalProps(c, t) {
-  const p = { ...DEFAULT_PROPS, ...c.props };
+  // c.props is always fully populated with DEFAULT_PROPS's keys already (on
+  // load and at every clip-creation site), so a plain shallow clone suffices —
+  // merging DEFAULT_PROPS in again here would just double the copy work.
+  const p = { ...c.props };
   const local = t - c.start;
   if (c.keyframes) {
     for (const [k, kfs] of Object.entries(c.keyframes)) {
@@ -3683,19 +3769,27 @@ function buildFilter(p) {
   if (p.invert) parts.push(`invert(${p.invert}%)`);
   return parts.length ? parts.join(" ") : "none";
 }
+/** Active clips across enabled video tracks at time `t`, in compositing order
+ * (bottom-to-top: V1 first, then V2, V3), each track's clips sorted by
+ * `start`. Shared by drawFrame (renders it as-is) and pickClipAt (hit-tests
+ * it top-down, filtered to visual clips only). */
+function visibleClipsAt(t) {
+  const out = [];
+  const videoTracks = TRACKS.filter((tr) => tr.kind === "video" && isTrackEnabled(tr.id)).reverse();
+  for (const tr of videoTracks) {
+    out.push(...project.clips
+      .filter((c) => c.track === tr.id && activeAt(c, t))
+      .sort((a, b) => a.start - b.start));
+  }
+  return out;
+}
 function drawFrame(t = state.time) {
   const W = els.preview.width, H = els.preview.height;
   ctx2d.setTransform(1, 0, 0, 1, 0, 0);
   ctx2d.filter = "none"; ctx2d.globalAlpha = 1;
   ctx2d.fillStyle = project.background || "#000"; ctx2d.fillRect(0, 0, W, H);
   // render video tracks bottom-up (V1 under V2)
-  const videoTracks = TRACKS.filter((tr) => tr.kind === "video" && isTrackEnabled(tr.id)).reverse();
-  for (const tr of videoTracks) {
-    const clips = project.clips
-      .filter((c) => c.track === tr.id && activeAt(c, t))
-      .sort((a, b) => a.start - b.start);
-    for (const c of clips) drawClip(c, W, H, t);
-  }
+  for (const c of visibleClipsAt(t)) drawClip(c, W, H, t);
   // on-canvas selection handles (never during export or playback)
   if (!state.exporting && !state.playing) drawSelectionOverlay(W, H, t);
 }
@@ -3772,11 +3866,7 @@ function toLocal(pt, b) {
   return { x: dx * cs - dy * sn, y: dx * sn + dy * cs };
 }
 function pickClipAt(pt, W, H) {
-  const seq = [];
-  for (const tr of TRACKS.filter((tk) => tk.kind === "video" && isTrackEnabled(tk.id)).slice().reverse()) {
-    for (const c of project.clips.filter((c) => c.track === tr.id && activeAt(c, state.time)).sort((a, b) => a.start - b.start))
-      if (isVisualClip(c)) seq.push(c);
-  }
+  const seq = visibleClipsAt(state.time).filter(isVisualClip);
   for (let i = seq.length - 1; i >= 0; i--) {
     const c = seq[i], b = clipBounds(c, evalProps(c, state.time), W, H), lp = toLocal(pt, b);
     if (Math.abs(lp.x) <= b.hw && Math.abs(lp.y) <= b.hh) return c;
@@ -4168,9 +4258,10 @@ function wrapTextToWidth(ctx, text, maxW) {
   }
   return out.length ? out : [""];
 }
+const lineHeightOf = (p) => clamp(+p.lineHeight || 1.2, 0.6, 3);
 /* Largest font size ≤ maxSize that wraps into boxW×boxH. */
 function fitFontSizeToBox(ctx, p, boxW, boxH, maxSize) {
-  const lhMul = clamp(+p.lineHeight || 1.2, 0.6, 3);
+  const lhMul = lineHeightOf(p);
   const justify = p.align === "justify";
   const src = textSourceString(p);
   let lo = 8, hi = Math.max(8, Math.round(maxSize || 72)), best = 8;
@@ -4197,7 +4288,7 @@ function measureTextHalfSize(p) {
     lines = lines.map((l) => justifyLineBySpaces(ctx2d, l, target));
   }
   const tw = Math.max(1, ...lines.map((l) => ctx2d.measureText(l).width));
-  const lh = size * clamp(+p.lineHeight || 1.2, 0.6, 3);
+  const lh = size * lineHeightOf(p);
   ctx2d.restore();
   const sc = +p.scale || 1;
   return { hw: (tw / 2 + size * 0.25) * sc, hh: (lines.length * lh / 2 + size * 0.14) * sc };
@@ -4234,7 +4325,7 @@ function drawText(c, p, local) {
     const target = useBox ? boxW : textJustifyTarget(p, Math.max(1, ...rawLines.map((ln) => ctx2d.measureText(ln).width)));
     rawLines = rawLines.map((ln) => justifyLineBySpaces(ctx2d, ln, target));
   }
-  const lh = size * (clamp(+p.lineHeight || 1.2, 0.6, 3));
+  const lh = size * lineHeightOf(p);
   const nLines = Math.max(1, rawLines.length);
   const vAlign = p.vAlign === "top" || p.vAlign === "bottom" ? p.vAlign : "middle";
   // y0 = first line center. With a box, place the whole block by vAlign; without, center on clip origin.
@@ -4518,9 +4609,12 @@ function loop(ts) {
   if (lastTs == null) lastTs = ts;
   const dt = Math.min(0.1, (ts - lastTs) / 1000);
   lastTs = ts;
+  // projDur() is an O(clips) scan — compute it once per tick and reuse below
+  // instead of the 2-4 independent recomputations this loop used to trigger.
+  const dur = projDur();
   if (state.playing) {
     state.time += dt * playRate();
-    const end = playStopAt();
+    const end = playStopAt(dur);
     if (state.time >= end) {
       state.time = end;
       if (state.exporting) finishExport(true);
@@ -4541,9 +4635,9 @@ function loop(ts) {
   updateSafeOverlay();
   updateMeterUI(dt);
   els.tcCurrent.textContent = fmt(state.time);
-  els.tcTotal.textContent = fmt(projDur());
+  els.tcTotal.textContent = fmt(dur);
   if (state.exporting && !state.rendering) {
-    const pct = projDur() ? (state.time / projDur()) * 100 : 0;
+    const pct = dur ? (state.time / dur) * 100 : 0;
     els.exportProgress.style.width = pct.toFixed(1) + "%";
     els.exportTitle.textContent = `Exporting… ${pct.toFixed(0)}%`;
   }
@@ -4650,11 +4744,8 @@ async function renderAudioMix(dur) {
       curve[i] = clamp(evalProps(c, c.start + (i / (n - 1)) * c.duration).volume, 0, 4);
     g.gain.setValueCurveAtTime(curve, Math.max(0, c.start), Math.max(0.01, c.duration));
     const ch = c.props?.audioChannel;
-    if (Number.isInteger(ch) && ch >= 0) {
-      connectChannelIsolated(off, src, g, ch).out.connect(off.destination);
-    } else {
-      src.connect(g); g.connect(off.destination);
-    }
+    const { out } = connectChannelIsolated(off, src, g, ch);
+    out.connect(off.destination);
     if (hasSpeedRamp(c)) {
       const rc = new Float32Array(n);
       for (let i = 0; i < n; i++)
