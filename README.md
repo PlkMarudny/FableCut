@@ -65,6 +65,17 @@ same time.
 - **IN/OUT work area** — set markers with <kbd>i</kbd> and <kbd>o</kbd> (<kbd>⇧I</kbd> / <kbd>⇧O</kbd> to clear). Enabling **Limit** constrains playback to the marked range and maps <kbd>Home</kbd> / <kbd>End</kbd> to the IN and OUT positions rather than the full timeline. <kbd>t</kbd> splits clips at the markers; <kbd>⇧t</kbd> trims clips to the work (between marker in and marker out) area.
 - **Find & close gaps** — a gap is a stretch where every enabled track is empty (black frames). <kbd>g</kbd> jumps the playhead to the next shared gap (wraps; respects IN/OUT when both are set). <kbd>⇧G</kbd> closes the gap under the playhead by pulling later clips left on all enabled tracks.
 - **Reset a property** — <kbd>Ctrl/Cmd+click</kbd> an inspector **label** to restore that effect/prop to its default (paired fields like Crop L/R reset together). Matching keyframes for the prop are cleared too; transition labels clear the in/out transition.
+- **Replace media** — the inspector's **Source** button (any video/audio/image/svg
+  clip) swaps the underlying file while keeping position, trim, keyframes,
+  transitions and every effect. Pick another item already in the bin or
+  **Browse file…** to import and replace in one step. A video's linked L/R
+  audio companions are swapped along with it; a shorter replacement clamps the
+  trim to fit and toasts that it did so.
+- **Multi-channel video audio** — a video with more than 2 audio channels gets
+  a linked audio clip per channel, not just L/R (5.1, 7.1…). Extra audio
+  tracks (A5, A6, …, capped at 16) are created automatically as needed;
+  replacing a clip's media re-syncs the linked channel clips to the new
+  source's channel count, adding/dropping extras and new tracks as needed.
 
 **Look**
 
