@@ -23,6 +23,9 @@ const TRACK_SIZE_PRESETS = {
   m: { thumbs: true, h: { V3: 36, V2: 44, V1: 44, A1: 32, A2: 32, A3: 32, A4: 32 } },
   l: { thumbs: true, h: { V3: 44, V2: 58, V1: 58, A1: 42, A2: 42, A3: 42, A4: 42 } },
 };
+// Generous cap on how many audio tracks can be auto-added for a multi-channel
+// source (e.g. 7.1 surround = 8 channels) — see ensureAudioTrackCount().
+const MAX_AUDIO_TRACKS = 16;
 const TRACK_SIZE_KEY = "fablecut-track-size";
 const LAST_TRANS_KEY = { in: "fablecut-last-trans-in", out: "fablecut-last-trans-out" };
 const DEFAULT_LAST_TRANS = { type: "fade", duration: 1 };
@@ -130,6 +133,94 @@ const ASPECT_PRESETS = [
 ];
 const WAVE_PEAKS_PER_SEC = 50;
 const TRACK_IDS = new Set(TRACKS.map((t) => t.id));
+// Audio lanes available for a video's per-channel linked audio (index = props.audioChannel).
+// Starts as the 4 built-in tracks; ensureAudioTrackCount() grows both this and
+// TRACKS/TRACK_IDS at runtime for sources with more channels (5.1, 7.1, …).
+const AUDIO_TRACK_IDS = TRACKS.filter((t) => t.kind === "audio").map((t) => t.id);
+/* Add A5, A6, … until there are `need` audio tracks (capped at
+   MAX_AUDIO_TRACKS), so multi-channel sources beyond stereo/quad (5.1, 7.1…)
+   each get their own linked audio track. Returns how many were added. */
+function ensureAudioTrackCount(need) {
+  need = Math.min(need, MAX_AUDIO_TRACKS);
+  const palette = ["#7ec249", "#5a9e3a", "#4a8a2f", "#3a7226"];
+  const newIds = [];
+  while (AUDIO_TRACK_IDS.length < need) {
+    const n = AUDIO_TRACK_IDS.length + 1;
+    const id = "A" + n;
+    const preset = TRACK_SIZE_PRESETS[state.trackSize] || TRACK_SIZE_PRESETS.l;
+    TRACKS.push({ id, kind: "audio", h: preset.h.A1 || 42, color: palette[(n - 1) % palette.length] });
+    TRACK_IDS.add(id);
+    AUDIO_TRACK_IDS.push(id);
+    newIds.push(id);
+  }
+  if (newIds.length) {
+    buildTrackDOM();
+    if (runtime.audio) addLiveAudioTrackBuses(newIds);
+  }
+  return newIds.length;
+}
+/* Wire newly-added tracks into an already-running audio graph (playback may
+   have started before a multi-channel replace/add grew the track set). All
+   buses are created up front, then the meter is reinstalled at most once —
+   its AudioWorkletNode input count is fixed at creation, so adding several
+   tracks in one go (e.g. 4 new lanes for a 7.1 source) must snapshot the
+   full updated track list before rebuilding it, not one track at a time. */
+function addLiveAudioTrackBuses(ids) {
+  const audio = runtime.audio;
+  if (!audio) return;
+  for (const id of ids) {
+    if (audio.trackBus[id]) continue;
+    audio.trackBus[id] = audio.ctx.createGain();
+    audio.audioTrackIds.push(id);
+  }
+  if (!audio.meterReady) {
+    for (const id of ids) audio.trackBus[id]?.connect(audio.master);
+    return;
+  }
+  // Feed every bus (old + new) through master directly before tearing down
+  // the old meter — if the rebuild below fails, all tracks stay audible via
+  // this fallback instead of feeding an orphaned, disconnected meter node.
+  for (const id of Object.keys(audio.trackBus)) {
+    try { audio.trackBus[id].disconnect(); } catch {}
+    audio.trackBus[id].connect(audio.master);
+  }
+  try { audio.meter.port.onmessage = null; } catch {}
+  try { audio.meter.disconnect(); } catch {}
+  audio.meter = null;
+  audio.meterReady = false;
+  installMeterWorklet(audio).catch(() => {});
+}
+
+/* ── User settings (localStorage; optional behavior toggles) ── */
+const SETTINGS_KEY = "fablecut-settings";
+const DEFAULT_SETTINGS = {
+  linkSelect: false, // timeline ↔ project bin selection sync
+};
+let settings = { ...DEFAULT_SETTINGS };
+function loadSettings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
+    if (!raw || typeof raw !== "object") { settings = { ...DEFAULT_SETTINGS }; return; }
+    const next = { ...DEFAULT_SETTINGS };
+    for (const k of Object.keys(DEFAULT_SETTINGS)) {
+      if (Object.hasOwn(raw, k)) next[k] = raw[k];
+    }
+    settings = next;
+  } catch {
+    settings = { ...DEFAULT_SETTINGS };
+  }
+}
+function saveSettings() {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { }
+}
+function getSetting(key) {
+  return settings[key];
+}
+function setSetting(key, value) {
+  if (!Object.hasOwn(DEFAULT_SETTINGS, key)) return;
+  settings[key] = value;
+  saveSettings();
+}
 
 /* ── State ─────────────────────────────────────────────────────────────── */
 const project = {
@@ -154,6 +245,7 @@ const state = {
   rendering: false,      // fast (server/ffmpeg) export in progress
   guides: false,         // safe-area overlay on the monitor
   viewZoom: 1,           // program-monitor display zoom (1 = fit stage)
+  audioHold: false,      // while paused, loop one frame of audio at the playhead
   ffmpeg: false,         // server reports ffmpeg available
   dirtyTimeline: true, gesture: false,
   workAreaPlay: false,   // when true, play + Home/End stay inside IN/OUT
@@ -219,6 +311,7 @@ const els = {
   trackHeaders: $("trackHeaders"), timelineScroll: $("timelineScroll"),
   tracksContent: $("tracksContent"), tracks: $("tracks"), playhead: $("playhead"),
   ruler: $("ruler"), zoomSlider: $("zoomSlider"), btnSnap: $("btnSnap"),
+  btnAudioHold: $("btnAudioHold"),
   exportOverlay: $("exportOverlay"), exportProgress: $("exportProgress"),
   exportTitle: $("exportTitle"), exportNote: $("exportNote"),
   projectName: $("projectName"), monitorRes: $("monitorRes"),
@@ -375,9 +468,20 @@ function applyProject(data) {
       if (Array.isArray(arr)) arr.sort((a, b) => a.t - b.t);
     if (c.kind === "text") ensureFont(c.props.font);
   }
+  // TRACKS isn't persisted — any extra audio lanes (A5+, from a multi-channel
+  // source) only exist as clip.track references on disk. Recreate them so
+  // those clips don't silently vanish from the timeline on reload.
+  let maxAudioTrack = AUDIO_TRACK_IDS.length;
+  for (const c of project.clips) {
+    const am = /^A(\d+)$/.exec(c.track || "");
+    if (am) maxAudioTrack = Math.max(maxAudioTrack, +am[1]);
+  }
+  if (maxAudioTrack > AUDIO_TRACK_IDS.length) ensureAudioTrackCount(maxAudioTrack);
   // AV links aren't always on disk (older saves / agents) — rebuild from matching timing.
   relinkClips();
   // reset runtime playback elements so they rebuild against new data
+  if (state.audioHold) setAudioHold(false);
+  else stopAudioHoldNodes();
   for (const el of runtime.clipEls.values()) { try { el.pause(); el.src = ""; } catch { } }
   runtime.clipEls.clear(); runtime.clipGain.clear();
   els.preview.width = project.width; els.preview.height = project.height;
@@ -453,23 +557,34 @@ async function syncFromServer(force) {
     await probeMissingMeta();
   } catch { }
 }
+/** Populate a media entry's duration/dimensions (and cache preview assets) by
+ * dispatching on kind: svg loads its markup, image loads for width/height,
+ * audio/video probes duration+size via a throwaway <video>/<audio> element.
+ * Throws on failure — callers decide whether that's fatal or best-effort.
+ * Shared by importFiles, addLibraryItem and probeMissingMeta. */
+async function loadMediaMetadata(m) {
+  if (m.kind === "svg") { await loadSvgMedia(m); return; }
+  if (m.kind === "image") {
+    const img = await loadImage(m.src);
+    runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img });
+    m.width = img.naturalWidth; m.height = img.naturalHeight;
+    return;
+  }
+  Object.assign(m, await probeAV(m.src, m.kind));
+}
 /* Fill in duration/size for media entries added externally without metadata */
 async function probeMissingMeta() {
   let changed = false;
   for (const m of project.media) {
     if (m.kind === "svg") {
-      if (!runtime.mediaAux.get(m.id)?.svgText) { try { await loadSvgMedia(m); changed = true; } catch { } }
+      if (!runtime.mediaAux.get(m.id)?.svgText) { try { await loadMediaMetadata(m); changed = true; } catch { } }
       continue;
     }
     if (m.kind !== "image" && (m.duration == null || isNaN(m.duration))) {
-      try { Object.assign(m, await probeAV(m.src, m.kind)); changed = true; } catch { }
+      try { await loadMediaMetadata(m); changed = true; } catch { }
     }
     if (m.kind === "image" && !runtime.mediaAux.get(m.id)?.img) {
-      try {
-        const img = await loadImage(m.src);
-        runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img });
-        m.width = img.naturalWidth; m.height = img.naturalHeight; changed = true;
-      } catch { }
+      try { await loadMediaMetadata(m); changed = true; } catch { }
     }
     if (m.kind === "video" && !runtime.mediaAux.get(m.id)?.thumb) {
       grabThumb(m).catch(() => { });
@@ -560,7 +675,7 @@ function wavePeaksFor(c) {
   if (w instanceof Float32Array) return w;
   if (!w.max) return null;
   const ch = c.props?.audioChannel;
-  if ((ch === 0 || ch === 1) && w.channels?.[ch]) return w.channels[ch];
+  if (Number.isInteger(ch) && w.channels?.[ch]) return w.channels[ch];
   return w.max;
 }
 
@@ -581,8 +696,9 @@ function mediaKindFromFile(file) {
 }
 async function importFiles(fileList) {
   const files = [...fileList];
-  if (!files.length) return;
+  if (!files.length) return [];
   let added = 0, skipped = 0;
+  const addedMedia = [];
   for (const file of files) {
     const kind = mediaKindFromFile(file);
     if (!kind) { skipped++; continue; }
@@ -598,19 +714,12 @@ async function importFiles(fileList) {
     }
     const m = { id: "m_" + uid(), name: file.name, kind, src, transient };
     try {
-      if (kind === "svg") {
-        await loadSvgMedia(m);
-      } else if (kind === "image") {
-        const img = await loadImage(src);
-        runtime.mediaAux.set(m.id, { img });
-        m.width = img.naturalWidth; m.height = img.naturalHeight;
-      } else {
-        Object.assign(m, await probeAV(src, kind));
-        if (kind === "video") grabThumb(m).catch(() => { });
-        ensureWave(m);
-      }
+      await loadMediaMetadata(m);
+      if (kind === "video") grabThumb(m).catch(() => { });
+      ensureWave(m);
     } catch { skipped++; continue; }
     project.media.push(m);
+    addedMedia.push(m);
     added++;
   }
   renderBin(); scheduleSave();
@@ -618,6 +727,7 @@ async function importFiles(fileList) {
     toast("Couldn't import — unsupported or unreadable file type");
   else if (skipped)
     toast(`Imported ${added}, skipped ${skipped}`);
+  return addedMedia;
 }
 
 function renderBin() {
@@ -626,8 +736,9 @@ function renderBin() {
   for (const m of project.media) {
     const item = document.createElement("div");
     item.className = "bin-item"; item.draggable = true;
+    item.dataset.mediaId = m.id;
     const aux = runtime.mediaAux.get(m.id) || {};
-    const icon = m.kind === "audio" ? "🎵" : m.kind === "image" ? "🖼" : m.kind === "svg" ? "✨" : "🎞";
+    const icon = mediaKindIcon(m.kind, "🎞");
     const thumbSrc = aux.thumb || (m.kind === "image" || m.kind === "svg" ? m.src : null);
     item.innerHTML = `
       <div class="bin-thumb" ${thumbSrc ? `style="background-image:url('${thumbSrc}')"` : ""}>${thumbSrc ? "" : icon}</div>
@@ -640,6 +751,13 @@ function renderBin() {
       e.dataTransfer.setData("text/fablecut-media", m.id);
       e.dataTransfer.effectAllowed = "copy";
     });
+    item.addEventListener("click", (e) => {
+      if (e.target.closest(".bin-del")) return;
+      if (e.ctrlKey || e.metaKey) return; // reserved for import
+      if (!getSetting("linkSelect")) return;
+      e.preventDefault();
+      selectClipsByMediaId(m.id);
+    });
     item.addEventListener("dblclick", () => addClipFromMedia(m, null, state.time));
     item.querySelector(".bin-del").addEventListener("click", () => {
       pushUndo();
@@ -649,6 +767,7 @@ function renderBin() {
     });
     els.binList.appendChild(item);
   }
+  syncBinSelectionFromTimeline();
 }
 
 /* Open the native file dialog. Windows anchors it to the <input>'s screen
@@ -688,6 +807,13 @@ function libKind(name) {
   if (IMAGE_EXT.test(name)) return "image";
   return null;
 }
+/** Emoji shown for a bin/library item without a thumbnail preview. `other` is
+ * the fallback for kinds not explicitly mapped here (image/svg items always
+ * render a real thumbnail in both callers, so their icon is never actually
+ * shown). Shared by renderBin and renderLibrary. */
+function mediaKindIcon(kind, other) {
+  return kind === "audio" ? "🎵" : kind === "svg" ? "✨" : kind === "image" ? "🖼" : kind === "video" ? "🎞" : other;
+}
 /* Find-or-create the project media entry for a library file (dedup by src). */
 function mediaForLibraryItem(f) {
   let m = project.media.find((x) => x.src === f.src);
@@ -703,19 +829,15 @@ async function addLibraryItem(f, trackId, at) {
   const m = mediaForLibraryItem(f);
   if (!m) { toast("Unsupported file type: " + f.name); return; }
   if ((m.kind === "audio" || m.kind === "video") && (m.duration == null || isNaN(m.duration))) {
-    try { Object.assign(m, await probeAV(m.src, m.kind)); } catch { }
+    try { await loadMediaMetadata(m); } catch { }
     ensureWave(m);
     if (m.kind === "video") grabThumb(m).catch(() => { });
   }
   if (m.kind === "svg" && !runtime.mediaAux.get(m.id)?.svgText) {
-    try { await loadSvgMedia(m); } catch { }
+    try { await loadMediaMetadata(m); } catch { }
   }
   if (m.kind === "image" && !runtime.mediaAux.get(m.id)?.img) {
-    try {
-      const img = await loadImage(m.src);
-      runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img });
-      m.width = img.naturalWidth; m.height = img.naturalHeight;
-    } catch { }
+    try { await loadMediaMetadata(m); } catch { }
   }
   addClipFromMedia(m, trackId, at);
 }
@@ -753,7 +875,7 @@ function renderLibrary() {
     item.className = "bin-item lib-item";
     item.draggable = true;
     const visual = kind === "image" || kind === "svg";
-    const icon = kind === "audio" ? "🎵" : kind === "video" ? "🎞" : kind === "svg" ? "✨" : "🧩";
+    const icon = mediaKindIcon(kind, "🧩");
     item.innerHTML = `
       <div class="bin-thumb${kind === "svg" ? " svg" : ""}" ${visual ? `style="background-image:url('${f.src}')"` : ""}>${visual ? "" : icon}</div>
       <div class="bin-meta">
@@ -910,9 +1032,73 @@ function addClipFromMedia(m, trackId, at) {
     };
     project.clips.push(aL, aR);
     ensureWave(m);
+    reconcileAudioChannels(c);
   }
   selectClip(c.id); scheduleSave();
   return c;
+}
+/* Resolve (and cache) a media's real channel count via Web Audio decode —
+   <video>/<audio> metadata (probeAV) doesn't expose it, only decodeAudioData
+   does. Shares the getAudioBuffer() cache, so this never decodes twice. */
+async function detectChannelCount(m) {
+  if (m.channels != null) return m.channels;
+  try {
+    const buf = await getAudioBuffer(m);
+    if (m.channels == null) m.channels = buf.numberOfChannels;
+  } catch { if (m.channels == null) m.channels = 2; }
+  return m.channels;
+}
+/* Keep a video clip's linked per-channel audio clips in sync with its
+   media's actual channel count. Channels 0/1 (A1/A2) are created
+   synchronously by addClipFromMedia; this handles channel 3+ once the async
+   channel-count decode resolves, growing the audio track set (A5, A6, …) via
+   ensureAudioTrackCount() for sources beyond 4 channels (5.1, 7.1…), and is
+   also re-run after replaceClipMedia swaps the source. Drops linked clips
+   for channels the (new) source no longer has, and warns only if a source
+   has more channels than MAX_AUDIO_TRACKS. */
+async function reconcileAudioChannels(videoClip) {
+  if (videoClip.kind !== "video" || !videoClip.linkGroup) return;
+  const mediaId = videoClip.mediaId;
+  const m = getMedia(mediaId);
+  if (!m) return;
+  const chCount = await detectChannelCount(m);
+  const live = getClip(videoClip.id);
+  if (!live || live.mediaId !== mediaId) return; // superseded by a newer add/replace
+  const lg = live.linkGroup;
+  const tracksBefore = AUDIO_TRACK_IDS.length;
+  if (chCount > tracksBefore) ensureAudioTrackCount(chCount);
+  const newTracks = AUDIO_TRACK_IDS.length - tracksBefore;
+  const wantCh = Math.min(chCount, AUDIO_TRACK_IDS.length);
+  const have = project.clips.filter((c) => c.linkGroup === lg && c.kind === "audio");
+  let added = 0, removed = 0;
+  for (const c of have) {
+    if ((c.props?.audioChannel ?? 0) >= wantCh) {
+      releaseClipEl(c.id);
+      project.clips = project.clips.filter((x) => x !== c);
+      removed++;
+    }
+  }
+  for (let ch = 0; ch < wantCh; ch++) {
+    if (have.some((c) => c.props?.audioChannel === ch)) continue;
+    project.clips.push({
+      id: "c_" + uid(), mediaId, kind: "audio", track: AUDIO_TRACK_IDS[ch],
+      start: live.start, in: live.in, duration: live.duration, name: live.name,
+      props: { ...DEFAULT_PROPS, audioChannel: ch },
+      linkGroup: lg,
+    });
+    added++;
+  }
+  if (!added && !removed) return;
+  state.dirtyTimeline = true;
+  scheduleSave(); renderInspector();
+  if (chCount > AUDIO_TRACK_IDS.length)
+    toast(`${m.name}: ${chCount} audio channels, only ${MAX_AUDIO_TRACKS} tracks supported — extra channel(s) dropped`);
+  else if (added)
+    toast(newTracks
+      ? `${m.name}: added ${newTracks} audio track${newTracks === 1 ? "" : "s"} and linked ${wantCh} channels`
+      : `Linked ${wantCh} audio channel${wantCh === 1 ? "" : "s"} from ${m.name}`);
+  else if (removed)
+    toast(`${m.name} has fewer channels — removed ${removed} linked audio clip(s)`);
 }
 /* Apply a named title style: reset the props a style owns, merge the style,
    place it (canvas-aware), and make sure its fonts are loaded.
@@ -991,6 +1177,122 @@ function openStylePicker(anchor, c) {
   runtime.styleMenu = { close };
 }
 function closeStylePicker() { if (runtime.styleMenu) runtime.styleMenu.close(); }
+/* Swap a clip's source media in place: position, trim, keyframes, transitions,
+   props and name are all untouched. If the clip is part of a linkGroup (video
+   + its L/R audio companions extracted from the same file), replacing the
+   video member cascades the new mediaId to those companions too, since they
+   represent channels of the same source. If the new source is shorter than
+   the clip's current in/duration window, the trim is clamped to fit. */
+function replaceClipMedia(clip, media) {
+  if (!media || (clip.mediaId === media.id)) return;
+  pushUndo();
+  const targets = (clip.kind === "video" && clip.linkGroup)
+    ? project.clips.filter((c) => c.linkGroup === clip.linkGroup)
+    : [clip];
+  let trimmed = false;
+  for (const c of targets) {
+    c.mediaId = media.id;
+    // the clip's cached <video>/<audio> element (and its Web Audio graph node)
+    // is keyed by clip id and still points at the old src — drop it so
+    // getClipEl() rebuilds it against the new media on the next sync/frame.
+    releaseClipEl(c.id);
+    if (media.duration == null) continue;
+    const speed = c.props?.speed || 1;
+    // in + duration×speed ≤ media.duration (see CLAUDE.md props reference)
+    const maxIn = Math.max(0, media.duration - 0.001);
+    if (c.in > maxIn) { c.in = maxIn; trimmed = true; }
+    const maxDur = Math.max(0.05, (media.duration - c.in) / speed);
+    if (c.duration > maxDur) { c.duration = maxDur; trimmed = true; }
+  }
+  if (media.kind === "video" || media.kind === "audio") ensureWave(media);
+  if (clip.kind === "video") reconcileAudioChannels(clip); // add/drop A3+ channel clips once decoded
+  state.dirtyTimeline = true;
+  scheduleSave(); renderInspector();
+  toast(trimmed ? "Media replaced — trimmed to fit shorter source" : "Media replaced");
+}
+/* A dedicated, lazily-created file input for the "Browse file…" replace
+   action — deliberately NOT the shared #fileInput (also driven by the global
+   "+ Import" button): that one carries no target-clip state of its own, so
+   if this flow set a pending-replace flag on it and the user then cancelled
+   the OS file dialog (no "change" event fires on cancel), the flag would
+   stay stuck and hijack the next *unrelated* normal import. This input's
+   pending target lives in its own closure instead, so it can never leak
+   into a different import path. */
+let replaceFileInput = null, replaceFileTargetId = null;
+function pickReplacementFile(clip) {
+  if (!replaceFileInput) {
+    replaceFileInput = document.createElement("input");
+    replaceFileInput.type = "file";
+    replaceFileInput.accept = els.fileInput.accept;
+    replaceFileInput.className = "sr-only";
+    document.body.appendChild(replaceFileInput);
+    replaceFileInput.addEventListener("change", async () => {
+      const files = replaceFileInput.files;
+      replaceFileInput.value = "";
+      const targetId = replaceFileTargetId;
+      replaceFileTargetId = null;
+      if (!files.length) return;
+      const added = await importFiles(files);
+      const c = getClip(targetId);
+      if (!c || !added.length) return;
+      const m = added.find((x) => x.kind === c.kind) || added[0];
+      if (m.kind === c.kind) replaceClipMedia(c, m);
+      else toast(`Imported, but can't replace a ${c.kind} clip with ${m.kind === "audio" ? "an" : "a"} ${m.kind}`);
+    });
+  }
+  replaceFileTargetId = clip.id;
+  replaceFileInput.click();
+}
+/* Media-replace dropdown for the Inspector's "Source" button — same widget
+   pattern as openStylePicker (floating menu, click outside to cancel). Lists
+   bin/library media of the same kind as the clip, plus a "Browse file…" entry
+   that imports a new file and replaces with it directly. */
+function openMediaPicker(anchor, c) {
+  const compatible = project.media.filter((m) => m.kind === c.kind && m.id !== c.mediaId);
+  const menu = document.createElement("div");
+  menu.className = "style-menu";
+  const browse = document.createElement("div");
+  browse.className = "style-opt media-opt";
+  browse.textContent = "📂 Browse file…";
+  browse.addEventListener("click", () => {
+    close();
+    pickReplacementFile(c);
+  });
+  menu.appendChild(browse);
+  if (compatible.length) {
+    const sep = document.createElement("div");
+    sep.style.cssText = "height:1px;background:var(--border);margin:4px 2px;";
+    menu.appendChild(sep);
+    for (const m of compatible) {
+      const it = document.createElement("div");
+      it.className = "style-opt media-opt";
+      it.textContent = m.name;
+      it.title = m.name;
+      it.addEventListener("click", () => { close(); replaceClipMedia(c, m); });
+      menu.appendChild(it);
+    }
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "style-opt media-opt";
+    empty.style.opacity = ".6";
+    empty.style.cursor = "default";
+    empty.textContent = `No other ${c.kind} in bin`;
+    menu.appendChild(empty);
+  }
+  const onDoc = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
+  function close() {
+    menu.remove();
+    document.removeEventListener("pointerdown", onDoc, true);
+    runtime.mediaMenu = null;
+  }
+  document.addEventListener("pointerdown", onDoc, true);
+  const r = anchor.getBoundingClientRect();
+  menu.style.left = Math.round(Math.min(r.left, innerWidth - 220)) + "px";
+  menu.style.top = Math.round(Math.min(r.bottom + 4, innerHeight - 340)) + "px";
+  document.body.appendChild(menu);
+  runtime.mediaMenu = { close };
+}
+function closeMediaPicker() { if (runtime.mediaMenu) runtime.mediaMenu.close(); }
 function addTitle() {
   pushUndo();
   const c = {
@@ -1044,9 +1346,12 @@ function gapAtPlayhead(trackId, t) {
 }
 /* Sync-safe close: every enabled track must have a gap at the playhead; close
    the intersection of those gaps by shifting later clips on all enabled tracks. */
+function enabledTracks() {
+  return TRACKS.filter((tr) => isTrackEnabled(tr.id));
+}
 function closeGapAtPlayhead() {
   const t = state.time;
-  const enabled = TRACKS.filter((tr) => isTrackEnabled(tr.id));
+  const enabled = enabledTracks();
   if (!enabled.length) { toast("No enabled tracks"); return; }
   let L = 0, R = Infinity;
   for (const tr of enabled) {
@@ -1130,7 +1435,7 @@ function gapSearchRange() {
 }
 /* Aligned gaps on enabled tracks inside [t0, t1] — same notion as closeGapAtPlayhead. */
 function listAlignedGaps(t0, t1) {
-  const enabled = TRACKS.filter((tr) => isTrackEnabled(tr.id));
+  const enabled = enabledTracks();
   if (!enabled.length || t1 - t0 <= GAP_EPS) return [];
   const edges = new Set([t0, t1]);
   for (const c of project.clips) {
@@ -1345,11 +1650,14 @@ function playRange() {
 function playLimited() {
   return state.workAreaPlay && !state.exporting && hasWorkArea();
 }
-/* Stop time while Limit is on. Playhead past OUT = manual override → full timeline. */
-function playStopAt() {
-  if (!playLimited()) return Math.max(projDur(), 0);
+/* Stop time while Limit is on. Playhead past OUT = manual override → full timeline.
+   `dur`, if given, is a precomputed projDur() (callers already looping every
+   clip once per frame can reuse it instead of triggering a second full scan). */
+function playStopAt(dur) {
+  const d = Math.max(dur ?? projDur(), 0);
+  if (!playLimited()) return d;
   const { end } = playRange();
-  if (state.time > end + 1e-4) return Math.max(projDur(), 0);
+  if (state.time > end + 1e-4) return d;
   return end;
 }
 function gotoHome() {
@@ -1481,8 +1789,9 @@ function rebuildClips() {
     if (hasWave) body += `<canvas class="wave"></canvas>`;
     const badge = (c.keyframes && Object.keys(c.keyframes).length ? "◆ " : "") +
                   (c.transitionIn || c.transitionOut ? "⇄ " : "");
-    const chTag = c.props?.audioChannel === 0 ? "L · "
-                : c.props?.audioChannel === 1 ? "R · " : "";
+    const chN = c.props?.audioChannel;
+    const chTag = chN === 0 ? "L · " : chN === 1 ? "R · "
+                : Number.isInteger(chN) ? `Ch${chN + 1} · ` : "";
     const label = c.kind === "text" ? "T · " + (c.props.text || "").split("\n")[0]
       : c.kind === "adjust" ? "FX · " + (c.name || "")
       : c.kind === "audio" ? chTag + (c.name || "")
@@ -1561,13 +1870,46 @@ function drawClipWave(cv, c, trackH) {
   }
 }
 
-/* ── Ruler ── */
+/* ── Ruler ──
+   Pure vector 2D drawing with no <video>/DOM dependency (unlike the program
+   monitor), so it's a clean fit to move off the main thread: transfer the
+   canvas to a Worker once and post it a handful of numbers per frame instead
+   of running the drawing code here. Falls back to drawing directly on the
+   main thread (drawRulerMainThread) when OffscreenCanvas/
+   transferControlToOffscreen isn't available. */
+let rulerWorker = null, rulerWorkerTried = false;
+function ensureRulerWorker() {
+  if (rulerWorkerTried) return;
+  rulerWorkerTried = true;
+  try {
+    if (window.Worker && els.ruler.transferControlToOffscreen) {
+      const offscreen = els.ruler.transferControlToOffscreen();
+      const w = new Worker("ruler-worker.js");
+      w.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
+      rulerWorker = w;
+    }
+  } catch { rulerWorker = null; }
+}
 function drawRuler() {
-  const cv = els.ruler, dpr = window.devicePixelRatio || 1;
+  ensureRulerWorker();
+  const dpr = window.devicePixelRatio || 1;
   const w = els.timelineScroll.clientWidth, h = RULER_H;
+  els.ruler.style.width = w + "px"; els.ruler.style.height = h + "px";
+  if (rulerWorker) {
+    rulerWorker.postMessage({
+      type: "draw", w, h, dpr,
+      sl: els.timelineScroll.scrollLeft, pps: state.pps,
+      markers: project.markers, inPoint: project.inPoint, outPoint: project.outPoint,
+      time: state.time, fps: project.fps,
+    });
+    return;
+  }
+  drawRulerMainThread(w, h, dpr);
+}
+function drawRulerMainThread(w, h, dpr) {
+  const cv = els.ruler;
   if (cv.width !== w * dpr || cv.height !== h * dpr) {
     cv.width = w * dpr; cv.height = h * dpr;
-    cv.style.width = w + "px"; cv.style.height = h + "px";
   }
   const g = cv.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -1707,6 +2049,7 @@ els.tracksContent.addEventListener("pointerdown", (e) => {
     selectClip(c.id);
   } else if (state.selId !== c.id) {
     // grabbing inside an existing multi-selection: keep the group, retarget the inspector
+    // (bin link-select unchanged — same media set)
     state.selId = c.id;
     state.dirtyTimeline = true;
     renderInspector();
@@ -1902,6 +2245,7 @@ function startMarquee(e) {
       if (!state.selIds.has(state.selId)) state.selId = [...state.selIds].pop() ?? null;
       state.dirtyTimeline = true;
       renderInspector();
+      syncBinSelectionFromTimeline();
     }
     if (runtime.pendingSync) syncFromServer();
   };
@@ -1929,6 +2273,7 @@ els.ruler.addEventListener("pointerdown", startScrub);
 function setTime(t) {
   state.time = clamp(t, 0, Math.max(projDur(), 0));
   seekMediaWhilePaused();
+  if (state.audioHold) scheduleAudioHoldRefresh();
 }
 
 /* Add a marker at the playhead, or remove one already there (M key).
@@ -2105,12 +2450,47 @@ els.timelineScroll.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 /* ═══════════════════════════ SELECTION & INSPECTOR ═══════════════════════ */
+function selectedMediaIds() {
+  const ids = new Set();
+  for (const c of selectedClips()) {
+    if (c.mediaId) ids.add(c.mediaId);
+  }
+  return ids;
+}
+/** Clear Project-bin link-select highlights (used when the setting turns off). */
+function clearBinSelectionHighlight() {
+  if (!els.binList) return;
+  for (const item of els.binList.querySelectorAll(".bin-item.selected"))
+    item.classList.remove("selected");
+}
+/** Highlight Project-bin items that match the timeline selection (when linkSelect is on). */
+function syncBinSelectionFromTimeline() {
+  if (!els.binList || !getSetting("linkSelect")) return; // no-op when off — avoids DOM work on every selection
+  const mediaIds = selectedMediaIds();
+  for (const item of els.binList.querySelectorAll(".bin-item[data-media-id]")) {
+    item.classList.toggle("selected", mediaIds.has(item.dataset.mediaId));
+  }
+}
+/** Select every timeline clip that uses this media (video primary when present). */
+function selectClipsByMediaId(mediaId) {
+  const clips = project.clips.filter((c) => c.mediaId === mediaId);
+  if (!clips.length) {
+    setSelection([]);
+    toast("No clips on the timeline use this media");
+    return;
+  }
+  clips.sort((a, b) => a.start - b.start || String(a.id).localeCompare(String(b.id)));
+  const primary = clips.find((c) => c.kind === "video") || clips[0];
+  if (state.binTab !== "project") setBinTab("project");
+  setSelection(clips.map((c) => c.id), primary.id);
+}
 function setSelection(ids, primary) {
   state.selIds = new Set(ids);
   state.selId = primary !== undefined ? primary : ([...state.selIds].pop() ?? null);
   if (state.selId && !state.selIds.has(state.selId)) state.selIds.add(state.selId);
   state.dirtyTimeline = true;
   renderInspector();
+  syncBinSelectionFromTimeline();
 }
 /* Plain call replaces the selection; {toggle:true} (ctrl/cmd/shift+click)
    adds/removes the clip from it. */
@@ -2131,6 +2511,7 @@ function selectClip(id, opts) {
 function pruneSelection() {
   state.selIds = new Set([...state.selIds].filter((id) => getClip(id)));
   if (!state.selIds.has(state.selId)) state.selId = [...state.selIds].pop() ?? null;
+  syncBinSelectionFromTimeline();
 }
 const selectedClips = () => project.clips.filter((c) => state.selIds.has(c.id));
 function renderInspector(lite) {
@@ -2167,6 +2548,7 @@ function renderInspector(lite) {
     ? `<div class="insp-multi">${state.selIds.size} clips selected — drag moves them together, Del deletes all. Fields below edit the primary (white-outlined) clip.</div>`
     : "") + `<div class="insp-section"><h3>Clip — ${c.kind}</h3>
     ${row("Name", `<input type="text" data-k="name" value="${c.name.replace(/"/g, "&quot;")}">`)}
+    ${c.mediaId ? row("Source", `<button type="button" class="btn tiny style-picker-btn" data-media-open title="Replace this clip's media — keeps position, trim, keyframes and effects">${escapeHtml((getMedia(c.mediaId) || {}).name || "Missing media")} ▾</button>`) : ""}
     ${row("Start (s)", `<input type="number" data-k="start" step="0.01" value="${c.start.toFixed(2)}">`)}
     ${row("Length (s)", `<input type="number" data-k="duration" step="0.01" value="${c.duration.toFixed(2)}">`)}
   </div>`;
@@ -2231,8 +2613,9 @@ function renderInspector(lite) {
     </div>`;
   }
   if (c.kind === "video" || c.kind === "audio") {
-    const chLabel = c.props?.audioChannel === 0 ? "Left"
-                  : c.props?.audioChannel === 1 ? "Right" : null;
+    const chIdx = c.props?.audioChannel;
+    const chLabel = chIdx === 0 ? "Left" : chIdx === 1 ? "Right"
+                  : Number.isInteger(chIdx) ? `Channel ${chIdx + 1}` : null;
     html += `<div class="insp-section"><h3>Audio / Time</h3>
       ${chLabel ? row("Channel", `<span style="opacity:.75">${chLabel}</span>`) : ""}
       ${slider("volume", 0, 2, 0.01, p.volume)}
@@ -2394,6 +2777,13 @@ function renderInspector(lite) {
       openStylePicker(btn, c);
     });
   });
+  els.inspector.querySelectorAll("[data-media-open]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (runtime.mediaMenu) { closeMediaPicker(); return; }
+      openMediaPicker(btn, c);
+    });
+  });
   els.inspector.querySelectorAll("[data-kf]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const k = btn.dataset.kf;
@@ -2478,6 +2868,25 @@ function ensureAudio() {
   }
   return runtime.audio;
 }
+/** Route `src -> g -> (channel-isolated ->) out` on `ctx`. When `ch` is 0/1,
+ * `src` is split to stereo, only channel `ch` is fed through `g`, then
+ * re-merged onto the same side — used to isolate one stereo audio stem onto
+ * a single track bus. Returns the node to connect downstream (`g` when no
+ * isolation applies) plus the split/merge nodes (null when unused) so callers
+ * can track them for later disconnect/dispose. Shared by hookAudio,
+ * refreshAudioHold and the offline export mixdown. */
+function connectChannelIsolated(ctx, src, g, ch) {
+  if (ch === 0 || ch === 1) {
+    const split = ctx.createChannelSplitter(2);
+    const merge = ctx.createChannelMerger(2);
+    src.connect(split);
+    split.connect(g, ch);
+    g.connect(merge, 0, ch);
+    return { out: merge, split, merge };
+  }
+  src.connect(g);
+  return { out: g, split: null, merge: null };
+}
 function hookAudio(c, el) {
   if (!runtime.audio || runtime.clipGain.has(c.id)) return;
   if (c.kind !== "video" && c.kind !== "audio") return;
@@ -2486,18 +2895,11 @@ function hookAudio(c, el) {
     const src = ctx.createMediaElementSource(el);
     const g = ctx.createGain();
     const ch = c.props?.audioChannel;
-    if (ch === 0 || ch === 1) {
-      // Isolate one stereo channel and place it on L or R of the track bus
-      const splitter = ctx.createChannelSplitter(2);
-      const merger = ctx.createChannelMerger(2);
-      src.connect(splitter);
-      splitter.connect(g, ch);
-      g.connect(merger, 0, ch);
-      g._fcSplit = splitter;
-      g._fcOut = merger;
+    const { split, merge } = connectChannelIsolated(ctx, src, g, ch);
+    if (split) {
+      g._fcSplit = split;
+      g._fcOut = merge;
       g._fcChannel = ch;
-    } else {
-      src.connect(g);
     }
     runtime.clipGain.set(c.id, g);
     routeClipGain(c);
@@ -2523,6 +2925,46 @@ const METER_DB_MAX = 0;
 const METER_DB_MARKS = [0, -6, -12, -24, -36, -48];
 const METER_MODES = ["rms", "lufs", "peak"];
 const METER_MODE_LABEL = { rms: "RMS", lufs: "LUFS", peak: "PEAK" };
+/* Each channel's segment ladder is one <canvas> instead of METER_SEGS separate
+   DOM nodes (was up to 16 tracks × 16 <div>s = 256 live elements, all touched
+   via classList every time the reading changed). Geometry matches the old
+   flex layout: 16 × 12px segments, 2px gaps, column-reverse (index 0 = bottom
+   = quietest). */
+const METER_SEG_W = 8, METER_SEG_H = 12, METER_SEG_GAP = 2;
+const METER_COL_W = METER_SEG_W;
+const METER_COL_H = METER_SEGS * METER_SEG_H + (METER_SEGS - 1) * METER_SEG_GAP;
+function makeMeterCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  cv.style.width = METER_COL_W + "px";
+  cv.style.height = METER_COL_H + "px";
+  cv.width = Math.round(METER_COL_W * dpr);
+  cv.height = Math.round(METER_COL_H * dpr);
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { canvas: cv, ctx };
+}
+/** Paint the full 16-segment ladder for one channel in a single pass. `hold`
+ * is the peak-hold tick's segment index (-1 = none). */
+function paintMeterSegs(entry, lit, hold) {
+  const ctx = entry.ctx;
+  ctx.clearRect(0, 0, METER_COL_W, METER_COL_H);
+  for (let i = 0; i < METER_SEGS; i++) {
+    const y = METER_COL_H - (i + 1) * METER_SEG_H - i * METER_SEG_GAP;
+    const on = i < lit || i === hold;
+    const u = i / (METER_SEGS - 1);
+    ctx.beginPath();
+    ctx.roundRect(0, y, METER_SEG_W, METER_SEG_H, 1);
+    if (on) {
+      ctx.fillStyle = u < 0.6 ? "#3dd68c" : u < 0.85 ? "#f0c14a" : "#e5484d";
+      ctx.fill();
+    } else {
+      ctx.fillStyle = "#2a2a33";
+      ctx.fill();
+      ctx.strokeStyle = "#0006"; ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+}
 const meterState = {
   mode: (() => {
     try {
@@ -2538,6 +2980,8 @@ const meterState = {
   peakHold: {},
   peakHoldT: {},
   segs: {},
+  lastLit: {},   // id -> last-painted lit/hold seg indices, to skip redundant DOM writes
+  lastHold: {},
   modeBtn: null,
 };
 function audioMeterTracks() {
@@ -2647,6 +3091,8 @@ function buildMeterDOM() {
   row.appendChild(scale);
 
   meterState.segs = {};
+  meterState.lastLit = {};
+  meterState.lastHold = {};
   meterState.trackIds = tracks.map((t) => t.id);
   for (const t of tracks) {
     if (meterState.disp[t.id] == null) {
@@ -2660,20 +3106,15 @@ function buildMeterDOM() {
     const col = document.createElement("div");
     col.className = "vu-channel";
     col.dataset.track = t.id;
-    const segs = document.createElement("div");
-    segs.className = "vu-segs";
-    meterState.segs[t.id] = [];
-    for (let i = 0; i < METER_SEGS; i++) {
-      const seg = document.createElement("div");
-      const u = i / (METER_SEGS - 1);
-      seg.className = "vu-seg " + (u < 0.6 ? "g" : u < 0.85 ? "y" : "r");
-      segs.appendChild(seg);
-      meterState.segs[t.id].push(seg);
-    }
+    const segsCv = document.createElement("canvas");
+    segsCv.className = "vu-segs";
+    const entry = makeMeterCanvas(segsCv);
+    meterState.segs[t.id] = entry;
+    paintMeterSegs(entry, 0, -1); // start fully off
     const label = document.createElement("span");
     label.className = "vu-label";
     label.textContent = t.id;
-    col.appendChild(segs);
+    col.appendChild(segsCv);
     col.appendChild(label);
     row.appendChild(col);
   }
@@ -2694,7 +3135,7 @@ function meterReadingDb(id) {
 function updateMeterUI(dt) {
   const ids = meterState.trackIds;
   if (!ids.length) return;
-  const playing = state.playing && runtime.audio?.meterReady;
+  const metering = (state.playing || state.audioHold) && runtime.audio?.meterReady;
   const mode = meterState.mode;
   // Peak: snappy; LUFS already smoothed in-worklet (400 ms); RMS: classic VU feel
   const atkMs = mode === "peak" ? 0.005 : mode === "lufs" ? 0.04 : 0.015;
@@ -2703,7 +3144,7 @@ function updateMeterUI(dt) {
   const release = 1 - Math.exp(-dt / relMs);
   const now = performance.now();
   for (const id of ids) {
-    const target = playing ? meterReadingDb(id) : METER_DB_MIN;
+    const target = metering ? meterReadingDb(id) : METER_DB_MIN;
     const cur = meterState.disp[id] ?? METER_DB_MIN;
     const a = target > cur ? attack : release;
     const next = cur + (target - cur) * a;
@@ -2719,19 +3160,24 @@ function updateMeterUI(dt) {
     }
 
     const segs = meterState.segs[id];
-    if (!segs || !segs.length) continue;
+    if (!segs) continue;
     const level = (next - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN);
     const lit = Math.round(clamp(level, 0, 1) * METER_SEGS);
     const hold = Math.round(clamp(
       ((meterState.peakHold[id] ?? METER_DB_MIN) - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN), 0, 1
     ) * (METER_SEGS - 1));
-    for (let i = 0; i < METER_SEGS; i++) {
-      segs[i].classList.toggle("on", i < lit || i === hold);
-    }
+    // The ballistics above still run every frame (needed for smooth decay),
+    // but the canvas only needs repainting when the result actually differs —
+    // skips a redraw for most tracks most frames.
+    if (meterState.lastLit[id] === lit && meterState.lastHold[id] === hold) continue;
+    meterState.lastLit[id] = lit;
+    meterState.lastHold[id] = hold;
+    paintMeterSegs(segs, lit, hold);
   }
 }
 
 function play() {
+  if (state.audioHold) setAudioHold(false);
   if (state.playing) return;
   ensureAudio();
   runtime.audio.ctx.resume();
@@ -2748,11 +3194,124 @@ function play() {
   els.btnPlay.classList.add("on");
 }
 function pause() {
+  if (state.audioHold) setAudioHold(false);
   state.playing = false;
   els.btnPlay.textContent = "▶";
   els.btnPlay.classList.remove("on");
   for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
   if (state.exporting) finishExport(false);
+}
+
+/* ── Audio Hold: while paused, loop one project-frame of audio at the playhead ── */
+let audioHoldGen = 0;
+let audioHoldNodes = [];
+let audioHoldRaf = 0;
+function disposeAudioHoldNode(n) {
+  if (!n) return;
+  try { n.src.stop(); } catch { }
+  try { n.src.disconnect(); } catch { }
+  try { if (n.src) n.src.buffer = null; } catch { }
+  try { n.gain.disconnect(); } catch { }
+  if (n.split) { try { n.split.disconnect(); } catch { } }
+  if (n.merge) { try { n.merge.disconnect(); } catch { } }
+}
+function stopAudioHoldNodes() {
+  audioHoldGen++;
+  if (audioHoldRaf) { cancelAnimationFrame(audioHoldRaf); audioHoldRaf = 0; }
+  for (const n of audioHoldNodes) disposeAudioHoldNode(n);
+  audioHoldNodes = [];
+}
+function scheduleAudioHoldRefresh() {
+  if (!state.audioHold || state.playing) return;
+  if (audioHoldRaf) return;
+  audioHoldRaf = requestAnimationFrame(() => {
+    audioHoldRaf = 0;
+    refreshAudioHold();
+  });
+}
+/** Copy one timeline-frame of samples from `buf` starting at `startSec`. */
+function sliceAudioFrame(ctx, buf, startSec, durSec) {
+  const sr = buf.sampleRate;
+  const start = clamp(Math.floor(startSec * sr), 0, Math.max(0, buf.length - 1));
+  const n = Math.max(1, Math.min(buf.length - start, Math.round(durSec * sr)));
+  const out = ctx.createBuffer(buf.numberOfChannels, n, sr);
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    out.getChannelData(ch).set(buf.getChannelData(ch).subarray(start, start + n));
+  }
+  return out;
+}
+function refreshAudioHold() {
+  if (!state.audioHold || state.playing || state.exporting || state.rendering) {
+    stopAudioHoldNodes();
+    return;
+  }
+  const audio = ensureAudio();
+  try { audio.ctx.resume(); } catch { }
+  const t = state.time;
+  const frameDur = 1 / Math.max(1, project.fps || 30);
+  const gen = ++audioHoldGen;
+  // Stop previous voices before starting the new slice
+  for (const n of audioHoldNodes) disposeAudioHoldNode(n);
+  audioHoldNodes = [];
+
+  // Keep media-element preview silent while holding (BufferSource owns the sound).
+  for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
+  for (const g of runtime.clipGain.values()) g.gain.value = 0;
+
+  for (const c of project.clips) {
+    if (c.kind !== "audio" && c.kind !== "video") continue;
+    if (!isTrackEnabled(c.track) || !activeAt(c, t)) continue;
+    const m = getMedia(c.mediaId);
+    if (!m || (m.kind !== "audio" && m.kind !== "video")) continue;
+    const p = evalProps(c, t);
+    const vol = clamp(+p.volume || 0, 0, 4);
+    if (vol <= 1e-4) continue; // skip muted picture track (linked stems carry the sound)
+    getAudioBuffer(m).then((buf) => {
+      if (gen !== audioHoldGen || !state.audioHold || state.playing) return;
+      const mt = mediaTimeAt(c, t);
+      if (!(buf.duration > 0) || mt >= buf.duration) return;
+      // Slice exactly one frame — looping the whole short buffer (not loopStart on
+      // the full file, which would play from 0 until the loop region first).
+      const slice = sliceAudioFrame(audio.ctx, buf, mt, frameDur);
+      const src = audio.ctx.createBufferSource();
+      src.buffer = slice;
+      src.loop = true;
+      const g = audio.ctx.createGain();
+      g.gain.value = vol;
+      const ch = c.props?.audioChannel;
+      const { out, split, merge } = connectChannelIsolated(audio.ctx, src, g, ch);
+      const bus = audio.trackBus[c.track] || audio.master;
+      out.connect(bus);
+      const node = { src, gain: g, split, merge };
+      try { src.start(0); } catch { disposeAudioHoldNode(node); return; }
+      // Re-check after start: a newer refresh/stop may have run while we built the graph.
+      if (gen !== audioHoldGen || !state.audioHold || state.playing) {
+        disposeAudioHoldNode(node);
+        return;
+      }
+      audioHoldNodes.push(node);
+    }).catch(() => { });
+  }
+}
+function setAudioHold(on) {
+  on = !!on;
+  if (on) {
+    if (state.exporting || state.rendering) return;
+    if (state.playing) {
+      // Pause without going through pause() (that would clear hold).
+      state.playing = false;
+      els.btnPlay.textContent = "▶";
+      els.btnPlay.classList.remove("on");
+      for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
+    }
+    state.audioHold = true;
+    if (els.btnAudioHold) els.btnAudioHold.classList.add("on");
+    refreshAudioHold();
+  } else {
+    state.audioHold = false;
+    if (els.btnAudioHold) els.btnAudioHold.classList.remove("on");
+    stopAudioHoldNodes();
+  }
 }
 
 /* ── Preview playback speed — affects the PREVIEW player only, never the export ── */
@@ -2781,10 +3340,13 @@ function syncMedia() {
     if (c.kind === "text" || c.kind === "image" || c.kind === "svg" || c.kind === "adjust") continue;
     const el = getClipEl(c); if (!el) continue;
     const enabled = isTrackEnabled(c.track);
-    const p = evalProps(c, t);
-    const sp = clamp(+p.speed || 1, 0.1, 8);
     const mt = mediaTimeAt(c, t);
     if (state.playing && enabled && activeAt(c, t)) {
+      // Only the active-under-playhead branch needs the full evaluated props
+      // (speed/volume incl. keyframes+transitions) — skip that work for every
+      // other clip on the timeline, which is the common case each frame.
+      const p = evalProps(c, t);
+      const sp = clamp(+p.speed || 1, 0.1, 8);
       const eff = clamp(sp * playRate(), 0.0625, 16); // preview speed rides on top of clip speed
       if (el.playbackRate !== eff) { try { el.playbackRate = eff; } catch {} }
       if (el.paused) el.play().catch(() => {});
@@ -2829,7 +3391,10 @@ const EASE = {
 /* Effective properties of a clip at timeline time t: static props, overridden by
    keyframe curves, then shaped by in/out transition envelopes. */
 function evalProps(c, t) {
-  const p = { ...DEFAULT_PROPS, ...c.props };
+  // c.props is always fully populated with DEFAULT_PROPS's keys already (on
+  // load and at every clip-creation site), so a plain shallow clone suffices —
+  // merging DEFAULT_PROPS in again here would just double the copy work.
+  const p = { ...c.props };
   const local = t - c.start;
   if (c.keyframes) {
     for (const [k, kfs] of Object.entries(c.keyframes)) {
@@ -3206,19 +3771,27 @@ function buildFilter(p) {
   if (p.invert) parts.push(`invert(${p.invert}%)`);
   return parts.length ? parts.join(" ") : "none";
 }
+/** Active clips across enabled video tracks at time `t`, in compositing order
+ * (bottom-to-top: V1 first, then V2, V3), each track's clips sorted by
+ * `start`. Shared by drawFrame (renders it as-is) and pickClipAt (hit-tests
+ * it top-down, filtered to visual clips only). */
+function visibleClipsAt(t) {
+  const out = [];
+  const videoTracks = TRACKS.filter((tr) => tr.kind === "video" && isTrackEnabled(tr.id)).reverse();
+  for (const tr of videoTracks) {
+    out.push(...project.clips
+      .filter((c) => c.track === tr.id && activeAt(c, t))
+      .sort((a, b) => a.start - b.start));
+  }
+  return out;
+}
 function drawFrame(t = state.time) {
   const W = els.preview.width, H = els.preview.height;
   ctx2d.setTransform(1, 0, 0, 1, 0, 0);
   ctx2d.filter = "none"; ctx2d.globalAlpha = 1;
   ctx2d.fillStyle = project.background || "#000"; ctx2d.fillRect(0, 0, W, H);
   // render video tracks bottom-up (V1 under V2)
-  const videoTracks = TRACKS.filter((tr) => tr.kind === "video" && isTrackEnabled(tr.id)).reverse();
-  for (const tr of videoTracks) {
-    const clips = project.clips
-      .filter((c) => c.track === tr.id && activeAt(c, t))
-      .sort((a, b) => a.start - b.start);
-    for (const c of clips) drawClip(c, W, H, t);
-  }
+  for (const c of visibleClipsAt(t)) drawClip(c, W, H, t);
   // on-canvas selection handles (never during export or playback)
   if (!state.exporting && !state.playing) drawSelectionOverlay(W, H, t);
 }
@@ -3295,11 +3868,7 @@ function toLocal(pt, b) {
   return { x: dx * cs - dy * sn, y: dx * sn + dy * cs };
 }
 function pickClipAt(pt, W, H) {
-  const seq = [];
-  for (const tr of TRACKS.filter((tk) => tk.kind === "video" && isTrackEnabled(tk.id)).slice().reverse()) {
-    for (const c of project.clips.filter((c) => c.track === tr.id && activeAt(c, state.time)).sort((a, b) => a.start - b.start))
-      if (isVisualClip(c)) seq.push(c);
-  }
+  const seq = visibleClipsAt(state.time).filter(isVisualClip);
   for (let i = seq.length - 1; i >= 0; i--) {
     const c = seq[i], b = clipBounds(c, evalProps(c, state.time), W, H), lp = toLocal(pt, b);
     if (Math.abs(lp.x) <= b.hw && Math.abs(lp.y) <= b.hh) return c;
@@ -3692,9 +4261,10 @@ function wrapTextToWidth(ctx, text, maxW) {
   }
   return out.length ? out : [""];
 }
+const lineHeightOf = (p) => clamp(+p.lineHeight || 1.2, 0.6, 3);
 /* Largest font size ≤ maxSize that wraps into boxW×boxH. */
 function fitFontSizeToBox(ctx, p, boxW, boxH, maxSize) {
-  const lhMul = clamp(+p.lineHeight || 1.2, 0.6, 3);
+  const lhMul = lineHeightOf(p);
   const justify = p.align === "justify";
   const src = textSourceString(p);
   let lo = 8, hi = Math.max(8, Math.round(maxSize || 72)), best = 8;
@@ -3721,7 +4291,7 @@ function measureTextHalfSize(p) {
     lines = lines.map((l) => justifyLineBySpaces(ctx2d, l, target));
   }
   const tw = Math.max(1, ...lines.map((l) => ctx2d.measureText(l).width));
-  const lh = size * clamp(+p.lineHeight || 1.2, 0.6, 3);
+  const lh = size * lineHeightOf(p);
   ctx2d.restore();
   const sc = +p.scale || 1;
   return { hw: (tw / 2 + size * 0.25) * sc, hh: (lines.length * lh / 2 + size * 0.14) * sc };
@@ -3758,7 +4328,7 @@ function drawText(c, p, local) {
     const target = useBox ? boxW : textJustifyTarget(p, Math.max(1, ...rawLines.map((ln) => ctx2d.measureText(ln).width)));
     rawLines = rawLines.map((ln) => justifyLineBySpaces(ctx2d, ln, target));
   }
-  const lh = size * (clamp(+p.lineHeight || 1.2, 0.6, 3));
+  const lh = size * lineHeightOf(p);
   const nLines = Math.max(1, rawLines.length);
   const vAlign = p.vAlign === "top" || p.vAlign === "bottom" ? p.vAlign : "middle";
   // y0 = first line center. With a box, place the whole block by vAlign; without, center on clip origin.
@@ -4042,9 +4612,12 @@ function loop(ts) {
   if (lastTs == null) lastTs = ts;
   const dt = Math.min(0.1, (ts - lastTs) / 1000);
   lastTs = ts;
+  // projDur() is an O(clips) scan — compute it once per tick and reuse below
+  // instead of the 2-4 independent recomputations this loop used to trigger.
+  const dur = projDur();
   if (state.playing) {
     state.time += dt * playRate();
-    const end = playStopAt();
+    const end = playStopAt(dur);
     if (state.time >= end) {
       state.time = end;
       if (state.exporting) finishExport(true);
@@ -4065,9 +4638,9 @@ function loop(ts) {
   updateSafeOverlay();
   updateMeterUI(dt);
   els.tcCurrent.textContent = fmt(state.time);
-  els.tcTotal.textContent = fmt(projDur());
+  els.tcTotal.textContent = fmt(dur);
   if (state.exporting && !state.rendering) {
-    const pct = projDur() ? (state.time / projDur()) * 100 : 0;
+    const pct = dur ? (state.time / dur) * 100 : 0;
     els.exportProgress.style.width = pct.toFixed(1) + "%";
     els.exportTitle.textContent = `Exporting… ${pct.toFixed(0)}%`;
   }
@@ -4174,16 +4747,8 @@ async function renderAudioMix(dur) {
       curve[i] = clamp(evalProps(c, c.start + (i / (n - 1)) * c.duration).volume, 0, 4);
     g.gain.setValueCurveAtTime(curve, Math.max(0, c.start), Math.max(0.01, c.duration));
     const ch = c.props?.audioChannel;
-    if (ch === 0 || ch === 1) {
-      const splitter = off.createChannelSplitter(2);
-      const merger = off.createChannelMerger(2);
-      src.connect(splitter);
-      splitter.connect(g, ch);
-      g.connect(merger, 0, ch);
-      merger.connect(off.destination);
-    } else {
-      src.connect(g); g.connect(off.destination);
-    }
+    const { out } = connectChannelIsolated(off, src, g, ch);
+    out.connect(off.destination);
     if (hasSpeedRamp(c)) {
       const rc = new Float32Array(n);
       for (let i = 0; i < n; i++)
@@ -4354,10 +4919,61 @@ $("btnBack").addEventListener("click", () => setTime(state.time - 1 / project.fp
 $("btnFwd").addEventListener("click", () => setTime(state.time + 1 / project.fps));
 $("btnHelp").addEventListener("click", () => $("helpOverlay").classList.remove("hidden"));
 $("btnCloseHelp").addEventListener("click", () => $("helpOverlay").classList.add("hidden"));
+function settingsFocusables() {
+  const root = $("settingsDialog");
+  if (!root) return [];
+  return [...root.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])")]
+    .filter((el) => !el.disabled && el.getClientRects().length);
+}
+function onSettingsTabTrap(e) {
+  if (e.key !== "Tab") return;
+  const list = settingsFocusables();
+  if (!list.length) return;
+  const first = list[0], last = list[list.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+function openSettings() {
+  const cb = $("setLinkSelect");
+  if (cb) cb.checked = !!getSetting("linkSelect");
+  const overlay = $("settingsOverlay");
+  overlay.classList.remove("hidden");
+  overlay.addEventListener("keydown", onSettingsTabTrap);
+  const dialog = $("settingsDialog");
+  (cb || dialog)?.focus();
+}
+function closeSettings() {
+  const overlay = $("settingsOverlay");
+  overlay.removeEventListener("keydown", onSettingsTabTrap);
+  overlay.classList.add("hidden");
+  $("btnSettings")?.focus();
+}
+$("btnSettings").addEventListener("click", openSettings);
+$("btnCloseSettings").addEventListener("click", closeSettings);
+$("settingsOverlay").addEventListener("click", (e) => {
+  if (e.target === $("settingsOverlay")) closeSettings();
+});
+$("setLinkSelect").addEventListener("change", (e) => {
+  setSetting("linkSelect", !!e.target.checked);
+  if (!getSetting("linkSelect")) {
+    clearBinSelectionHighlight();
+    return;
+  }
+  if (selectedMediaIds().size && state.binTab !== "project") setBinTab("project");
+  syncBinSelectionFromTimeline();
+});
 els.btnSnap.addEventListener("click", () => {
   state.snap = !state.snap;
   els.btnSnap.classList.toggle("on", state.snap);
 });
+if (els.btnAudioHold) {
+  els.btnAudioHold.addEventListener("click", () => setAudioHold(!state.audioHold));
+}
 $("btnLayoutReset").addEventListener("click", restoreDefaultLayout);
 $("trackSizeGroup").addEventListener("click", (e) => {
   const b = e.target.closest("[data-track-size]");
@@ -4627,7 +5243,17 @@ window.addEventListener("keydown", (e) => {
     e.shiftKey ? clearOutPoint() : setOutPoint();
   }
   else if (k === "n" || k === "N") els.btnSnap.click();
-  else if (k === "Escape") selectClip(null);
+  else if (k === "Escape") {
+    if (!$("settingsOverlay").classList.contains("hidden")) {
+      e.preventDefault();
+      closeSettings();
+    } else if (!$("helpOverlay").classList.contains("hidden")) {
+      e.preventDefault();
+      $("helpOverlay").classList.add("hidden");
+    } else {
+      selectClip(null);
+    }
+  }
   else if ((e.ctrlKey || e.metaKey) && (k === "a" || k === "A")) {
     e.preventDefault();
     setSelection(project.clips.map((c) => c.id));
@@ -4695,7 +5321,10 @@ function syncTrackSizeButtons() {
 function applyTrackHeights() {
   const preset = TRACK_SIZE_PRESETS[state.trackSize] || TRACK_SIZE_PRESETS.l;
   for (const t of TRACKS) {
-    if (preset.h[t.id] != null) t.h = preset.h[t.id];
+    // tracks beyond the static set (e.g. A5+, auto-added for >4-channel audio)
+    // aren't named in the preset map — size them like the first track of their kind.
+    const h = preset.h[t.id] ?? preset.h[t.kind === "audio" ? "A1" : "V1"];
+    if (h != null) t.h = h;
   }
 }
 /* Switch S/M/L track density, rebuild the timeline, and grow/shrink the pane
@@ -4763,6 +5392,7 @@ function initPanelSplit() {
 }
 
 /* ── Boot ── */
+loadSettings();
 initPanelSplit();
 buildTrackDOM();
 rebuildClips();

@@ -9,6 +9,7 @@
 [![Official MCP registry](https://img.shields.io/badge/MCP%20registry-io.github.ronak--create%2Ffablecut-7b6cff?logo=modelcontextprotocol&logoColor=white)](https://registry.modelcontextprotocol.io/v0/servers?search=fablecut)
 [![Mentioned in Awesome MCP Servers](https://awesome.re/mentioned-badge.svg)](https://github.com/punkpeye/awesome-mcp-servers)
 [![Glama score](https://glama.ai/mcp/servers/ronak-create/FableCut/badges/score.svg)](https://glama.ai/mcp/servers/ronak-create/FableCut)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ronak-create/FableCut)
 
 <https://github.com/user-attachments/assets/2430b854-168b-4a9a-af2e-489e5efa7543>
 
@@ -36,6 +37,10 @@ same time.
 **Editing**
 
 - 3 video tracks + 4 audio tracks, drag/trim/split/snap, undo/redo
+- **Settings** (cog in the top bar) — optional prefs stored in this browser via
+  `localStorage`. Enable **Link timeline and Project bin selection** so picking a
+  timeline clip highlights its media in Project, and clicking a Project item
+  selects every timeline clip that uses it (off by default).
 - **Direct manipulation on the monitor** — click a clip or title on the preview to
   move, resize (corner handles), or rotate (top handle, Shift-snap) it directly
 - **Timeline multi-select** — rubber-band marquee (drag on empty track area),
@@ -46,6 +51,10 @@ same time.
 - Beat & cue markers (tap <kbd>⇧m</kbd> on the beat during playback) with edge snapping
 - Press <kbd>Alt+t</kbd> to add an in/out transition based on the playhead position over the selected clip. The last used transition is remembered as the default. Drag the overlay triangle to adjust duration; <kbd>Delete</kbd> clears the focused transition.
 - Real decoded audio waveforms on clips
+- **Audio Hold** — timeline toolbar toggle: while paused, loops **one frame** of
+  audio at the playhead (useful when stepping frame-by-frame). Scrubbing or
+  frame-step retargets the held slice; meters stay live. **Play** / **Pause**
+  turns it off.
 - Canvas aspect presets (16:9, 9:16 reels, 4:5, 1:1) + safe-area guides
 - **Program Monitor zoom** — mouse-wheel over the preview zooms the composition
   toward the cursor (fit → up to **2 screen pixels per canvas pixel**). Magnified
@@ -61,6 +70,17 @@ same time.
 - **IN/OUT work area** — set markers with <kbd>i</kbd> and <kbd>o</kbd> (<kbd>⇧I</kbd> / <kbd>⇧O</kbd> to clear). Enabling **Limit** constrains playback to the marked range and maps <kbd>Home</kbd> / <kbd>End</kbd> to the IN and OUT positions rather than the full timeline. <kbd>t</kbd> splits clips at the markers; <kbd>⇧t</kbd> trims clips to the work (between marker in and marker out) area.
 - **Find & close gaps** — a gap is a stretch where every enabled track is empty (black frames). <kbd>g</kbd> jumps the playhead to the next shared gap (wraps; respects IN/OUT when both are set). <kbd>⇧G</kbd> closes the gap under the playhead by pulling later clips left on all enabled tracks.
 - **Reset a property** — <kbd>Ctrl/Cmd+click</kbd> an inspector **label** to restore that effect/prop to its default (paired fields like Crop L/R reset together). Matching keyframes for the prop are cleared too; transition labels clear the in/out transition.
+- **Replace media** — the inspector's **Source** button (any video/audio/image/svg
+  clip) swaps the underlying file while keeping position, trim, keyframes,
+  transitions and every effect. Pick another item already in the bin or
+  **Browse file…** to import and replace in one step. A video's linked L/R
+  audio companions are swapped along with it; a shorter replacement clamps the
+  trim to fit and toasts that it did so.
+- **Multi-channel video audio** — a video with more than 2 audio channels gets
+  a linked audio clip per channel, not just L/R (5.1, 7.1…). Extra audio
+  tracks (A5, A6, …, capped at 16) are created automatically as needed;
+  replacing a clip's media re-syncs the linked channel clips to the new
+  source's channel count, adding/dropping extras and new tracks as needed.
 
 **Look**
 
@@ -155,6 +175,11 @@ export.
 Everything an agent needs is in **[CLAUDE.md](CLAUDE.md)** — the complete
 schema, semantics and recipes. Point any capable model at that file and it can
 operate the editor end to end.
+
+> 📖 **Browsable docs:** for a conversational, auto-generated tour of the
+> codebase — architecture, the `project.json` schema, the MCP surface — see
+> **[FableCut on DeepWiki](https://deepwiki.com/ronak-create/FableCut)**. Ask it
+> questions about the repo in natural language.
 
 Three equivalent control surfaces:
 
