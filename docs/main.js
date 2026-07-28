@@ -223,4 +223,145 @@
       btn.addEventListener("pointerleave", function () { btn.style.transform = ""; });
     });
   }
+
+  /* ── Live "agent working" ticker ────────────────────────────────────────
+     Vanilla equivalent of the ElapsedSeconds / LiveTokens / WibblingSpinner
+     React idea: a rolled verb that stays put, a braille spinner, an elapsed
+     seconds counter, and a token counter that streams up fast — the feel of
+     an agent editing the timeline live. */
+  (function () {
+    var el = document.querySelector(".agent-ticker");
+    if (!el) return;
+    var spinEl = el.querySelector(".spin");
+    var elapsedEl = el.querySelector(".elapsed");
+    var tokensEl = el.querySelector(".tokens");
+    var verbEl = el.querySelector(".verb");
+
+    // roll a verb once on load, then leave it put
+    var verbs = ["cutting", "grading", "keyframing", "compositing", "editing timeline"];
+    if (verbEl) verbEl.textContent = verbs[(Math.random() * verbs.length) | 0];
+
+    var reduceT = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; // ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏
+    var fi = 0, secs = 0, tokens = 0;
+
+    // elapsed seconds (like ElapsedSeconds)
+    setInterval(function () { secs++; if (elapsedEl) elapsedEl.textContent = secs + "s"; }, 1000);
+    // streaming tokens (like LiveTokens: +4..21 every 80ms)
+    setInterval(function () {
+      tokens += ((Math.random() * 18) | 0) + 4;
+      if (tokensEl) tokensEl.textContent = tokens.toLocaleString();
+    }, 80);
+    // spinner glyph (skipped under reduced motion)
+    if (!reduceT && spinEl) {
+      setInterval(function () { fi = (fi + 1) % frames.length; spinEl.textContent = frames.charAt(fi); }, 90);
+    }
+  })();
+
+  /* ── ASCII hero background ──────────────────────────────────────────────
+     A colorful, animated ASCII field painted behind the hero copy. This is
+     the vanilla-canvas equivalent of the requested <AsciiHero> React
+     component (no build step, no deps): a plasma value-field picks glyphs
+     from a density ramp; the cursor acts as a spotlight that brightens the
+     characters around it. Config mirrors the component's props. */
+  (function () {
+    var canvas = document.getElementById("heroAscii");
+    if (!canvas || !canvas.getContext) return;
+    var hero = canvas.parentElement;
+    var ctx = canvas.getContext("2d");
+
+    var CFG = {
+      baseOpacity: 0.18,       // resting glyph opacity
+      spotlightOpacity: 0.9,   // glyph opacity under the cursor
+      spotlightRadius: 10,     // spotlight radius, in glyph cells
+      colorful: true,          // hue varies across the field; else brand purple
+      cell: 15                 // glyph cell size in CSS px
+    };
+    var RAMP = " .,:;i1tfLCG08@";           // low → high density
+    var reduceMq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    var coarseP = window.matchMedia("(pointer: coarse)").matches;
+
+    var W = 0, H = 0, cols = 0, rows = 0;
+    var mx = -1e4, my = -1e4;               // cursor in cell units (off-canvas)
+
+    function resize() {
+      var r = hero.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      canvas.style.width = W + "px"; canvas.style.height = H + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.font = CFG.cell + "px ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace";
+      ctx.textBaseline = "top";
+      cols = Math.ceil(W / CFG.cell);
+      rows = Math.ceil(H / CFG.cell);
+    }
+
+    function frame(t) {
+      var time = t * 0.001;
+      ctx.clearRect(0, 0, W, H);
+      var rad = CFG.spotlightRadius, rad2 = rad * rad;
+      for (var y = 0; y < rows; y++) {
+        for (var x = 0; x < cols; x++) {
+          // animated plasma field → 0..1
+          var v = 0.5 + 0.5 * Math.sin(x * 0.18 + time * 0.9)
+                            * Math.cos(y * 0.22 - time * 0.7)
+                        + 0.25 * Math.sin((x + y) * 0.12 + time * 0.5);
+          v = v < 0 ? 0 : v > 1 ? 1 : v;
+          var ch = RAMP.charAt((v * (RAMP.length - 1)) | 0);
+          if (ch === " ") continue;
+
+          // spotlight: brighten glyphs within spotlightRadius cells of cursor
+          var dx = x - mx, dy = y - my, d2 = dx * dx + dy * dy;
+          var alpha = CFG.baseOpacity;
+          if (d2 < rad2) {
+            var falloff = 1 - Math.sqrt(d2) / rad;   // 1 at center → 0 at edge
+            alpha += (CFG.spotlightOpacity - CFG.baseOpacity) * falloff * falloff;
+          }
+
+          if (CFG.colorful) {
+            var hue = (x * 4 + y * 3 + time * 24) % 360;
+            ctx.fillStyle = "hsla(" + hue.toFixed(0) + ",70%,66%," + alpha.toFixed(3) + ")";
+          } else {
+            ctx.fillStyle = "rgba(123,108,255," + alpha.toFixed(3) + ")";
+          }
+          ctx.fillText(ch, x * CFG.cell, y * CFG.cell);
+        }
+      }
+    }
+
+    var running = false;
+    function loop(t) { frame(t); if (running) requestAnimationFrame(loop); }
+    function start() {
+      if (running) return;
+      if (reduceMq.matches) { resize(); frame(0); return; }  // one static frame
+      running = true; requestAnimationFrame(loop);
+    }
+    function stop() { running = false; }
+
+    // cursor spotlight (skip on touch/coarse pointers)
+    if (!coarseP) {
+      window.addEventListener("pointermove", function (e) {
+        var r = canvas.getBoundingClientRect();
+        mx = (e.clientX - r.left) / CFG.cell;
+        my = (e.clientY - r.top) / CFG.cell;
+      }, { passive: true });
+      window.addEventListener("pointerout", function (e) {
+        if (!e.relatedTarget) { mx = my = -1e4; }
+      });
+    }
+
+    resize();
+    if ("ResizeObserver" in window) new ResizeObserver(resize).observe(hero);
+    else window.addEventListener("resize", resize);
+
+    // pause the rAF when the hero scrolls out of view (and on reduced-motion change)
+    if ("IntersectionObserver" in window) {
+      new IntersectionObserver(function (es) {
+        if (es[0].isIntersecting) start(); else stop();
+      }, { threshold: 0 }).observe(hero);
+    } else { start(); }
+    if (reduceMq.addEventListener) reduceMq.addEventListener("change", function () { stop(); frame(0); start(); });
+  })();
 })();

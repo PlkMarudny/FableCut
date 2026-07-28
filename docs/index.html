@@ -15,7 +15,7 @@
 <meta property="og:image" content="./screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
 
-<link rel="stylesheet" href="./styles.css">
+<link rel="stylesheet" href="./styles.css?v=8">
 </head>
 <body>
 
@@ -48,7 +48,6 @@
     <nav class="nav-links" aria-label="Primary">
       <a href="#demo">Demo</a>
       <a href="#how">How it works</a>
-      <a href="#features">Features</a>
       <a href="#start">Quick start</a>
       <a href="https://deepwiki.com/ronak-create/FableCut" rel="noopener">Docs</a>
       <a href="https://discord.gg/WBKScy52F" rel="noopener">Discord</a>
@@ -68,40 +67,25 @@
 
 <!-- ── Hero ── -->
 <section class="hero" id="top">
+  <canvas class="hero-ascii" id="heroAscii" aria-hidden="true"></canvas>
   <div class="hero-glow" aria-hidden="true"></div>
   <div class="hero-inner">
     <div class="hero-copy reveal">
-      <h1 class="hero-kinetic">
-        <span class="kw" style="--i:0">The</span> <span class="kw" style="--i:1">browser</span> <span class="kw" style="--i:2">video</span> <span class="kw" style="--i:3">editor</span><br>
-        <span class="kw" style="--i:4"><span class="clip-live">AI</span></span> <span class="kw" style="--i:5"><span class="clip-live">agents</span></span> <span class="kw" style="--i:6"><span class="clip-live">can</span></span> <span class="kw" style="--i:7"><span class="clip-live">drive.</span></span>
-      </h1>
+      <h1 class="hero-title">The browser video editor<br>agents can drive.</h1>
       <p class="lede">A Premiere-style editor whose whole timeline is one JSON file. Any agent that writes JSON can edit video.</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/ronak-create/FableCut" rel="noopener">Get it on GitHub</a>
-        <a class="btn btn-ghost" href="#demo">Watch the demo</a>
-        <a class="stars-badge" href="https://github.com/ronak-create/FableCut/stargazers" rel="noopener" aria-label="Star count on GitHub">
-          <svg class="star-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .587l3.668 7.431 8.2 1.192-5.934 5.783 1.401 8.169L12 18.896l-7.335 3.866 1.401-8.169L.132 9.21l8.2-1.192z"/></svg>
-          <span class="stars-num" data-gh-stars data-fallback="Star">—</span>
-          <span class="stars-lbl">stars</span>
-        </a>
+        <a class="hero-demo-link" href="#demo">Watch the demo <span aria-hidden="true">&rarr;</span></a>
       </div>
       <p class="hero-note">Zero npm dependencies. One <code>node server.js</code>. MIT licensed.</p>
-      <p class="cred-row">
-        <a href="https://news.ycombinator.com/item?id=48845422" rel="noopener">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M0 24V0h24v24H0zM6.951 5.896l4.112 7.708v5.064h1.583v-4.972l4.148-7.799h-1.749l-2.457 4.875c-.372.745-.688 1.434-.688 1.434s-.297-.708-.651-1.434L8.831 5.896h-1.88z"/></svg>
-          Front page of Hacker News</a>
-        <a href="https://dev.to/devteam/top-7-featured-dev-posts-of-the-week-815" rel="noopener">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.42 10.05c-.18-.16-.46-.23-.84-.23H6l.02 2.44.04 2.45.56-.02c.41 0 .63-.07.83-.26.24-.24.26-.36.26-2.2 0-1.91-.02-1.96-.29-2.18zM0 4.94v14.12h24V4.94H0zM8.56 15.3c-.44.58-1.06.77-2.53.77H4.71V8.53h1.4c1.67 0 2.16.18 2.6.9.27.43.29.6.32 2.57.05 2.23-.02 2.73-.47 3.3zm5.09-5.47h-2.47v1.77h1.52v1.28l-.72.04-.75.03v1.77l1.22.03 1.2.04v1.28h-1.6c-1.53 0-1.6-.01-1.87-.3l-.3-.28v-3.16c0-3.02.01-3.18.25-3.48.23-.31.25-.31 1.88-.31h1.64v1.3zm4.68 5.45c-.17.43-.64.79-1 .79-.18 0-.45-.15-.67-.39-.32-.32-.45-.63-.82-2.08l-.9-3.39-.45-1.67h.76c.4 0 .75.02.75.05 0 .06 1.16 4.54 1.26 4.83.04.15.32-.7.73-2.3l.66-2.52.74-.04c.4-.02.73 0 .73.04 0 .14-1.67 6.38-1.8 6.68z"/></svg>
-          Top&nbsp;7 posts of the week</a>
-        <a href="https://trendshift.io/repositories/77702" rel="noopener">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
-          #8 JS repo of the day</a>
-        <a href="https://registry.modelcontextprotocol.io/v0/servers?search=fablecut" rel="noopener">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.85 0a4.16 4.16 0 0 0-2.95 1.217L1.456 10.66a.835.835 0 0 0 0 1.18.835.835 0 0 0 1.18 0l9.442-9.442a2.49 2.49 0 0 1 3.541 0 2.49 2.49 0 0 1 0 3.541L8.59 12.97l-.1.1a.835.835 0 0 0 0 1.18.835.835 0 0 0 1.18 0l.1-.098 7.03-7.034a2.49 2.49 0 0 1 3.542 0l.049.05a2.49 2.49 0 0 1 0 3.54l-8.54 8.54a1.96 1.96 0 0 0 0 2.755l1.753 1.753a.835.835 0 0 0 1.18 0 .835.835 0 0 0 0-1.18l-1.753-1.753a.266.266 0 0 1 0-.394l8.54-8.54a4.185 4.185 0 0 0 0-5.9l-.05-.05a4.16 4.16 0 0 0-2.95-1.218c-.2 0-.401.02-.6.048a4.17 4.17 0 0 0-1.17-3.552A4.16 4.16 0 0 0 13.85 0m0 3.333a.84.84 0 0 0-.59.245L6.275 10.56a4.186 4.186 0 0 0 0 5.902 4.186 4.186 0 0 0 5.902 0L19.16 9.48a.835.835 0 0 0 0-1.18.835.835 0 0 0-1.18 0l-6.985 6.984a2.49 2.49 0 0 1-3.54 0 2.49 2.49 0 0 1 0-3.54l6.983-6.985a.835.835 0 0 0 0-1.18.84.84 0 0 0-.59-.245"/></svg>
-          Official MCP registry</a>
-        <a href="https://github.com/punkpeye/awesome-mcp-servers" rel="noopener">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M24 11.438l-6.154-5.645-.865.944 5.128 4.7H1.895l5.128-4.705-.865-.943-6.154 5.649H0v3.72c0 1.683 1.62 3.053 3.61 3.053h3.795c1.99 0 3.61-1.37 3.61-3.051v-2.446h1.97v2.446c0 1.68 1.62 3.051 3.61 3.051h3.794c1.99 0 3.61-1.37 3.61-3.051v-3.721z"/></svg>
-          Awesome MCP Servers</a>
+      <p class="agent-ticker" role="status" aria-live="off" aria-label="An agent editing in real time">
+        <span class="spin" aria-hidden="true">&#x280B;</span>
+        <span class="verb">editing timeline</span>
+        <span class="sep" aria-hidden="true">&middot;</span>
+        <span class="elapsed">0s</span>
+        <span class="sep" aria-hidden="true">&middot;</span>
+        <span class="dl" aria-hidden="true">&darr;</span>
+        <span class="tokens">0</span>&nbsp;tokens
       </p>
     </div>
     <div class="hero-shot reveal">
@@ -216,49 +200,6 @@
   </div>
 </div>
 
-<!-- ── Features bento ── -->
-<section class="section features" id="features">
-  <div class="wrap">
-    <div class="head reveal zoom">
-      <span class="tick"></span>
-      <h2>A real editor, not a toy.</h2>
-      <p class="sub">Everything a modern reel needs, drivable by hand or by an agent.</p>
-    </div>
-    <div class="bento">
-      <article class="cell cell-wide accent reveal">
-        <h3>Motion that reads like a pro cut</h3>
-        <p>Keyframe 25+ properties with easing. Speed ramps that time-remap the video and the audio mix together. Camera shake and RGB-split, both animatable. 17 transitions from clean fades to whip-pans and glitch.</p>
-        <div class="ruler mini" aria-hidden="true"><i class="mk" style="left:20%"></i><i class="mk" style="left:45%"></i><i class="mk" style="left:70%"></i><i class="mk" style="left:90%"></i></div>
-      </article>
-      <article class="cell dark reveal">
-        <div class="stat">12</div>
-        <p>Filter presets, from cinematic to cyberpunk, plus full grade controls and Premiere-style adjustment layers.</p>
-      </article>
-      <article class="cell reveal">
-        <h3>AI background removal</h3>
-        <p>In-browser person cut-out via MediaPipe. Green-screen chroma key with spill suppression too.</p>
-      </article>
-      <article class="cell cell-tall accent reveal">
-        <h3>Kinetic captions</h3>
-        <p>Typewriter, word-pop, karaoke, letter-pop, wave and bounce. Neon glow for the short-form look. Any Google Font by name, or drop in your own.</p>
-        <p class="cap-demo"><span class="cut grad" id="capCut" data-word="FableCut">FableCut</span></p>
-      </article>
-      <article class="cell reveal">
-        <h3>Reference remake</h3>
-        <p>Hand it a reel you like. It detects shots, beats, BPM and the drop, then hands back an edit blueprint.</p>
-      </article>
-      <article class="cell reveal">
-        <h3>Animated SVG clips</h3>
-        <p>A first-class <code>svg</code> kind, rendered frame-accurately from CSS keyframes. Author your own stickers and lower-thirds.</p>
-      </article>
-      <article class="cell cell-wide reveal">
-        <h3>7 tracks, snap markers, real waveforms, and ffmpeg export</h3>
-        <p>Four video and three audio tracks, multi-select and split, beat markers you can tap on the fly, decoded audio waveforms, and CRF-18 MP4 export that renders each frame through the same compositor you preview with.</p>
-      </article>
-    </div>
-  </div>
-</section>
-
 <!-- ── Quick start ── -->
 <section class="section line-top start" id="start">
   <div class="wrap">
@@ -338,6 +279,6 @@ node server.js</code></pre>
   <p class="foot-fine">Built in the browser. Drivable by any agent that speaks JSON.</p>
 </footer>
 
-<script src="./main.js"></script>
+<script src="./main.js?v=4"></script>
 </body>
 </html>
