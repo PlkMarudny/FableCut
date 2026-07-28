@@ -35,6 +35,7 @@ const MIN_DUR = 0.05;
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 300;
 const TIMELINE_PAD_SEC = 15; // trailing empty seconds in the scrollable content
+const TIMELINE_FIT_FILL = 0.95; // ⇧Z / Fit — clip content fills this fraction of the viewport
 
 const DEFAULT_PROPS = {
   x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, volume: 1,
@@ -349,10 +350,17 @@ function fmt(t) {
 const getMedia = (id) => project.media.find((m) => m.id === id);
 const getClip = (id) => project.clips.find((c) => c.id === id);
 const clipEnd = (c) => c.start + c.duration;
-function projDur() {
-  return project.clips.reduce((mx, c) => Math.max(mx, clipEnd(c)), 0);
-}
 const trackOf = (c) => TRACKS.find((t) => t.id === c.track);
+/** Last timeline second occupied by a clip on a known track (ignores orphan refs). */
+function projDur() {
+  let mx = 0;
+  for (const c of project.clips) {
+    if (!trackOf(c)) continue;
+    const end = clipEnd(c);
+    if (Number.isFinite(end) && end > mx) mx = end;
+  }
+  return mx;
+}
 const clipSpeed = (c) => clamp(+(c.props?.speed) || 1, 0.1, 8);
 
 /* ── Speed ramps (time remapping) ──
@@ -2763,12 +2771,12 @@ function setZoom(pps, anchorClientX) {
   rebuildClips();
   scroller.scrollLeft = Math.max(0, tAtAnchor * state.pps - ax);
 }
-/* Fit the full timeline (clips + trailing pad) into the visible scroll area
-   with no horizontal overflow, then scroll to the start. */
+/* Fit clip content into 95% of the viewport, then scroll to the start.
+   TIMELINE_PAD_SEC is scroll room added by contentWidth(), not part of the fit. */
 function zoomToFit() {
   const w = els.timelineScroll.clientWidth || 800;
-  const span = Math.max(projDur() + TIMELINE_PAD_SEC, 1);
-  setZoom(w / span);
+  const span = Math.max(projDur(), 1);
+  setZoom((TIMELINE_FIT_FILL * w) / span);
   els.timelineScroll.scrollLeft = 0;
 }
 /* Zoom so the selection fills 90% of the timeline width and is centered.
