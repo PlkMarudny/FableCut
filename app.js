@@ -131,6 +131,7 @@ const ASPECT_PRESETS = [
   { label: "4:5 · IG 1080×1350", w: 1080, h: 1350 },
   { label: "1:1 · 1080×1080", w: 1080, h: 1080 },
 ];
+const FPS_PRESETS = [24, 25, 30, 50, 60];
 const WAVE_PEAKS_PER_SEC = 50;
 const TRACK_IDS = new Set(TRACKS.map((t) => t.id));
 // Audio lanes available for a video's per-channel linked audio (index = props.audioChannel).
@@ -319,8 +320,8 @@ const els = {
   btnAudioHold: $("btnAudioHold"),
   exportOverlay: $("exportOverlay"), exportProgress: $("exportProgress"),
   exportTitle: $("exportTitle"), exportNote: $("exportNote"),
-  projectName: $("projectName"), monitorRes: $("monitorRes"),
-  aspectSel: $("aspectSel"), btnGuides: $("btnGuides"), btnZoom100: $("btnZoom100"),
+  projectName: $("projectName"),
+  aspectSel: $("aspectSel"), fpsSel: $("fpsSel"), btnGuides: $("btnGuides"), btnZoom100: $("btnZoom100"),
   safeOverlay: $("safeOverlay"), btnSpeed: $("btnSpeed"),
   monitorStage: $("monitorStage"), monitorScroll: $("monitorScroll"),
   monitorZoomInner: $("monitorZoomInner"), kfGraphs: $("kfGraphs"),
@@ -612,8 +613,8 @@ function applyProject(data) {
   for (const el of runtime.clipEls.values()) { try { el.pause(); el.src = ""; } catch { } }
   runtime.clipEls.clear(); runtime.clipGain.clear();
   els.preview.width = project.width; els.preview.height = project.height;
-  els.monitorRes.textContent = `${project.width} × ${project.height} · ${project.fps}fps`;
   syncAspectSel();
+  syncFpsSel();
   pruneSelection(); // keep the selection across external reloads where possible
   state.dirtyTimeline = true;
   renderBin(); renderInspector();
@@ -5568,7 +5569,7 @@ els.binTabs.addEventListener("contextmenu", (e) => {
   openProjectTabMenu(e.clientX, e.clientY);
 });
 
-/* ── Canvas aspect presets + safe-area guides ── */
+/* ── Canvas aspect presets + project FPS + safe-area guides ── */
 function syncAspectSel() {
   if (!els.aspectSel) return;
   const i = ASPECT_PRESETS.findIndex((a) => a.w === project.width && a.h === project.height);
@@ -5576,13 +5577,31 @@ function syncAspectSel() {
     ASPECT_PRESETS.map((a, j) => `<option value="${j}" ${j === i ? "selected" : ""}>${a.label}</option>`).join("") +
     (i < 0 ? `<option value="custom" selected>Custom · ${project.width}×${project.height}</option>` : "");
 }
+function syncFpsSel() {
+  if (!els.fpsSel) return;
+  const fps = Number(project.fps);
+  const i = FPS_PRESETS.findIndex((v) => v === fps);
+  els.fpsSel.innerHTML =
+    FPS_PRESETS.map((v, j) => `<option value="${j}" ${j === i ? "selected" : ""}>${v} fps</option>`).join("") +
+    (i < 0 && Number.isFinite(fps) && fps > 0
+      ? `<option value="custom" selected>Custom · ${fps} fps</option>`
+      : "");
+}
 els.aspectSel.addEventListener("change", () => {
   const a = ASPECT_PRESETS[+els.aspectSel.value];
   if (!a) return;
   project.width = a.w; project.height = a.h;
   els.preview.width = a.w; els.preview.height = a.h;
-  els.monitorRes.textContent = `${a.w} × ${a.h} · ${project.fps}fps`;
   syncAspectSel();
+  seekMediaWhilePaused();
+  scheduleSave();
+});
+els.fpsSel?.addEventListener("change", () => {
+  const v = FPS_PRESETS[+els.fpsSel.value];
+  if (!(v > 0)) return;
+  project.fps = v;
+  syncFpsSel();
+  state.dirtyTimeline = true;
   seekMediaWhilePaused();
   scheduleSave();
 });

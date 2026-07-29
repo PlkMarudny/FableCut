@@ -920,6 +920,7 @@ body.track-size-s .clip.selected {
   font: 12px "Segoe UI", sans-serif;
   max-width: 170px;
 }
+#fpsSel.head-select { max-width: 88px; }
 
 /* ── Safe-area guides (positioned over the canvas by JS) ── */
 #safeOverlay {
