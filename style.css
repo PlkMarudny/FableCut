@@ -1075,6 +1075,34 @@ body.track-size-s .clip.selected {
   gap: 4px;
 }
 
+.transport-end {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.transport-end #btnInsert {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+.transport-end #btnInsert svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.transport-end #btnInsert:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .transport-btns .btn.icon {
   width: 26px;
   height: 26px;

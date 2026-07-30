@@ -343,6 +343,7 @@ const els = {
   sourceScrub: $("sourceScrub"), sourceScrubTrack: $("sourceScrubTrack"),
   sourceScrubRange: $("sourceScrubRange"), sourceScrubIn: $("sourceScrubIn"),
   sourceScrubOut: $("sourceScrubOut"), sourceScrubHead: $("sourceScrubHead"),
+  btnInsert: $("btnInsert"),
   exportSetup: $("exportSetup"), engineFast: $("engineFast"), engineRealtime: $("engineRealtime"),
 };
 const ctx2d = els.preview.getContext("2d");
@@ -1354,6 +1355,98 @@ function addClipFromMedia(m, trackId, at) {
   }
   selectClip(c.id); scheduleSave();
   return c;
+}
+/** Source In→Out window for insert (media-local seconds). Images/SVGs use
+ *  marks only as timeline duration (`in` stays 0). */
+function sourceInsertWindow() {
+  const m = sourceMedia();
+  if (!m) return null;
+  const mediaDur = sourceDur();
+  if (m.kind === "image" || m.kind === "svg") {
+    const a = state.source.in != null ? state.source.in : 0;
+    const b = state.source.out != null ? state.source.out : (m.duration || 5);
+    const duration = Math.max(MIN_DUR, b - a);
+    return { m, inn: 0, duration };
+  }
+  const inn = state.source.in != null ? state.source.in : 0;
+  let out = state.source.out != null ? state.source.out : mediaDur;
+  if (!(mediaDur > 0)) return null;
+  out = Math.min(out, mediaDur);
+  const innClamped = clamp(inn, 0, Math.max(0, mediaDur - MIN_DUR));
+  if (!(out > innClamped + MIN_DUR * 0.5)) return null;
+  return { m, inn: innClamped, duration: out - innClamped };
+}
+/** Premiere-style Insert: place Source In→Out at the timeline playhead and
+ *  ripple later clips. Splits any clip that straddles the playhead first. */
+function insertSourceAtPlayhead() {
+  const win = sourceInsertWindow();
+  if (!win) {
+    if (!state.source.mediaId)
+      toast("Load Source first (double-click Project or a timeline clip)");
+    else
+      toast("Mark a Source range (I / O) — or load media with a known duration");
+    return;
+  }
+  const { m, inn, duration } = win;
+  if (state.playing) pause();
+  if (state.source.playing) pauseSource();
+  const at = Math.max(0, state.time);
+
+  pushUndo();
+  // Open a seam at the playhead so the ripple can push the right halves.
+  const toSplit = withLinked(project.clips.filter((c) =>
+    at > c.start + MIN_DUR && at < clipEnd(c) - MIN_DUR
+  ));
+  if (toSplit.length) {
+    const newLink = new Map();
+    for (const c of toSplit) {
+      const right = splitClipAt(c, at);
+      if (right) newLink.set(c.id, right);
+    }
+    relinkSplitRights(toSplit, newLink);
+  }
+  const eps = 1e-6;
+  for (const c of project.clips) {
+    if (c.start >= at - eps) c.start = +(c.start + duration).toFixed(4);
+  }
+
+  let trackId = defaultTrackFor(m.kind);
+  const tr = TRACKS.find((t) => t.id === trackId);
+  if (!tr || (m.kind === "audio") !== (tr.kind === "audio")) trackId = defaultTrackFor(m.kind);
+  const name = m.name.replace(/\.[^.]+$/, "");
+  const c = {
+    id: "c_" + uid(), mediaId: m.id, kind: m.kind, track: trackId,
+    start: +at.toFixed(4), in: +inn.toFixed(4), duration: +duration.toFixed(4), name,
+    props: { ...DEFAULT_PROPS },
+  };
+  project.clips.push(c);
+  if (m.kind === "video") {
+    c.props.volume = 0;
+    const lg = "lg_" + uid();
+    c.linkGroup = lg;
+    const aL = {
+      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A1",
+      start: c.start, in: c.in, duration: c.duration, name,
+      props: { ...DEFAULT_PROPS, audioChannel: 0 },
+      linkGroup: lg,
+    };
+    const aR = {
+      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A2",
+      start: c.start, in: c.in, duration: c.duration, name,
+      props: { ...DEFAULT_PROPS, audioChannel: 1 },
+      linkGroup: lg,
+    };
+    project.clips.push(aL, aR);
+    ensureWave(m);
+    reconcileAudioChannels(c);
+  } else if (m.kind === "audio") {
+    ensureWave(m);
+  }
+  selectClip(c.id);
+  state.time = +(at + duration).toFixed(4);
+  state.dirtyTimeline = true;
+  scheduleSave();
+  ensurePlayheadVisible();
 }
 /* Resolve (and cache) a media's real channel count via Web Audio decode —
    <video>/<audio> metadata (probeAV) doesn't expose it, only decodeAudioData
@@ -3453,6 +3546,10 @@ function syncMonitorModeUI() {
   }
   updateSourceScrub();
   syncPlayButton();
+  if (els.btnInsert) {
+    els.btnInsert.classList.toggle("hidden", !src);
+    els.btnInsert.disabled = !state.source.mediaId;
+  }
 }
 function setMonitorMode(mode) {
   if (mode !== "source" && mode !== "program") return;
@@ -6078,6 +6175,7 @@ $("btnBack").addEventListener("click", () => stepTransport(-1));
 $("btnFwd").addEventListener("click", () => stepTransport(1));
 $("btnMarkIn").addEventListener("click", markIn);
 $("btnMarkOut").addEventListener("click", markOut);
+els.btnInsert?.addEventListener("click", () => insertSourceAtPlayhead());
 $("monitorModeGroup")?.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-monitor-mode]");
   if (!btn) return;
@@ -6451,6 +6549,10 @@ window.addEventListener("keydown", (e) => {
     }
   }
   else if (k === "s" || k === "S") splitAtPlayhead();
+  else if (k === "," && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    insertSourceAtPlayhead();
+  }
   else if ((k === "g" || k === "G") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
     e.shiftKey ? closeGapAtPlayhead() : goToNextGap();
