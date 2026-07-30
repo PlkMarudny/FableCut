@@ -315,6 +315,10 @@ const runtime = {
   binCtxMenu: null,     // Project-tab context menu element
   sourceEl: null,       // dedicated <video>/<audio> for Source monitor (not WebAudio-hooked)
   sourceMarks: new Map(), // mediaId -> {in, out} remembered across loads
+  sourceHold: null,     // canvas of last good Source video frame (scrub/seek holdover)
+  sourceHoldOk: false,
+  sourceSeekPending: null, // coalesced scrub target (sec) while a seek is in flight
+  sourceSeekBusy: false,
 };
 
 /* ── DOM ───────────────────────────────────────────────────────────────── */
@@ -3459,9 +3463,14 @@ function setMonitorMode(mode) {
 }
 function releaseSourceEl() {
   const el = runtime.sourceEl;
-  if (!el) return;
-  try { el.pause(); el.removeAttribute("src"); el.load(); } catch { }
+  if (el) {
+    try { el.pause(); el.removeAttribute("src"); el.load(); } catch { }
+  }
   runtime.sourceEl = null;
+  runtime.sourceHold = null;
+  runtime.sourceHoldOk = false;
+  runtime.sourceSeekPending = null;
+  runtime.sourceSeekBusy = false;
 }
 function ensureSourceEl(m) {
   if (!m || (m.kind !== "video" && m.kind !== "audio")) {
@@ -3476,24 +3485,55 @@ function ensureSourceEl(m) {
     el.playsInline = true;
     // Element-volume path only — never createMediaElementSource (timeline owns Web Audio).
     el.volume = 1;
+    // After each seek settles, apply any newer scrub target (coalesced seeks).
+    el.addEventListener("seeked", () => {
+      runtime.sourceSeekBusy = false;
+      flushSourceSeek();
+    });
     runtime.sourceEl = el;
   }
   if (el.dataset.src !== m.src) {
     el.src = m.src;
     el.dataset.src = m.src;
+    runtime.sourceHold = null;
+    runtime.sourceHoldOk = false;
+    runtime.sourceSeekPending = null;
+    runtime.sourceSeekBusy = false;
   }
   return el;
+}
+/** Queue a Source media seek. HTMLVideoElement blanks while seeking; we only
+ *  keep one in-flight seek and always show the last good hold frame. */
+function flushSourceSeek() {
+  const el = runtime.sourceEl;
+  if (!el || state.source.playing) {
+    runtime.sourceSeekPending = null;
+    runtime.sourceSeekBusy = false;
+    return;
+  }
+  const t = runtime.sourceSeekPending;
+  if (t == null) return;
+  if (runtime.sourceSeekBusy || el.seeking) return;
+  if (Math.abs(el.currentTime - t) <= 1 / Math.max(1, project.fps || 30)) {
+    runtime.sourceSeekPending = null;
+    return;
+  }
+  runtime.sourceSeekPending = null;
+  runtime.sourceSeekBusy = true;
+  try { el.currentTime = t; } catch { runtime.sourceSeekBusy = false; }
+}
+function seekSourceEl(t) {
+  const el = runtime.sourceEl;
+  if (!el) return;
+  runtime.sourceSeekPending = t;
+  flushSourceSeek();
 }
 function setSourceTime(t) {
   const dur = sourceDur();
   state.source.time = clamp(t, 0, Math.max(dur, 0));
-  const el = runtime.sourceEl;
   const m = sourceMedia();
-  if (el && m && (m.kind === "video" || m.kind === "audio") && !state.source.playing) {
-    try {
-      if (Math.abs(el.currentTime - state.source.time) > 0.04)
-        el.currentTime = state.source.time;
-    } catch { }
+  if (m && (m.kind === "video" || m.kind === "audio") && !state.source.playing) {
+    seekSourceEl(state.source.time);
   }
   updateSourceScrub();
 }
@@ -3603,10 +3643,10 @@ function loadSourceFromMedia(m, opts = {}) {
   if (m.kind === "svg") loadSvgMedia(m).catch(() => {});
   setMonitorMode("source");
   updateSourceScrub();
-  // Seek decode head once loaded
+  // Seek decode head once loaded (coalesced — hold frame covers the blank)
   const el = runtime.sourceEl;
   if (el) {
-    const seek = () => { try { el.currentTime = state.source.time; } catch { } };
+    const seek = () => seekSourceEl(state.source.time);
     if (el.readyState >= 1) seek();
     else el.addEventListener("loadedmetadata", seek, { once: true });
   }
@@ -3724,11 +3764,46 @@ function syncSourceMedia() {
   // Paused: do not seek here. setSourceTime() handles user scrubs; seeking on
   // every post-pause drift flash-blacks the video frame.
 }
-function drawSourceContain(src, sw, sh, W, H) {
-  if (!src || !(sw > 0) || !(sh > 0)) return;
+function drawSourceContain(ctx, src, sw, sh, W, H) {
+  if (!src || !(sw > 0) || !(sh > 0)) return false;
   const scale = Math.min(W / sw, H / sh);
   const dw = sw * scale, dh = sh * scale;
-  ctx2d.drawImage(src, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  try {
+    ctx.drawImage(src, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function ensureSourceHold(W, H) {
+  let cv = runtime.sourceHold;
+  if (!cv) {
+    cv = document.createElement("canvas");
+    runtime.sourceHold = cv;
+  }
+  if (cv.width !== W || cv.height !== H) {
+    cv.width = W;
+    cv.height = H;
+    runtime.sourceHoldOk = false;
+  }
+  return cv;
+}
+/** Snapshot a decoded video frame into the hold canvas (used while seeking). */
+function captureSourceVideoFrame(el, m, W, H) {
+  if (!el || el.seeking || el.readyState < 2 || !(el.videoWidth > 0)) return false;
+  const hold = ensureSourceHold(W, H);
+  const g = hold.getContext("2d");
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.fillStyle = "#000";
+  g.fillRect(0, 0, W, H);
+  const ok = drawSourceContain(
+    g, el,
+    el.videoWidth || m.width || W,
+    el.videoHeight || m.height || H,
+    W, H
+  );
+  if (ok) runtime.sourceHoldOk = true;
+  return ok;
 }
 function getSourceSvgImage(m, t) {
   const aux = runtime.mediaAux.get(m.id);
@@ -3763,14 +3838,17 @@ function drawSourceFrame() {
   const t = state.source.time;
   if (m.kind === "video") {
     const el = ensureSourceEl(m);
-    if (el && el.readyState >= 2)
-      drawSourceContain(el, el.videoWidth || m.width || W, el.videoHeight || m.height || H, W, H);
+    // Prefer a fresh decode into the hold canvas; while seeking / not ready the
+    // previous hold stays, so scrubbing doesn't flash black.
+    captureSourceVideoFrame(el, m, W, H);
+    if (runtime.sourceHoldOk && runtime.sourceHold)
+      ctx2d.drawImage(runtime.sourceHold, 0, 0);
   } else if (m.kind === "image") {
     const img = runtime.mediaAux.get(m.id)?.img;
-    if (img) drawSourceContain(img, img.naturalWidth || m.width || W, img.naturalHeight || m.height || H, W, H);
+    if (img) drawSourceContain(ctx2d, img, img.naturalWidth || m.width || W, img.naturalHeight || m.height || H, W, H);
   } else if (m.kind === "svg") {
     const img = getSourceSvgImage(m, t);
-    if (img) drawSourceContain(img, img.naturalWidth || m.width || W, img.naturalHeight || m.height || H, W, H);
+    if (img) drawSourceContain(ctx2d, img, img.naturalWidth || m.width || W, img.naturalHeight || m.height || H, W, H);
   } else if (m.kind === "audio") {
     ctx2d.fillStyle = "#1a1a22";
     ctx2d.fillRect(0, 0, W, H);
