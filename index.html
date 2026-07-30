@@ -124,6 +124,12 @@
               <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M8 4.2v5.4M5.55 7.35L8 9.9L10.45 7.35"/>
             </svg>
           </button>
+          <button type="button" class="btn icon hidden" id="btnReplace" title="Replace (overwrite) Source In→Out at the timeline playhead (.)" aria-label="Replace">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="square" d="M0.75 5H3.5V11H0.75M15.25 5H12.5V11h2.75"/>
+              <rect x="5.35" y="5" width="5.3" height="6" rx="0.4" fill="currentColor"/>
+            </svg>
+          </button>
           <span class="timecode dim" id="tcTotal">00:00:00</span>
         </div>
       </div>
@@ -229,6 +235,7 @@
         <tr><td><kbd>Space</kbd></td><td>Play / pause (Source or Program — whichever is active)</td></tr>
         <tr><td>Dbl-click bin / clip</td><td>Load into Source monitor</td></tr>
         <tr><td><kbd>,</kbd></td><td>Insert Source In→Out at the timeline playhead (ripples later clips)</td></tr>
+        <tr><td><kbd>.</kbd></td><td>Replace (overwrite) at playhead — V1 + linked A stems (incl. A3+); leaves V2/V3 overlays</td></tr>
         <tr><td><kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd></td><td>Shuttle preview — <kbd>L</kbd> faster / <kbd>J</kbd> slower (1× · 1.5× · 2× · 4×); <kbd>K</kbd> play/pause + reset to 1×</td></tr>
         <tr><td><kbd>S</kbd></td><td>Split clip(s) at playhead</td></tr>
         <tr><td><kbd>G</kbd></td><td>Find next shared gap (wraps; respects IN/OUT)</td></tr>

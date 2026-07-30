@@ -343,7 +343,7 @@ const els = {
   sourceScrub: $("sourceScrub"), sourceScrubTrack: $("sourceScrubTrack"),
   sourceScrubRange: $("sourceScrubRange"), sourceScrubIn: $("sourceScrubIn"),
   sourceScrubOut: $("sourceScrubOut"), sourceScrubHead: $("sourceScrubHead"),
-  btnInsert: $("btnInsert"),
+  btnInsert: $("btnInsert"), btnReplace: $("btnReplace"),
   exportSetup: $("exportSetup"), engineFast: $("engineFast"), engineRealtime: $("engineRealtime"),
 };
 const ctx2d = els.preview.getContext("2d");
@@ -1356,8 +1356,8 @@ function addClipFromMedia(m, trackId, at) {
   selectClip(c.id); scheduleSave();
   return c;
 }
-/** Source In→Out window for insert (media-local seconds). Images/SVGs use
- *  marks only as timeline duration (`in` stays 0). */
+/** Source In→Out window for insert/replace (media-local seconds). Images/SVGs
+ *  use marks only as timeline duration (`in` stays 0). */
 function sourceInsertWindow() {
   const m = sourceMedia();
   if (!m) return null;
@@ -1376,17 +1376,128 @@ function sourceInsertWindow() {
   if (!(out > innClamped + MIN_DUR * 0.5)) return null;
   return { m, inn: innClamped, duration: out - innClamped };
 }
+function toastSourceWindowMissing() {
+  if (!state.source.mediaId)
+    toast("Load Source first (double-click Project or a timeline clip)");
+  else
+    toast("Mark a Source range (I / O) — or load media with a known duration");
+}
+/** Tracks that receive newly placed Source clips (picture + linked stems). */
+function sourceEditTracks(m) {
+  let trackId = defaultTrackFor(m.kind);
+  const tr = TRACKS.find((t) => t.id === trackId);
+  if (!tr || (m.kind === "audio") !== (tr.kind === "audio")) trackId = defaultTrackFor(m.kind);
+  if (m.kind === "video") return [trackId, "A1", "A2"];
+  return [trackId];
+}
+/** Tracks punched by Replace: placement lanes, plus any overlapping linked
+ *  AV stems on A3+ (`audioChannel` set). Leaves V2/V3 and standalone music alone. */
+function sourceReplacePunchTracks(m, t0, t1) {
+  const eps = 1e-6;
+  const tracks = new Set(sourceEditTracks(m).filter((id) => isTrackEnabled(id)));
+  if (m.kind === "video") {
+    for (const c of project.clips) {
+      if (c.kind !== "audio" || c.props?.audioChannel == null) continue;
+      if (clipEnd(c) <= t0 + eps || c.start >= t1 - eps) continue;
+      if (isTrackEnabled(c.track)) tracks.add(c.track);
+    }
+  }
+  return [...tracks];
+}
+/** Place Source window clips at `at` (no undo / no timeline surgery). */
+function placeSourceWindowClips(m, inn, duration, at) {
+  const tracks = sourceEditTracks(m);
+  const trackId = tracks[0];
+  const name = m.name.replace(/\.[^.]+$/, "");
+  const start = +at.toFixed(4);
+  const innR = +inn.toFixed(4);
+  const durR = +duration.toFixed(4);
+  const c = {
+    id: "c_" + uid(), mediaId: m.id, kind: m.kind, track: trackId,
+    start, in: innR, duration: durR, name,
+    props: { ...DEFAULT_PROPS },
+  };
+  project.clips.push(c);
+  if (m.kind === "video") {
+    c.props.volume = 0;
+    const lg = "lg_" + uid();
+    c.linkGroup = lg;
+    project.clips.push({
+      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A1",
+      start, in: innR, duration: durR, name,
+      props: { ...DEFAULT_PROPS, audioChannel: 0 },
+      linkGroup: lg,
+    }, {
+      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A2",
+      start, in: innR, duration: durR, name,
+      props: { ...DEFAULT_PROPS, audioChannel: 1 },
+      linkGroup: lg,
+    });
+    ensureWave(m);
+    reconcileAudioChannels(c);
+  } else if (m.kind === "audio") {
+    ensureWave(m);
+  }
+  return c;
+}
+/** Open a hole on one track over [t0, t1) — trim / split / delete overlaps. */
+function punchTrackRange(trackId, t0, t1) {
+  const eps = 1e-6;
+  if (!(t1 > t0 + eps)) return;
+  for (const c of project.clips.filter((x) => x.track === trackId)) {
+    if (!project.clips.includes(c)) continue; // already removed this pass
+    const end = clipEnd(c);
+    if (end <= t0 + eps || c.start >= t1 - eps) continue;
+    // Fully inside the replace window
+    if (c.start >= t0 - eps && end <= t1 + eps) {
+      releaseClipEl(c.id);
+      project.clips = project.clips.filter((x) => x !== c);
+      continue;
+    }
+    // Spans both edges → keep head + tail, drop middle
+    if (c.start < t0 - eps && end > t1 + eps) {
+      const right = splitClipAt(c, t0);
+      if (!right) continue;
+      if (clipEnd(right) <= t1 + eps) {
+        releaseClipEl(right.id);
+        project.clips = project.clips.filter((x) => x !== right);
+      } else {
+        const tail = splitClipAt(right, t1);
+        if (tail) {
+          releaseClipEl(right.id);
+          project.clips = project.clips.filter((x) => x !== right);
+        } else {
+          right.duration = +(t1 - right.start).toFixed(4);
+          right.transitionOut = undefined;
+          right.keyframes = shiftKF(right.keyframes, 0, right.duration);
+        }
+      }
+      continue;
+    }
+    // Head overhang: ends inside the window → trim Out to t0
+    if (c.start < t0 - eps && end > t0 + eps) {
+      const cut = t0 - c.start;
+      c.duration = +cut.toFixed(4);
+      c.transitionOut = undefined;
+      c.keyframes = shiftKF(c.keyframes, 0, c.duration);
+      continue;
+    }
+    // Tail overhang: starts inside the window → trim In to t1
+    if (c.start < t1 - eps && end > t1 + eps) {
+      const cut = t1 - c.start;
+      c.in = +(c.in + cut * clipSpeed(c)).toFixed(4);
+      c.duration = +(end - t1).toFixed(4);
+      c.start = +t1.toFixed(4);
+      c.transitionIn = undefined;
+      c.keyframes = shiftKF(c.keyframes, cut, c.duration);
+    }
+  }
+}
 /** Premiere-style Insert: place Source In→Out at the timeline playhead and
  *  ripple later clips. Splits any clip that straddles the playhead first. */
 function insertSourceAtPlayhead() {
   const win = sourceInsertWindow();
-  if (!win) {
-    if (!state.source.mediaId)
-      toast("Load Source first (double-click Project or a timeline clip)");
-    else
-      toast("Mark a Source range (I / O) — or load media with a known duration");
-    return;
-  }
+  if (!win) { toastSourceWindowMissing(); return; }
   const { m, inn, duration } = win;
   if (state.playing) pause();
   if (state.source.playing) pauseSource();
@@ -1410,40 +1521,30 @@ function insertSourceAtPlayhead() {
     if (c.start >= at - eps) c.start = +(c.start + duration).toFixed(4);
   }
 
-  let trackId = defaultTrackFor(m.kind);
-  const tr = TRACKS.find((t) => t.id === trackId);
-  if (!tr || (m.kind === "audio") !== (tr.kind === "audio")) trackId = defaultTrackFor(m.kind);
-  const name = m.name.replace(/\.[^.]+$/, "");
-  const c = {
-    id: "c_" + uid(), mediaId: m.id, kind: m.kind, track: trackId,
-    start: +at.toFixed(4), in: +inn.toFixed(4), duration: +duration.toFixed(4), name,
-    props: { ...DEFAULT_PROPS },
-  };
-  project.clips.push(c);
-  if (m.kind === "video") {
-    c.props.volume = 0;
-    const lg = "lg_" + uid();
-    c.linkGroup = lg;
-    const aL = {
-      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A1",
-      start: c.start, in: c.in, duration: c.duration, name,
-      props: { ...DEFAULT_PROPS, audioChannel: 0 },
-      linkGroup: lg,
-    };
-    const aR = {
-      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: "A2",
-      start: c.start, in: c.in, duration: c.duration, name,
-      props: { ...DEFAULT_PROPS, audioChannel: 1 },
-      linkGroup: lg,
-    };
-    project.clips.push(aL, aR);
-    ensureWave(m);
-    reconcileAudioChannels(c);
-  } else if (m.kind === "audio") {
-    ensureWave(m);
-  }
+  const c = placeSourceWindowClips(m, inn, duration, at);
   selectClip(c.id);
   state.time = +(at + duration).toFixed(4);
+  state.dirtyTimeline = true;
+  scheduleSave();
+  ensurePlayheadVisible();
+}
+/** Premiere-style Overwrite / Replace: place Source In→Out at the playhead,
+ *  punching destination tracks (no ripple). */
+function replaceSourceAtPlayhead() {
+  const win = sourceInsertWindow();
+  if (!win) { toastSourceWindowMissing(); return; }
+  const { m, inn, duration } = win;
+  if (state.playing) pause();
+  if (state.source.playing) pauseSource();
+  const at = Math.max(0, state.time);
+  const t1 = at + duration;
+
+  pushUndo();
+  for (const tid of sourceReplacePunchTracks(m, at, t1)) punchTrackRange(tid, at, t1);
+  pruneSelection();
+  const c = placeSourceWindowClips(m, inn, duration, at);
+  selectClip(c.id);
+  state.time = +t1.toFixed(4);
   state.dirtyTimeline = true;
   scheduleSave();
   ensurePlayheadVisible();
@@ -3549,6 +3650,10 @@ function syncMonitorModeUI() {
   if (els.btnInsert) {
     els.btnInsert.classList.toggle("hidden", !src);
     els.btnInsert.disabled = !state.source.mediaId;
+  }
+  if (els.btnReplace) {
+    els.btnReplace.classList.toggle("hidden", !src);
+    els.btnReplace.disabled = !state.source.mediaId;
   }
 }
 function setMonitorMode(mode) {
@@ -6176,6 +6281,7 @@ $("btnFwd").addEventListener("click", () => stepTransport(1));
 $("btnMarkIn").addEventListener("click", markIn);
 $("btnMarkOut").addEventListener("click", markOut);
 els.btnInsert?.addEventListener("click", () => insertSourceAtPlayhead());
+els.btnReplace?.addEventListener("click", () => replaceSourceAtPlayhead());
 $("monitorModeGroup")?.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-monitor-mode]");
   if (!btn) return;
@@ -6552,6 +6658,10 @@ window.addEventListener("keydown", (e) => {
   else if (k === "," && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
     insertSourceAtPlayhead();
+  }
+  else if (k === "." && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    replaceSourceAtPlayhead();
   }
   else if ((k === "g" || k === "G") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();

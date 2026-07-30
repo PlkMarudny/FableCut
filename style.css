@@ -1082,7 +1082,7 @@ body.track-size-s .clip.selected {
   min-width: 0;
 }
 
-.transport-end #btnInsert {
+.transport-end .btn.icon {
   flex-shrink: 0;
   width: 26px;
   height: 26px;
@@ -1093,12 +1093,12 @@ body.track-size-s .clip.selected {
   line-height: 0;
 }
 
-.transport-end #btnInsert svg {
+.transport-end .btn.icon svg {
   display: block;
   flex-shrink: 0;
 }
 
-.transport-end #btnInsert:disabled {
+.transport-end .btn.icon:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
