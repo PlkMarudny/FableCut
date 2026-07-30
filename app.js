@@ -995,7 +995,15 @@ function renderBin() {
       e.preventDefault();
       selectClipsByMediaId(m.id);
     });
-    item.addEventListener("dblclick", () => loadSourceFromMedia(m));
+    item.addEventListener("dblclick", () => {
+      // Double-click loads Source (single-click only selects when link-select is on).
+      if (state.source.mediaId === m.id) {
+        setMonitorMode("source");
+      } else {
+        loadSourceFromMedia(m);
+      }
+      if (getSetting("linkSelect")) flashMonitorAttention();
+    });
     item.querySelector(".bin-del").addEventListener("click", (e) => {
       e.stopPropagation();
       pushUndo();
@@ -3573,6 +3581,31 @@ function syncPlayButton() {
   els.btnPlay.textContent = on ? "⏸" : "▶";
   els.btnPlay.classList.toggle("on", on);
 }
+/** Brief white border flash over the canvas (Project → Source feedback). */
+function flashMonitorAttention() {
+  const cv = els.preview;
+  const inner = els.monitorZoomInner;
+  if (!cv || !inner) return;
+  let ring = $("monitorFlashRing");
+  if (!ring) {
+    ring = document.createElement("div");
+    ring.id = "monitorFlashRing";
+    ring.className = "monitor-flash-ring";
+    inner.appendChild(ring);
+  }
+  ring.style.left = cv.offsetLeft + "px";
+  ring.style.top = cv.offsetTop + "px";
+  ring.style.width = cv.offsetWidth + "px";
+  ring.style.height = cv.offsetHeight + "px";
+  ring.classList.remove("on");
+  void ring.offsetWidth;
+  ring.classList.add("on");
+  const done = () => {
+    ring.classList.remove("on");
+    ring.removeEventListener("animationend", done);
+  };
+  ring.addEventListener("animationend", done);
+}
 function pauseSource() {
   const wasPlaying = state.source.playing;
   state.source.playing = false;
@@ -3638,7 +3671,12 @@ function loadSourceFromMedia(m, opts = {}) {
     state.source.out = null;
   }
   const dur = Math.max(+m.duration || (m.kind === "image" || m.kind === "svg" ? 5 : 0), 0);
-  let t = opts.time != null ? +opts.time : (state.source.in != null ? state.source.in : 0);
+  // Re-opening the same media without an explicit time keeps the Source playhead.
+  let t;
+  if (opts.time != null) t = +opts.time;
+  else if (prevId === m.id) t = state.source.time;
+  else if (state.source.in != null) t = state.source.in;
+  else t = 0;
   state.source.time = clamp(t, 0, Math.max(dur, 0));
   ensureSourceEl(m);
   if (m.kind === "image") {
