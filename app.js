@@ -3539,27 +3539,32 @@ function setSourceTime(t) {
 }
 function updateSourceScrub() {
   if (!els.sourceScrubHead) return;
+  const track = els.sourceScrubTrack;
   const dur = sourceDur();
-  const pct = (t) => (dur > 0 ? clamp(t / dur, 0, 1) * 100 : 0);
-  els.sourceScrubHead.style.left = pct(state.source.time) + "%";
+  const w = track ? track.clientWidth : 0;
+  const xAt = (t) => (dur > 0 && w > 0 ? clamp(t / dur, 0, 1) * w : 0);
+  // Pixel + translate3d (like the timeline playhead) — smoother than % left.
+  const hx = xAt(state.source.time);
+  els.sourceScrubHead.style.transform = `translate3d(${hx}px,0,0)`;
   const a = state.source.in, b = state.source.out;
   if (els.sourceScrubIn) {
     const show = a != null;
     els.sourceScrubIn.hidden = !show;
-    if (show) els.sourceScrubIn.style.left = pct(a) + "%";
+    if (show) els.sourceScrubIn.style.transform = `translate3d(${xAt(a)}px,0,0)`;
   }
   if (els.sourceScrubOut) {
     const show = b != null;
     els.sourceScrubOut.hidden = !show;
-    if (show) els.sourceScrubOut.style.left = pct(b) + "%";
+    if (show) els.sourceScrubOut.style.transform = `translate3d(${xAt(b)}px,0,0)`;
   }
   if (els.sourceScrubRange) {
-    if (a != null && b != null && b > a) {
-      els.sourceScrubRange.style.left = pct(a) + "%";
-      els.sourceScrubRange.style.width = pct(b - a) + "%";
+    if (a != null && b != null && b > a && dur > 0) {
+      const x0 = xAt(a), x1 = xAt(b);
+      els.sourceScrubRange.style.transform = `translate3d(${x0}px,0,0)`;
+      els.sourceScrubRange.style.width = Math.max(0, x1 - x0) + "px";
     } else {
-      els.sourceScrubRange.style.left = "0%";
-      els.sourceScrubRange.style.width = "0%";
+      els.sourceScrubRange.style.transform = "translate3d(0,0,0)";
+      els.sourceScrubRange.style.width = "0px";
     }
   }
 }
@@ -5711,13 +5716,9 @@ function loop(ts) {
   // instead of the 2-4 independent recomputations this loop used to trigger.
   const dur = projDur();
   if (state.source.playing) {
-    const el = runtime.sourceEl;
-    // Prefer the media element's clock so pause doesn't need a catch-up seek.
-    if (el && el.readyState >= 2 && Number.isFinite(el.currentTime)) {
-      state.source.time = clamp(el.currentTime, 0, Math.max(sourceDur(), 0));
-    } else {
-      state.source.time += dt * playRate();
-    }
+    // Same RAF clock as the timeline playhead — video.currentTime only steps at
+    // decode cadence and makes the scrub head stutter.
+    state.source.time += dt * playRate();
     const end = sourceStopAt();
     if (state.source.time >= end) {
       state.source.time = end;
