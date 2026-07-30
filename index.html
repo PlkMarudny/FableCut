@@ -59,17 +59,21 @@
         <div class="bin-empty" id="binEmpty">
           <div class="bin-empty-icon">🎬</div>
           <p>Drop video, audio or images here<br>or click <b>+ Import</b></p>
-          <p class="hint">Then drag media onto the timeline below.</p>
+          <p class="hint">Double-click to open in Source, or drag onto the timeline.</p>
         </div>
       </div>
       <div class="bin-list hidden" id="libList"></div>
     </aside>
 
-    <!-- Program monitor -->
-    <section class="panel monitor">
+    <!-- Single monitor (Source / Program — Avid-style toggle) -->
+    <section class="panel monitor" id="monitorPanel">
       <div class="panel-head">
         <span class="panel-head-title">
-          <span>Program Monitor</span>
+          <span class="btn-group monitor-mode" id="monitorModeGroup" title="Source = loaded clip · Program = timeline">
+            <button type="button" class="btn tiny" data-monitor-mode="source" id="btnMonSource">Source</button>
+            <button type="button" class="btn tiny on" data-monitor-mode="program" id="btnMonProgram">Program</button>
+          </span>
+          <span class="monitor-clip-name dim" id="monitorClipName"></span>
           <button class="btn tiny hidden" id="btnZoom100" title="Reset monitor view to fit stage"><svg class="ico" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square" d="M1.5 5V1.5H5M11 1.5h3.5V5M14.5 11v3.5H11M5 14.5H1.5V11"/><path fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" d="M3.2 3.2l2.6 2.6M12.8 3.2l-2.6 2.6M12.8 12.8l-2.6-2.6M3.2 12.8l2.6-2.6"/></svg> Fit</button>
         </span>
         <span class="panel-head-actions">
@@ -93,14 +97,24 @@
         <div class="kf-graphs" id="kfGraphs" hidden></div>
         <div class="vu-meter" id="vuMeter" title="Click to switch RMS / LUFS / Peak"></div>
       </div>
+      <div class="source-scrub hidden" id="sourceScrub" title="Scrub source · drag to seek">
+        <div class="source-scrub-track" id="sourceScrubTrack">
+          <div class="source-scrub-range" id="sourceScrubRange"></div>
+          <div class="source-scrub-mark in" id="sourceScrubIn" hidden></div>
+          <div class="source-scrub-mark out" id="sourceScrubOut" hidden></div>
+          <div class="source-scrub-head" id="sourceScrubHead"></div>
+        </div>
+      </div>
       <div class="transport">
         <span class="timecode" id="tcCurrent">00:00:00</span>
         <div class="transport-btns">
+          <button class="btn icon" id="btnMarkIn" title="Mark In (I) — Source marks when Source is active; timeline work area in Program">I</button>
           <button class="btn icon" id="btnHome" title="Go to start (Home)">⏮</button>
           <button class="btn icon" id="btnBack" title="Back 1 frame (←)">◀︎</button>
           <button class="btn icon big" id="btnPlay" title="Play / Pause (Space)">▶</button>
           <button class="btn icon" id="btnFwd" title="Forward 1 frame (→)">▶︎</button>
           <button class="btn icon" id="btnEnd" title="Go to end (End)">⏭</button>
+          <button class="btn icon" id="btnMarkOut" title="Mark Out (O) — Source marks when Source is active; timeline work area in Program">O</button>
           <button class="btn icon toggle" id="btnSpeed" title="Preview speed — click to cycle 1×/1.5×/2×/4×. While playing: L faster · J slower · K play/pause and reset to 1×. Preview only, not export.">1×</button>
         </div>
         <span class="timecode dim" id="tcTotal">00:00:00</span>
@@ -204,7 +218,8 @@
     <h2>Keyboard shortcuts</h2>
     <div class="keys-cols">
       <table class="keys">
-        <tr><td><kbd>Space</kbd></td><td>Play / pause</td></tr>
+        <tr><td><kbd>Space</kbd></td><td>Play / pause (Source or Program — whichever is active)</td></tr>
+        <tr><td>Dbl-click bin / clip</td><td>Load into Source monitor</td></tr>
         <tr><td><kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd></td><td>Shuttle preview — <kbd>L</kbd> faster / <kbd>J</kbd> slower (1× · 1.5× · 2× · 4×); <kbd>K</kbd> play/pause + reset to 1×</td></tr>
         <tr><td><kbd>S</kbd></td><td>Split clip(s) at playhead</td></tr>
         <tr><td><kbd>G</kbd></td><td>Find next shared gap (wraps; respects IN/OUT)</td></tr>
@@ -222,8 +237,8 @@
       </table>
       <table class="keys">
         <tr><td><kbd>M</kbd></td><td>Add / remove marker at playhead</td></tr>
-        <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>Set IN / OUT work-area marker</td></tr>
-        <tr><td><kbd>⇧</kbd>+<kbd>I</kbd> / <kbd>⇧</kbd>+<kbd>O</kbd></td><td>Clear IN / OUT marker</td></tr>
+        <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>Set Source In/Out (Source mode) or timeline work-area (Program)</td></tr>
+        <tr><td><kbd>⇧</kbd>+<kbd>I</kbd> / <kbd>⇧</kbd>+<kbd>O</kbd></td><td>Clear Source or timeline IN / OUT</td></tr>
         <tr><td><kbd>T</kbd></td><td>Split clips at IN/OUT markers</td></tr>
         <tr><td><kbd>⇧</kbd>+<kbd>T</kbd></td><td>Trim clips to IN/OUT (remove heads/tails)</td></tr>
         <tr><td>Limit (toolbar)</td><td>Play stops at OUT; Home/End use IN/OUT</td></tr>

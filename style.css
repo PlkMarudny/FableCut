@@ -702,6 +702,76 @@ body.track-size-s .clip.selected {
 }
 
 /* ── Monitor ── */
+.monitor-mode {
+  display: inline-flex;
+  gap: 2px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.monitor-mode .btn {
+  min-width: 4.2em;
+  font-weight: 700;
+}
+.monitor-mode .btn.on {
+  background: #7b6cff;
+  border-color: #9a8fff;
+  color: #fff;
+}
+.monitor-clip-name {
+  max-width: 18em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 11px;
+}
+.panel.monitor[data-mode="source"] .monitor-clip-name:empty::before {
+  content: "No clip loaded";
+  opacity: .55;
+}
+
+.source-scrub {
+  flex: 0 0 auto;
+  padding: 0 14px 6px;
+}
+.source-scrub-track {
+  position: relative;
+  height: 10px;
+  border-radius: 5px;
+  background: #1a1a20;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.source-scrub-range {
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 0; width: 0;
+  background: #7b6cff44;
+  border-radius: 4px;
+  pointer-events: none;
+}
+.source-scrub-mark {
+  position: absolute;
+  top: -2px; bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  background: #ffd166;
+  pointer-events: none;
+}
+.source-scrub-mark.out { background: #ff8a65; }
+.source-scrub-head {
+  position: absolute;
+  top: -3px; bottom: -3px;
+  width: 3px;
+  margin-left: -1.5px;
+  background: #fff;
+  border-radius: 1px;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px #0008;
+}
+
 .monitor-stage {
   flex: 1;
   display: flex;
@@ -781,6 +851,7 @@ body.track-size-s .clip.selected {
   pointer-events: none;
 }
 .kf-graphs[hidden] { display: none; }
+.kf-graphs.source-hidden { display: none !important; }
 .kf-graph {
   pointer-events: auto;
   flex: 0 0 auto;

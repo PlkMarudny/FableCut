@@ -246,6 +246,15 @@ const state = {
   rendering: false,      // fast (server/ffmpeg) export in progress
   guides: false,         // safe-area overlay on the monitor
   viewZoom: 1,           // program-monitor display zoom (1 = fit stage)
+  monitorMode: "program", // "source" | "program" — single-viewer Avid-style toggle
+  source: {              // Source monitor (media-local; not timeline)
+    mediaId: null,
+    time: 0,
+    playing: false,
+    in: null,            // media-time mark, or null
+    out: null,
+    fromClipId: null,    // set when loaded from a timeline clip (informational)
+  },
   audioHold: false,      // while paused, loop one frame of audio at the playhead
   ffmpeg: false,         // server reports ffmpeg available
   dirtyTimeline: true, gesture: false,
@@ -304,6 +313,8 @@ const runtime = {
   importFolderId: null, // Project-bin folder to place the next import into
   binDragFolderId: null, // folder id currently being dragged (cycle checks)
   binCtxMenu: null,     // Project-tab context menu element
+  sourceEl: null,       // dedicated <video>/<audio> for Source monitor (not WebAudio-hooked)
+  sourceMarks: new Map(), // mediaId -> {in, out} remembered across loads
 };
 
 /* ── DOM ───────────────────────────────────────────────────────────────── */
@@ -324,6 +335,10 @@ const els = {
   safeOverlay: $("safeOverlay"), btnSpeed: $("btnSpeed"),
   monitorStage: $("monitorStage"), monitorScroll: $("monitorScroll"),
   monitorZoomInner: $("monitorZoomInner"), kfGraphs: $("kfGraphs"),
+  monitorPanel: $("monitorPanel"), monitorClipName: $("monitorClipName"),
+  sourceScrub: $("sourceScrub"), sourceScrubTrack: $("sourceScrubTrack"),
+  sourceScrubRange: $("sourceScrubRange"), sourceScrubIn: $("sourceScrubIn"),
+  sourceScrubOut: $("sourceScrubOut"), sourceScrubHead: $("sourceScrubHead"),
   exportSetup: $("exportSetup"), engineFast: $("engineFast"), engineRealtime: $("engineRealtime"),
 };
 const ctx2d = els.preview.getContext("2d");
@@ -611,6 +626,19 @@ function applyProject(data) {
   else stopAudioHoldNodes();
   for (const el of runtime.clipEls.values()) { try { el.pause(); el.src = ""; } catch { } }
   runtime.clipEls.clear(); runtime.clipGain.clear();
+  // Drop Source if its media vanished from the new document
+  if (state.source.mediaId && !getMedia(state.source.mediaId)) {
+    pauseSource();
+    releaseSourceEl();
+    state.source.mediaId = null;
+    state.source.fromClipId = null;
+    state.source.in = state.source.out = null;
+    state.source.time = 0;
+    if (isSourceMode()) setMonitorMode("program");
+  } else if (state.source.mediaId) {
+    releaseSourceEl(); // force rebuild against possibly new src
+    ensureSourceEl(getMedia(state.source.mediaId));
+  }
   els.preview.width = project.width; els.preview.height = project.height;
   els.monitorRes.textContent = `${project.width} × ${project.height} · ${project.fps}fps`;
   syncAspectSel();
@@ -963,7 +991,7 @@ function renderBin() {
       e.preventDefault();
       selectClipsByMediaId(m.id);
     });
-    item.addEventListener("dblclick", () => addClipFromMedia(m, null, state.time));
+    item.addEventListener("dblclick", () => loadSourceFromMedia(m));
     item.querySelector(".bin-del").addEventListener("click", (e) => {
       e.stopPropagation();
       pushUndo();
@@ -2379,6 +2407,16 @@ els.tracksContent.addEventListener("pointerdown", (e) => {
   startClipGesture(e, c, mode, !additive && state.selIds.size > 1);
 });
 
+els.tracksContent.addEventListener("dblclick", (e) => {
+  const clipDiv = e.target.closest(".clip");
+  if (!clipDiv) return;
+  if (e.target.closest(".handle, .trans-mark, .trans-dur-handle, .clip-kf")) return;
+  const c = getClip(clipDiv.dataset.id);
+  if (!c) return;
+  e.preventDefault();
+  loadSourceFromClip(c, { timelineTime: timeAtEvent(e) });
+});
+
 const MIN_TRANS_DUR = 0.1;
 function startTransDurGesture(e, c, side) {
   e.preventDefault();
@@ -2575,6 +2613,7 @@ function startMarquee(e) {
 /* ── Scrubbing ── */
 function startScrub(e) {
   e.preventDefault();
+  if (isSourceMode()) setMonitorMode("program");
   state.gesture = true;
   const seek = (ev) => setTime(timeAtEvent(ev));
   seek(e);
@@ -3363,6 +3402,414 @@ function drawKfGraph(cv, c, key) {
   }
 }
 
+/* ═══════════════════════════ SOURCE MONITOR ═══════════════════════════
+   Single-viewer Avid NewsCutter layout: one canvas toggles Source ↔ Program.
+   Source holds a media-local playhead + In/Out marks (not timeline work area).
+   Double-click Project media or a timeline clip to load Source. */
+function isSourceMode() { return state.monitorMode === "source"; }
+function sourceMedia() { return state.source.mediaId ? getMedia(state.source.mediaId) : null; }
+function sourceDur() {
+  const m = sourceMedia();
+  if (!m) return 0;
+  if (m.kind === "image" || m.kind === "svg") return Math.max(m.duration || 5, 0.1);
+  return Math.max(+m.duration || 0, 0);
+}
+function persistSourceMarks() {
+  const id = state.source.mediaId;
+  if (!id) return;
+  runtime.sourceMarks.set(id, { in: state.source.in, out: state.source.out });
+}
+function syncMonitorModeUI() {
+  const src = isSourceMode();
+  if (els.monitorPanel) els.monitorPanel.dataset.mode = state.monitorMode;
+  for (const b of document.querySelectorAll("[data-monitor-mode]"))
+    b.classList.toggle("on", b.dataset.monitorMode === state.monitorMode);
+  if (els.sourceScrub) els.sourceScrub.classList.toggle("hidden", !src || !state.source.mediaId);
+  const m = sourceMedia();
+  if (els.monitorClipName) {
+    els.monitorClipName.textContent = src && m ? m.name : "";
+    els.monitorClipName.title = src && m ? m.name : "";
+  }
+  // Safe-area guides are sequence-relative — hide overlay chrome in Source
+  if (els.btnGuides) els.btnGuides.classList.toggle("hidden", src);
+  if (els.aspectSel) els.aspectSel.classList.toggle("hidden", src);
+  if (els.kfGraphs) els.kfGraphs.classList.toggle("source-hidden", src);
+  if (src && els.safeOverlay) els.safeOverlay.classList.add("hidden");
+  else if (!src && els.safeOverlay) {
+    els.safeOverlay.classList.toggle("hidden", !state.guides);
+    updateSafeOverlay();
+  }
+  updateSourceScrub();
+  syncPlayButton();
+}
+function setMonitorMode(mode) {
+  if (mode !== "source" && mode !== "program") return;
+  if (mode === state.monitorMode) {
+    syncMonitorModeUI();
+    return;
+  }
+  if (mode === "program") {
+    pauseSource();
+  } else {
+    // Leaving Program for Source — stop sequence playback
+    if (state.playing) pause();
+  }
+  state.monitorMode = mode;
+  syncMonitorModeUI();
+}
+function releaseSourceEl() {
+  const el = runtime.sourceEl;
+  if (!el) return;
+  try { el.pause(); el.removeAttribute("src"); el.load(); } catch { }
+  runtime.sourceEl = null;
+}
+function ensureSourceEl(m) {
+  if (!m || (m.kind !== "video" && m.kind !== "audio")) {
+    releaseSourceEl();
+    return null;
+  }
+  let el = runtime.sourceEl;
+  if (!el || el.tagName.toLowerCase() !== (m.kind === "audio" ? "audio" : "video")) {
+    releaseSourceEl();
+    el = document.createElement(m.kind === "audio" ? "audio" : "video");
+    el.preload = "auto";
+    el.playsInline = true;
+    // Element-volume path only — never createMediaElementSource (timeline owns Web Audio).
+    el.volume = 1;
+    runtime.sourceEl = el;
+  }
+  if (el.dataset.src !== m.src) {
+    el.src = m.src;
+    el.dataset.src = m.src;
+  }
+  return el;
+}
+function setSourceTime(t) {
+  const dur = sourceDur();
+  state.source.time = clamp(t, 0, Math.max(dur, 0));
+  const el = runtime.sourceEl;
+  const m = sourceMedia();
+  if (el && m && (m.kind === "video" || m.kind === "audio") && !state.source.playing) {
+    try {
+      if (Math.abs(el.currentTime - state.source.time) > 0.04)
+        el.currentTime = state.source.time;
+    } catch { }
+  }
+  updateSourceScrub();
+}
+function updateSourceScrub() {
+  if (!els.sourceScrubHead) return;
+  const dur = sourceDur();
+  const pct = (t) => (dur > 0 ? clamp(t / dur, 0, 1) * 100 : 0);
+  els.sourceScrubHead.style.left = pct(state.source.time) + "%";
+  const a = state.source.in, b = state.source.out;
+  if (els.sourceScrubIn) {
+    const show = a != null;
+    els.sourceScrubIn.hidden = !show;
+    if (show) els.sourceScrubIn.style.left = pct(a) + "%";
+  }
+  if (els.sourceScrubOut) {
+    const show = b != null;
+    els.sourceScrubOut.hidden = !show;
+    if (show) els.sourceScrubOut.style.left = pct(b) + "%";
+  }
+  if (els.sourceScrubRange) {
+    if (a != null && b != null && b > a) {
+      els.sourceScrubRange.style.left = pct(a) + "%";
+      els.sourceScrubRange.style.width = pct(b - a) + "%";
+    } else {
+      els.sourceScrubRange.style.left = "0%";
+      els.sourceScrubRange.style.width = "0%";
+    }
+  }
+}
+function syncPlayButton() {
+  const on = isSourceMode() ? state.source.playing : state.playing;
+  els.btnPlay.textContent = on ? "⏸" : "▶";
+  els.btnPlay.classList.toggle("on", on);
+}
+function pauseSource() {
+  const wasPlaying = state.source.playing;
+  state.source.playing = false;
+  const el = runtime.sourceEl;
+  if (el) {
+    // Adopt the decoded playhead — never seek the element to the RAF clock.
+    // Seeking a paused HTMLVideoElement clears the frame (black flash) until
+    // the decoder catches up.
+    if (wasPlaying && Number.isFinite(el.currentTime)) {
+      state.source.time = clamp(el.currentTime, 0, Math.max(sourceDur(), 0));
+    }
+    if (!el.paused) el.pause();
+  }
+  syncPlayButton();
+  updateSourceScrub();
+}
+function playSource() {
+  if (!state.source.mediaId) {
+    toast("Double-click a clip in Project or the timeline to load Source");
+    return;
+  }
+  if (state.playing) pause();
+  if (state.audioHold) setAudioHold(false);
+  const dur = sourceDur();
+  const end = state.source.out != null ? Math.min(state.source.out, dur) : dur;
+  const start = state.source.in != null ? state.source.in : 0;
+  if (state.source.time >= end - 0.01) setSourceTime(start);
+  ensureSourceEl(sourceMedia());
+  state.source.playing = true;
+  syncPlayButton();
+}
+function toggleTransportPlay() {
+  if (isSourceMode()) {
+    state.source.playing ? pauseSource() : playSource();
+  } else {
+    state.playing ? pause() : play();
+  }
+}
+function sourceStopAt() {
+  const dur = sourceDur();
+  if (state.source.out != null) return Math.min(state.source.out, dur);
+  return dur;
+}
+function loadSourceFromMedia(m, opts = {}) {
+  if (!m) return;
+  // text/adjust aren't media — ignore
+  if (m.kind === "text" || m.kind === "adjust") return;
+  if (state.playing) pause();
+  pauseSource();
+  const prevId = state.source.mediaId;
+  if (prevId && prevId !== m.id) persistSourceMarks();
+  state.source.mediaId = m.id;
+  state.source.fromClipId = opts.fromClipId || null;
+  const marks = runtime.sourceMarks.get(m.id);
+  if (opts.in != null || opts.out != null) {
+    state.source.in = opts.in != null ? +opts.in : null;
+    state.source.out = opts.out != null ? +opts.out : null;
+  } else if (marks) {
+    state.source.in = marks.in;
+    state.source.out = marks.out;
+  } else {
+    state.source.in = null;
+    state.source.out = null;
+  }
+  const dur = Math.max(+m.duration || (m.kind === "image" || m.kind === "svg" ? 5 : 0), 0);
+  let t = opts.time != null ? +opts.time : (state.source.in != null ? state.source.in : 0);
+  state.source.time = clamp(t, 0, Math.max(dur, 0));
+  ensureSourceEl(m);
+  if (m.kind === "image") {
+    const aux = runtime.mediaAux.get(m.id);
+    if (!aux?.img) loadMediaMetadata(m).catch(() => {});
+  }
+  if (m.kind === "svg") loadSvgMedia(m).catch(() => {});
+  setMonitorMode("source");
+  updateSourceScrub();
+  // Seek decode head once loaded
+  const el = runtime.sourceEl;
+  if (el) {
+    const seek = () => { try { el.currentTime = state.source.time; } catch { } };
+    if (el.readyState >= 1) seek();
+    else el.addEventListener("loadedmetadata", seek, { once: true });
+  }
+}
+function loadSourceFromClip(c, opts = {}) {
+  if (!c || !c.mediaId) {
+    if (c && (c.kind === "text" || c.kind === "adjust"))
+      toast("Titles and adjustment layers have no source media");
+    return;
+  }
+  const m = getMedia(c.mediaId);
+  if (!m) return;
+  const sp = clipSpeed(c);
+  // Source In/Out = the instance's source window (Premiere/Avid-like)
+  const inn = +c.in || 0;
+  const out = inn + c.duration * sp;
+  let time = opts.time;
+  if (time == null && opts.timelineTime != null)
+    time = mediaTimeAt(c, opts.timelineTime);
+  if (time == null) time = inn;
+  loadSourceFromMedia(m, {
+    in: inn,
+    out: out,
+    time,
+    fromClipId: c.id,
+  });
+  persistSourceMarks();
+}
+function setSourceInMark() {
+  if (!state.source.mediaId) return;
+  const t = +state.source.time.toFixed(3);
+  const out = state.source.out;
+  if (out != null && t >= out) {
+    toast("IN must be before OUT");
+    return;
+  }
+  state.source.in = t;
+  persistSourceMarks();
+  updateSourceScrub();
+}
+function setSourceOutMark() {
+  if (!state.source.mediaId) return;
+  const t = +state.source.time.toFixed(3);
+  const inn = state.source.in;
+  if (inn != null && t <= inn) {
+    toast("OUT must be after IN");
+    return;
+  }
+  state.source.out = t;
+  persistSourceMarks();
+  updateSourceScrub();
+}
+function clearSourceInMark() {
+  if (state.source.in == null) return;
+  state.source.in = null;
+  persistSourceMarks();
+  updateSourceScrub();
+}
+function clearSourceOutMark() {
+  if (state.source.out == null) return;
+  state.source.out = null;
+  persistSourceMarks();
+  updateSourceScrub();
+}
+function markIn() {
+  if (isSourceMode()) setSourceInMark();
+  else setInPoint();
+}
+function markOut() {
+  if (isSourceMode()) setSourceOutMark();
+  else setOutPoint();
+}
+function clearMarkIn() {
+  if (isSourceMode()) clearSourceInMark();
+  else clearInPoint();
+}
+function clearMarkOut() {
+  if (isSourceMode()) clearSourceOutMark();
+  else clearOutPoint();
+}
+function gotoTransportHome() {
+  if (isSourceMode()) {
+    setSourceTime(state.source.in != null ? state.source.in : 0);
+  } else gotoHome();
+}
+function gotoTransportEnd() {
+  if (isSourceMode()) {
+    const dur = sourceDur();
+    setSourceTime(state.source.out != null ? state.source.out : dur);
+  } else gotoEnd();
+}
+function stepTransport(dir) {
+  const dt = dir * (1 / Math.max(1, project.fps));
+  if (isSourceMode()) setSourceTime(state.source.time + dt);
+  else setTime(state.time + dt);
+}
+function syncSourceMedia() {
+  const m = sourceMedia();
+  if (!m || (m.kind !== "video" && m.kind !== "audio")) return;
+  const el = ensureSourceEl(m);
+  if (!el) return;
+  const mt = state.source.time;
+  const rate = playRate();
+  if (state.source.playing) {
+    if (el.playbackRate !== rate) { try { el.playbackRate = rate; } catch { } }
+    if (el.paused) el.play().catch(() => {});
+    // Only hard-seek on large drift (start/scrub resume). Tiny RAF vs decode
+    // skew is corrected by driving state.source.time from el in the loop.
+    if (Math.abs(el.currentTime - mt) > 0.35 * rate) {
+      try { el.currentTime = mt; } catch { }
+    }
+  } else if (!el.paused) {
+    el.pause();
+  }
+  // Paused: do not seek here. setSourceTime() handles user scrubs; seeking on
+  // every post-pause drift flash-blacks the video frame.
+}
+function drawSourceContain(src, sw, sh, W, H) {
+  if (!src || !(sw > 0) || !(sh > 0)) return;
+  const scale = Math.min(W / sw, H / sh);
+  const dw = sw * scale, dh = sh * scale;
+  ctx2d.drawImage(src, (W - dw) / 2, (H - dh) / 2, dw, dh);
+}
+function getSourceSvgImage(m, t) {
+  const aux = runtime.mediaAux.get(m.id);
+  if (!aux || !aux.svgText) return null;
+  if (!aux.svgAnimated) return aux.img || null;
+  const q = Math.round(Math.max(0, t) * project.fps) / project.fps;
+  const hit = aux.svgFrames.get(q);
+  if (hit) return hit;
+  if (!aux.svgPending) {
+    aux.svgPending = renderSvgFrame(aux, q).then((img) => {
+      aux.svgFrames.set(q, img);
+      if (aux.svgFrames.size > 90) aux.svgFrames.delete(aux.svgFrames.keys().next().value);
+      aux.lastImg = img;
+    }).catch(() => { }).finally(() => { aux.svgPending = null; });
+  }
+  return aux.lastImg || null;
+}
+function drawSourceFrame() {
+  const W = els.preview.width, H = els.preview.height;
+  ctx2d.setTransform(1, 0, 0, 1, 0, 0);
+  ctx2d.filter = "none"; ctx2d.globalAlpha = 1;
+  ctx2d.fillStyle = "#000"; ctx2d.fillRect(0, 0, W, H);
+  const m = sourceMedia();
+  if (!m) {
+    ctx2d.fillStyle = "#8a8698";
+    ctx2d.font = `600 ${Math.round(H * 0.045)}px "Segoe UI", sans-serif`;
+    ctx2d.textAlign = "center";
+    ctx2d.textBaseline = "middle";
+    ctx2d.fillText("Double-click a clip to load Source", W / 2, H / 2);
+    return;
+  }
+  const t = state.source.time;
+  if (m.kind === "video") {
+    const el = ensureSourceEl(m);
+    if (el && el.readyState >= 2)
+      drawSourceContain(el, el.videoWidth || m.width || W, el.videoHeight || m.height || H, W, H);
+  } else if (m.kind === "image") {
+    const img = runtime.mediaAux.get(m.id)?.img;
+    if (img) drawSourceContain(img, img.naturalWidth || m.width || W, img.naturalHeight || m.height || H, W, H);
+  } else if (m.kind === "svg") {
+    const img = getSourceSvgImage(m, t);
+    if (img) drawSourceContain(img, img.naturalWidth || m.width || W, img.naturalHeight || m.height || H, W, H);
+  } else if (m.kind === "audio") {
+    ctx2d.fillStyle = "#1a1a22";
+    ctx2d.fillRect(0, 0, W, H);
+    ctx2d.fillStyle = "#cfc8ff";
+    ctx2d.font = `700 ${Math.round(H * 0.08)}px "Segoe UI", sans-serif`;
+    ctx2d.textAlign = "center";
+    ctx2d.textBaseline = "middle";
+    ctx2d.fillText("♪", W / 2, H * 0.42);
+    ctx2d.fillStyle = "#e8e6f0";
+    ctx2d.font = `600 ${Math.round(H * 0.04)}px "Segoe UI", sans-serif`;
+    ctx2d.fillText(m.name || "Audio", W / 2, H * 0.55);
+    // Simple progress bar
+    const dur = sourceDur();
+    if (dur > 0) {
+      const bw = W * 0.5, bh = Math.max(4, H * 0.01);
+      const bx = (W - bw) / 2, by = H * 0.66;
+      ctx2d.fillStyle = "#2a2a33";
+      ctx2d.fillRect(bx, by, bw, bh);
+      ctx2d.fillStyle = "#7b6cff";
+      ctx2d.fillRect(bx, by, bw * clamp(t / dur, 0, 1), bh);
+    }
+  }
+  // Draw In/Out labels on frame edge
+  if (state.source.in != null || state.source.out != null) {
+    ctx2d.font = `600 ${Math.max(11, Math.round(H * 0.028))}px "Segoe UI", sans-serif`;
+    ctx2d.textBaseline = "top";
+    if (state.source.in != null) {
+      ctx2d.fillStyle = "#ffd166";
+      ctx2d.textAlign = "left";
+      ctx2d.fillText("IN " + fmt(state.source.in), 10, 10);
+    }
+    if (state.source.out != null) {
+      ctx2d.fillStyle = "#ff8a65";
+      ctx2d.textAlign = "right";
+      ctx2d.fillText("OUT " + fmt(state.source.out), W - 10, 10);
+    }
+  }
+}
+
 /* ═══════════════════════════ PLAYBACK ENGINE ═══════════════════════════ */
 function getClipEl(c) {
   let el = runtime.clipEls.get(c.id);
@@ -3725,6 +4172,8 @@ function updateMeterUI(dt) {
 function play() {
   if (state.audioHold) setAudioHold(false);
   if (state.playing) return;
+  pauseSource();
+  if (isSourceMode()) setMonitorMode("program");
   ensureAudio();
   runtime.audio.ctx.resume();
   if (playLimited()) {
@@ -3736,14 +4185,12 @@ function play() {
     state.time = 0;
   }
   state.playing = true;
-  els.btnPlay.textContent = "⏸";
-  els.btnPlay.classList.add("on");
+  syncPlayButton();
 }
 function pause() {
   if (state.audioHold) setAudioHold(false);
   state.playing = false;
-  els.btnPlay.textContent = "▶";
-  els.btnPlay.classList.remove("on");
+  syncPlayButton();
   for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
   if (state.exporting) finishExport(false);
 }
@@ -3846,8 +4293,8 @@ function setAudioHold(on) {
     if (state.playing) {
       // Pause without going through pause() (that would clear hold).
       state.playing = false;
-      els.btnPlay.textContent = "▶";
-      els.btnPlay.classList.remove("on");
+      pauseSource();
+      syncPlayButton();
       for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
     }
     state.audioHold = true;
@@ -4425,6 +4872,26 @@ let canvasDrag = null, canvasDidMove = false;
 els.preview.style.touchAction = "none";
 els.preview.addEventListener("pointerdown", (e) => {
   if (e.altKey || e.button === 1) return; // leave to monitor pan
+  // Source mode: drag on the frame scrubs media time (no clip transforms)
+  if (isSourceMode()) {
+    if (!state.source.mediaId) return;
+    e.preventDefault();
+    pauseSource();
+    const r = els.preview.getBoundingClientRect();
+    const scrub = (ev) => {
+      const u = clamp((ev.clientX - r.left) / Math.max(1, r.width), 0, 1);
+      setSourceTime(u * sourceDur());
+    };
+    scrub(e);
+    const onMove = (ev) => scrub(ev);
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return;
+  }
   const W = els.preview.width, H = els.preview.height, pt = canvasPt(e);
   const cur = getClip(state.selId);
   canvasDrag = null;
@@ -4483,6 +4950,10 @@ function cursorForHandleAngle(deg) {
   return ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"][i];
 }
 function updateCanvasCursor(e) {
+  if (isSourceMode()) {
+    els.preview.style.cursor = state.source.mediaId ? "ew-resize" : "default";
+    return;
+  }
   const W = els.preview.width, H = els.preview.height, pt = canvasPt(e);
   const cur = getClip(state.selId);
   let cursor = "default";
@@ -5161,7 +5632,20 @@ function loop(ts) {
   // projDur() is an O(clips) scan — compute it once per tick and reuse below
   // instead of the 2-4 independent recomputations this loop used to trigger.
   const dur = projDur();
-  if (state.playing) {
+  if (state.source.playing) {
+    const el = runtime.sourceEl;
+    // Prefer the media element's clock so pause doesn't need a catch-up seek.
+    if (el && el.readyState >= 2 && Number.isFinite(el.currentTime)) {
+      state.source.time = clamp(el.currentTime, 0, Math.max(sourceDur(), 0));
+    } else {
+      state.source.time += dt * playRate();
+    }
+    const end = sourceStopAt();
+    if (state.source.time >= end) {
+      state.source.time = end;
+      pauseSource();
+    }
+  } else if (state.playing) {
     state.time += dt * playRate();
     const end = playStopAt(dur);
     if (state.time >= end) {
@@ -5175,17 +5659,28 @@ function loop(ts) {
       sc.scrollLeft = Math.max(0, px - 60);
   }
   if (!state.rendering) { // fast export owns media seeking + the canvas
-    syncMedia();
-    drawFrame();
+    if (isSourceMode()) {
+      syncSourceMedia();
+      drawSourceFrame();
+    } else {
+      syncMedia();
+      drawFrame();
+    }
   }
   if (state.dirtyTimeline) rebuildClips();
   els.playhead.style.left = state.time * state.pps + "px";
   drawRuler();
-  updateSafeOverlay();
+  if (!isSourceMode()) updateSafeOverlay();
   updateKfGraphs();
   updateMeterUI(dt);
-  els.tcCurrent.textContent = fmt(state.time);
-  els.tcTotal.textContent = fmt(dur);
+  if (isSourceMode()) {
+    els.tcCurrent.textContent = fmt(state.source.time);
+    els.tcTotal.textContent = fmt(sourceDur());
+    updateSourceScrub();
+  } else {
+    els.tcCurrent.textContent = fmt(state.time);
+    els.tcTotal.textContent = fmt(dur);
+  }
   if (state.exporting && !state.rendering) {
     const pct = dur ? (state.time / dur) * 100 : 0;
     els.exportProgress.style.width = pct.toFixed(1) + "%";
@@ -5419,9 +5914,10 @@ async function startExport() {
   els.exportProgress.style.width = "0%";
   state.exporting = true;
   recorder.start(250);
+  pauseSource();
+  setMonitorMode("program");
   state.playing = true;
-  els.btnPlay.textContent = "⏸";
-  els.btnPlay.classList.add("on");
+  syncPlayButton();
 }
 function finishExport(keep) {
   if (!state.exporting) return;
@@ -5429,8 +5925,7 @@ function finishExport(keep) {
   if (runtime.pendingSync) syncFromServer();
   recDiscard = !keep;
   state.playing = false;
-  els.btnPlay.textContent = "▶";
-  els.btnPlay.classList.remove("on");
+  syncPlayButton();
   for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
   if (recorder && recorder.state !== "inactive") recorder.stop();
   else els.exportOverlay.classList.add("hidden");
@@ -5458,12 +5953,45 @@ $("btnCancelExport").addEventListener("click", () => {
   if (state.rendering) renderCancelled = true;
   else finishExport(false);
 });
-$("btnPlay").addEventListener("click", () => state.playing ? pause() : play());
+$("btnPlay").addEventListener("click", toggleTransportPlay);
 els.btnSpeed.addEventListener("click", () => cyclePreviewRate(1));
-$("btnHome").addEventListener("click", gotoHome);
-$("btnEnd").addEventListener("click", gotoEnd);
-$("btnBack").addEventListener("click", () => setTime(state.time - 1 / project.fps));
-$("btnFwd").addEventListener("click", () => setTime(state.time + 1 / project.fps));
+$("btnHome").addEventListener("click", gotoTransportHome);
+$("btnEnd").addEventListener("click", gotoTransportEnd);
+$("btnBack").addEventListener("click", () => stepTransport(-1));
+$("btnFwd").addEventListener("click", () => stepTransport(1));
+$("btnMarkIn").addEventListener("click", markIn);
+$("btnMarkOut").addEventListener("click", markOut);
+$("monitorModeGroup")?.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-monitor-mode]");
+  if (!btn) return;
+  if (btn.dataset.monitorMode === "source" && !state.source.mediaId) {
+    setMonitorMode("source");
+    toast("Double-click a clip in Project or the timeline to load Source");
+    return;
+  }
+  setMonitorMode(btn.dataset.monitorMode);
+});
+function sourceScrubAtEvent(e) {
+  const track = els.sourceScrubTrack;
+  if (!track) return 0;
+  const r = track.getBoundingClientRect();
+  const u = clamp((e.clientX - r.left) / Math.max(1, r.width), 0, 1);
+  return u * sourceDur();
+}
+function startSourceScrub(e) {
+  if (!state.source.mediaId) return;
+  e.preventDefault();
+  pauseSource();
+  setSourceTime(sourceScrubAtEvent(e));
+  const onMove = (ev) => setSourceTime(sourceScrubAtEvent(ev));
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+els.sourceScrubTrack?.addEventListener("pointerdown", startSourceScrub);
 $("btnHelp").addEventListener("click", () => $("helpOverlay").classList.remove("hidden"));
 $("btnCloseHelp").addEventListener("click", () => $("helpOverlay").classList.add("hidden"));
 function settingsFocusables() {
@@ -5784,18 +6312,26 @@ window.addEventListener("keydown", (e) => {
     }
   }
   if (isTypingTarget(document.activeElement)) return;
-  if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
+  if (k === " ") { e.preventDefault(); toggleTransportPlay(); }
   // JKL shuttle — bare keys only, so Cmd/Ctrl+J/K/L stay with the browser
   else if ((k === "k" || k === "K") && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault(); setPreviewRate(1); state.playing ? pause() : play(); // stop + reset to 1×
+    e.preventDefault(); setPreviewRate(1); toggleTransportPlay(); // stop/start + reset to 1×
   }
   else if ((k === "l" || k === "L") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
-    if (!state.playing) play(); else stepPreviewRate(1);  // tap again = faster
+    if (isSourceMode()) {
+      if (!state.source.playing) playSource(); else stepPreviewRate(1);
+    } else {
+      if (!state.playing) play(); else stepPreviewRate(1);  // tap again = faster
+    }
   }
   else if ((k === "j" || k === "J") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
-    if (!state.playing) play(); else stepPreviewRate(-1); // tap again = slower
+    if (isSourceMode()) {
+      if (!state.source.playing) playSource(); else stepPreviewRate(-1);
+    } else {
+      if (!state.playing) play(); else stepPreviewRate(-1); // tap again = slower
+    }
   }
   else if (k === "s" || k === "S") splitAtPlayhead();
   else if ((k === "g" || k === "G") && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -5815,20 +6351,26 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     goToKeyframe(k === "ArrowRight" ? 1 : -1);
   }
-  else if (k === "ArrowLeft") setTime(state.time - (e.shiftKey ? 1 : 1 / project.fps));
-  else if (k === "ArrowRight") setTime(state.time + (e.shiftKey ? 1 : 1 / project.fps));
-  else if (k === "Home") gotoHome();
-  else if (k === "End") gotoEnd();
+  else if (k === "ArrowLeft") {
+    if (isSourceMode()) setSourceTime(state.source.time - (e.shiftKey ? 1 : 1 / project.fps));
+    else setTime(state.time - (e.shiftKey ? 1 : 1 / project.fps));
+  }
+  else if (k === "ArrowRight") {
+    if (isSourceMode()) setSourceTime(state.source.time + (e.shiftKey ? 1 : 1 / project.fps));
+    else setTime(state.time + (e.shiftKey ? 1 : 1 / project.fps));
+  }
+  else if (k === "Home") gotoTransportHome();
+  else if (k === "End") gotoTransportEnd();
   else if (k === "[") trimToPlayhead("in");
   else if (k === "]") trimToPlayhead("out");
   else if (k === "m" || k === "M") toggleMarker();
   else if ((k === "i" || k === "I") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
-    e.shiftKey ? clearInPoint() : setInPoint();
+    e.shiftKey ? clearMarkIn() : markIn();
   }
   else if ((k === "o" || k === "O") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
-    e.shiftKey ? clearOutPoint() : setOutPoint();
+    e.shiftKey ? clearMarkOut() : markOut();
   }
   else if (k === "n" || k === "N") els.btnSnap.click();
   else if (k === "Escape") {
@@ -5986,6 +6528,7 @@ buildTrackDOM();
 rebuildClips();
 renderBin();
 syncTrimIOButton();
+syncMonitorModeUI();
 buildMeterDOM();
 connectServer().then(loadLibraryFonts);
 requestAnimationFrame(loop);
