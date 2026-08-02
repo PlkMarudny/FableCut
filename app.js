@@ -4563,6 +4563,7 @@ function play() {
   }
   state.playing = true;
   syncPlayButton();
+  syncMedia(); // start active seeks + cut lookahead without waiting a RAF
 }
 function pause() {
   if (state.audioHold) setAudioHold(false);
@@ -4704,8 +4705,17 @@ function stepPreviewRate(dir) { // clamp at the ends — for the J/L shortcuts
 
 function activeAt(c, t) { return t >= c.start && t < clipEnd(c); }
 
+/* Wall-clock seconds to pre-seek the next clip's In before a cut. Without this,
+   syncMedia only seeks when the clip becomes active — HTMLVideoElement seek is
+   async, so the first painted frame(s) of a hard cut often show media t≈0 (or a
+   stale frame) until `seeked`. Frame-step hides it because pause seeks settle. */
+const VIDEO_PREFETCH_SEC = 0.85;
+
 function syncMedia() {
   const t = state.time;
+  const rate = playRate();
+  // Timeline lookahead grows with preview rate so wall-clock budget stays ≈VIDEO_PREFETCH_SEC.
+  const prefetchTl = VIDEO_PREFETCH_SEC * Math.max(rate, 1);
   for (const c of project.clips) {
     if (c.kind === "text" || c.kind === "image" || c.kind === "svg" || c.kind === "adjust") continue;
     const el = getClipEl(c); if (!el) continue;
@@ -4734,6 +4744,16 @@ function syncMedia() {
       if (!state.playing && enabled && c.kind === "video" && activeAt(c, t) &&
           Math.abs(el.currentTime - mt) > 0.04) {
         try { el.currentTime = mt; } catch {}
+      } else if (state.playing && enabled && c.kind === "video") {
+        // Approach a cut: park decode head on this clip's In so the first
+        // drawn frame after activeAt flips is already the correct picture.
+        const until = c.start - t;
+        if (until > 0 && until <= prefetchTl && !el.seeking) {
+          const inMt = mediaTimeAt(c, c.start);
+          if (Math.abs(el.currentTime - inMt) > 0.04) {
+            try { el.currentTime = inMt; } catch {}
+          }
+        }
       }
     }
   }

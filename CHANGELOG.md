@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Replace at playhead** (`.`, or the Source monitor replace icon) — overwrites onto placement tracks (V1 + A stems); also clears overlapping linked AV stems on A3+ so they don’t stack; V2/V3 overlays and standalone music are left alone; no ripple. When Source was loaded from a timeline clip, Replace instead applies the new In→Out to that instance (and linked stems) and ripples later clips on those tracks if the duration changed.
 - Preview playback speed — a monitor toolbar toggle plus **J**/**K**/**L** shortcuts cycle the preview player through 1×, 1.5×, 2×, and 4× (L faster, J slower, K play/pause and reset to 1×). It rides on top of each clip's own speed and is forced back to 1× during export, so renders always come out at real time.
 
+### Fixed
+- Continuous playback no longer flashes a wrong first frame at hard cuts — upcoming video clips are pre-seeked to their In ~0.85 s before the playhead reaches them (frame-step already waited for seeks, so it looked fine).
+
 ## [1.6.0] - 2026-07-14
 
 ### Added
