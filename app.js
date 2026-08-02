@@ -1529,10 +1529,19 @@ function insertSourceAtPlayhead() {
   ensurePlayheadVisible();
 }
 /** Premiere-style Overwrite / Replace: place Source In→Out at the playhead,
- *  punching destination tracks (no ripple). */
+ *  punching destination tracks (no ripple). When Source was loaded from a
+ *  timeline clip, instead retarget that instance's In/Out and ripple later
+ *  clips on its tracks by the duration delta. */
 function replaceSourceAtPlayhead() {
   const win = sourceInsertWindow();
   if (!win) { toastSourceWindowMissing(); return; }
+  if (state.source.fromClipId) {
+    const existing = getClip(state.source.fromClipId);
+    if (existing && existing.mediaId === win.m.id) {
+      applySourceWindowToClip(existing, win);
+      return;
+    }
+  }
   const { m, inn, duration } = win;
   if (state.playing) pause();
   if (state.source.playing) pauseSource();
@@ -1548,6 +1557,47 @@ function replaceSourceAtPlayhead() {
   state.dirtyTimeline = true;
   scheduleSave();
   ensurePlayheadVisible();
+}
+/** Apply Source In→Out to a timeline clip loaded into Source. Updates linked
+ *  stems, then ripples later clips on those tracks when duration changes. */
+function applySourceWindowToClip(c, win) {
+  const { inn, duration: mediaWin } = win;
+  const sp = clipSpeed(c);
+  const newDur = Math.max(MIN_DUR, mediaWin / sp);
+  const oldEnd = clipEnd(c);
+  const delta = newDur - c.duration;
+  if (state.playing) pause();
+  if (state.source.playing) pauseSource();
+
+  pushUndo();
+  const group = withLinked([c]);
+  const groupIds = new Set(group.map((x) => x.id));
+  const tracks = new Set(group.map((x) => x.track));
+  const innR = +inn.toFixed(4);
+  const durR = +newDur.toFixed(4);
+  for (const x of group) {
+    x.in = innR;
+    x.duration = durR;
+    x.keyframes = shiftKF(x.keyframes, 0, x.duration);
+    if (x.transitionIn && x.transitionIn.duration > x.duration)
+      x.transitionIn.duration = +x.duration.toFixed(3);
+    if (x.transitionOut && x.transitionOut.duration > x.duration)
+      x.transitionOut.duration = +x.duration.toFixed(3);
+  }
+  if (Math.abs(delta) > 1e-6) {
+    const eps = 1e-6;
+    for (const x of project.clips) {
+      if (groupIds.has(x.id) || !tracks.has(x.track)) continue;
+      if (x.start >= oldEnd - eps)
+        x.start = Math.max(0, +(x.start + delta).toFixed(4));
+    }
+  }
+  selectClip(c.id);
+  state.time = +(c.start + newDur).toFixed(4);
+  state.dirtyTimeline = true;
+  scheduleSave();
+  ensurePlayheadVisible();
+  renderInspector();
 }
 /* Resolve (and cache) a media's real channel count via Web Audio decode —
    <video>/<audio> metadata (probeAV) doesn't expose it, only decodeAudioData
@@ -3654,6 +3704,10 @@ function syncMonitorModeUI() {
   if (els.btnReplace) {
     els.btnReplace.classList.toggle("hidden", !src);
     els.btnReplace.disabled = !state.source.mediaId;
+    const fromClip = state.source.fromClipId && getClip(state.source.fromClipId);
+    els.btnReplace.title = fromClip
+      ? "Apply Source In→Out to the timeline clip (.) — ripples later clips if duration changes"
+      : "Replace (overwrite) Source In→Out at the timeline playhead (.)";
   }
 }
 function setMonitorMode(mode) {
