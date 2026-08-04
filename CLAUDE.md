@@ -154,7 +154,7 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
 ```jsonc
 {
   "name": "My Edit",
-  "width": 1280, "height": 720, "fps": 30,   // canvas/export settings
+  "width": 1280, "height": 720, "fps": 30,   // timeline + export rate (UI: Program Monitor FPS select)
   "background": "#000000",                    // canvas color behind all clips (optional)
   "revision": 7,                              // bump on every write!
   "markers": [ { "t": 2.5 }, { "t": 5.0, "label": "drop" } ],
@@ -522,6 +522,11 @@ or simply `transitionOut: {type:"fade", duration:3}`.
 
 **Vertical reel**: set project `width:1080, height:1920`; use the UI's safe-area
 guides (▦) to keep captions out of platform UI zones.
+
+**Project frame rate**: set `fps` in `project.json` (or the Program Monitor FPS
+dropdown — 24 / 25 / 30 / 50 / 60). Preview stepping, timecode frames, Fast/
+Realtime export, and `/api/export/begin` all use this value; pass the same
+`fps` when starting an export via the API.
 
 ## Export
 
