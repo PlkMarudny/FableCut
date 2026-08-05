@@ -5294,10 +5294,15 @@ function openExportSetup() {
   const ef = getExportFrame();
   const fastOk = state.connected && state.ffmpeg;
   els.engineFast.disabled = !fastOk;
-  els.engineFast.checked = fastOk;
-  els.engineRealtime.disabled = !!ef;
-  els.engineRealtime.checked = !fastOk && !ef;
-  if (ef && fastOk) els.engineFast.checked = true;
+  els.engineRealtime.disabled = false;
+  if (ef && fastOk) {
+    els.engineFast.checked = true;
+    els.engineRealtime.checked = false;
+  } else {
+    els.engineFast.checked = fastOk;
+    els.engineRealtime.checked = !fastOk;
+  }
+  if (ef) els.engineRealtime.disabled = true;
   $("engineFastNote").textContent = fastOk
     ? (ef ? "Exports the " + ef.w + "×" + ef.h + " delivery frame (cropped). Keeps rendering if you switch tabs."
       : "Frame-accurate ffmpeg encode. Keeps rendering if you switch tabs.")
@@ -5737,8 +5742,14 @@ els.btnExportFrame?.addEventListener("click", () => {
     syncExportFrameSel();
     updateMonitorRes();
     scheduleSave();
+  } else if (state.exportFrameView) {
+    project.exportFrame = null;
+    state.exportFrameView = false;
+    syncExportFrameSel();
+    updateMonitorRes();
+    scheduleSave();
   } else {
-    state.exportFrameView = !state.exportFrameView;
+    state.exportFrameView = true;
   }
   els.btnExportFrame.classList.toggle("on", state.exportFrameView && !!getExportFrame());
   updateExportFrameOverlay();
