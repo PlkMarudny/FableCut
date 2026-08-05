@@ -5902,6 +5902,7 @@ els.monitorScroll.addEventListener("pointercancel", endViewPan);
 els.monitorScroll.addEventListener("auxclick", (e) => { if (e.button === 1) e.preventDefault(); });
 els.monitorScroll.addEventListener("scroll", () => {
   if (state.guides) updateSafeOverlay();
+  if (state.exportFrameView && getExportFrame()) updateExportFrameOverlay();
   scheduleMonitorView();
 });
 if (typeof ResizeObserver !== "undefined") {
@@ -5909,6 +5910,7 @@ if (typeof ResizeObserver !== "undefined") {
     if (state.viewZoom <= 1.001) {
       monitorFitCache = null;
       if (state.guides) updateSafeOverlay();
+      if (state.exportFrameView && getExportFrame()) updateExportFrameOverlay();
       return;
     }
     const scroll = els.monitorScroll;
@@ -5933,6 +5935,13 @@ function updateSafeOverlay() {
   els.safeOverlay.classList.toggle("vertical", project.height > project.width);
 }
 /* Dimmed overscan outside the delivery export frame (preview-only overlay). */
+const EF_EDGE = 10;
+function layoutExportFrameOverlayPart(el, left, top, w, h) {
+  el.style.left = left + "px";
+  el.style.top = top + "px";
+  el.style.width = w + "px";
+  el.style.height = h + "px";
+}
 function updateExportFrameOverlay() {
   const ov = els.exportFrameOverlay;
   if (!ov) return;
@@ -5950,19 +5959,23 @@ function updateExportFrameOverlay() {
   const sy = cv.offsetHeight / project.height;
   const hole = ov.querySelector(".ef-shade");
   const handle = ov.querySelector(".ef-handle");
+  const edgeT = ov.querySelector(".ef-edge-t");
+  const edgeB = ov.querySelector(".ef-edge-b");
+  const edgeL = ov.querySelector(".ef-edge-l");
+  const edgeR = ov.querySelector(".ef-edge-r");
   if (!hole) return;
   const left = ef.x * sx, top = ef.y * sy, w = ef.w * sx, h = ef.h * sy;
-  hole.style.left = left + "px";
-  hole.style.top = top + "px";
-  hole.style.width = w + "px";
-  hole.style.height = h + "px";
-  if (handle) {
-    handle.style.left = left + "px";
-    handle.style.top = top + "px";
-    handle.style.width = w + "px";
-  }
+  layoutExportFrameOverlayPart(hole, left, top, w, h);
+  if (handle) layoutExportFrameOverlayPart(handle, left + 6, top + 6, Math.min(w - 12, 120), 22);
+  if (edgeT) layoutExportFrameOverlayPart(edgeT, left, top, w, EF_EDGE);
+  if (edgeB) layoutExportFrameOverlayPart(edgeB, left, top + h - EF_EDGE, w, EF_EDGE);
+  if (edgeL) layoutExportFrameOverlayPart(edgeL, left, top + EF_EDGE, EF_EDGE, Math.max(0, h - EF_EDGE * 2));
+  if (edgeR) layoutExportFrameOverlayPart(edgeR, left + w - EF_EDGE, top + EF_EDGE, EF_EDGE, Math.max(0, h - EF_EDGE * 2));
 }
 let exportFrameDrag = null;
+function exportFrameDragTarget(e) {
+  return e.target.closest(".ef-handle, .ef-edge-t, .ef-edge-b, .ef-edge-l, .ef-edge-r");
+}
 function exportFrameDragMove(e) {
   if (!exportFrameDrag) return;
   const cv = els.preview;
@@ -5977,23 +5990,30 @@ function exportFrameDragMove(e) {
   }, project.width, project.height);
   updateExportFrameOverlay();
 }
-function exportFrameDragEnd() {
+function exportFrameDragEnd(e) {
   if (!exportFrameDrag) return;
   exportFrameDrag = null;
+  els.exportFrameOverlay?.classList.remove("is-dragging");
   syncExportFrameSel();
   updateMonitorRes();
   scheduleSave();
   document.removeEventListener("pointermove", exportFrameDragMove);
   document.removeEventListener("pointerup", exportFrameDragEnd, true);
+  document.removeEventListener("pointercancel", exportFrameDragEnd, true);
+  try { els.exportFrameOverlay?.releasePointerCapture(e.pointerId); } catch { }
 }
 els.exportFrameOverlay?.addEventListener("pointerdown", (e) => {
-  if (!e.target.closest(".ef-handle")) return;
+  if (!exportFrameDragTarget(e)) return;
   const ef = getExportFrame();
   if (!ef) return;
   e.preventDefault();
+  e.stopPropagation();
+  els.exportFrameOverlay?.classList.add("is-dragging");
   exportFrameDrag = { startX: e.clientX, startY: e.clientY, ox: ef.x, oy: ef.y };
+  try { els.exportFrameOverlay.setPointerCapture(e.pointerId); } catch { }
   document.addEventListener("pointermove", exportFrameDragMove);
   document.addEventListener("pointerup", exportFrameDragEnd, true);
+  document.addEventListener("pointercancel", exportFrameDragEnd, true);
 });
 
 window.addEventListener("keydown", (e) => {
