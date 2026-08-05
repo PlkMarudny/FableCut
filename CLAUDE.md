@@ -155,7 +155,7 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
 {
   "name": "My Edit",
   "width": 1280, "height": 720, "fps": 30,   // composition canvas + timeline/export rate (UI: FPS select)
-  "exportFrame": { "x": 420, "y": 0, "w": 1080, "h": 1920 },  // optional delivery crop
+  "exportFrame": { "x": 405, "y": 0, "w": 405, "h": 720 },  // optional delivery crop
   // ^ omit = export the full canvas. Preview dims outside this rect; Fast export crops
   // JPEGs to w×h. Clip x/y/scale stay relative to the composition center, not the frame.
   "background": "#000000",                    // canvas color behind all clips (optional)

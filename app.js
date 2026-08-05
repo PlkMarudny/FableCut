@@ -5743,7 +5743,6 @@ els.btnExportFrame?.addEventListener("click", () => {
     updateMonitorRes();
     scheduleSave();
   } else if (state.exportFrameView) {
-    project.exportFrame = null;
     state.exportFrameView = false;
     syncExportFrameSel();
     updateMonitorRes();
@@ -6013,6 +6012,30 @@ function exportFrameDragEnd(e) {
   document.removeEventListener("pointercancel", exportFrameDragEnd, true);
   try { els.exportFrameOverlay?.releasePointerCapture(e.pointerId); } catch { }
 }
+const EF_NUDGE_PX = 1;
+const EF_NUDGE_SHIFT_PX = 10;
+function nudgeExportFrame(dx, dy) {
+  const ef = getExportFrame();
+  if (!ef) return;
+  project.exportFrame = normalizeExportFrame({
+    x: ef.x + dx, y: ef.y + dy, w: ef.w, h: ef.h,
+  }, project.width, project.height);
+  updateExportFrameOverlay();
+  syncExportFrameSel();
+  updateMonitorRes();
+  scheduleSave();
+}
+function exportFrameHandleKeydown(e) {
+  const k = e.key;
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(k)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const step = e.shiftKey ? EF_NUDGE_SHIFT_PX : EF_NUDGE_PX;
+  nudgeExportFrame(
+    k === "ArrowLeft" ? -step : k === "ArrowRight" ? step : 0,
+    k === "ArrowUp" ? -step : k === "ArrowDown" ? step : 0,
+  );
+}
 els.exportFrameOverlay?.addEventListener("pointerdown", (e) => {
   if (!exportFrameDragTarget(e)) return;
   const ef = getExportFrame();
@@ -6026,6 +6049,7 @@ els.exportFrameOverlay?.addEventListener("pointerdown", (e) => {
   document.addEventListener("pointerup", exportFrameDragEnd, true);
   document.addEventListener("pointercancel", exportFrameDragEnd, true);
 });
+els.exportFrameOverlay?.querySelector(".ef-handle")?.addEventListener("keydown", exportFrameHandleKeydown);
 
 window.addEventListener("keydown", (e) => {
   const k = e.key;

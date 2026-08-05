@@ -988,8 +988,10 @@ body.track-size-s .clip.selected {
   justify-content: flex-start;
   height: 22px;
   box-sizing: border-box;
+  margin: 0;
   padding: 0 8px;
   font: 600 10px/1 "Segoe UI", sans-serif;
+  font-family: inherit;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: #fff;
@@ -1002,6 +1004,12 @@ body.track-size-s .clip.selected {
   white-space: nowrap;
   user-select: none;
   transition: background 0.12s ease;
+  appearance: none;
+  -webkit-appearance: none;
+}
+#exportFrameOverlay .ef-handle:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
 }
 #exportFrameOverlay .ef-handle:hover {
   background: rgba(79, 140, 255, 1);
