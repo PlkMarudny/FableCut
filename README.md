@@ -1,6 +1,12 @@
 <div align="center">
 
-<h1><picture><img src="favicon.svg" width="38" align="middle" alt="" /></picture>&nbsp;FableCut</h1>
+<pre align="center">
+█████  ███  ████  █     █████  ████ █   █ █████
+█     █   █ █   █ █     █     █     █   █   █  
+████  █████ ████  █     ████  █     █   █   █  
+█     █   █ █   █ █     █     █     █   █   █  
+█     █   █ ████  █████ █████  ████  ███    █  
+</pre>
 
 **A browser video editor that AI agents can drive.**
 
