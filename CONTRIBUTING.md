@@ -63,6 +63,25 @@ recommended) **ffmpeg on PATH** for fast export and upload remuxing.
   [CLAUDE.md](CLAUDE.md#authoring-animated-svgs-the-svg-clip-kind) (use `--d` for
   staggered delays, CSS `@keyframes` only — never SMIL).
 
+## Translations (`docs/i18n/`)
+
+The English `README.md` is the single source of truth; `docs/i18n/` holds full
+translations of it, section for section.
+
+- **Don't translate identifiers.** Prop names, tool names, file paths, CLI
+  commands, filter/transition/text-anim names, UI labels that appear in the app
+  in English (`Source`, `Browse file…`, `Scale to fit`, `Fit`, `Limit`) and
+  everything inside code fences stay as-is. Translate the prose around them.
+- Each file ends with a sync note giving the `README.md` commit it was written
+  against. Update that short SHA whenever you re-sync a translation.
+- Adding a language: copy `docs/i18n/README.es.md`, translate, then add your
+  language to the selector line at the top of **every** i18n file and of the
+  root `README.md`. Relative links resolve from `docs/i18n/`, so the repo root
+  is `../../` (e.g. `../../CLAUDE.md`) and the screenshot is `../screenshot.png`.
+- **Feature PRs only need to touch the English README.** Translations are
+  re-synced separately; a translation that lags is expected, and the sync note
+  tells readers how far behind it is.
+
 ## Reporting bugs & requesting features
 
 Use the issue templates. For bugs, include your OS, browser, Node version, and —
