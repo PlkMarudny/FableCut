@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1><img src="../../favicon.svg" width="38" alt="" />&nbsp;FableCut</h1>
+<h1><picture><img src="../../favicon.svg" width="38" align="middle" alt="" /></picture>&nbsp;FableCut</h1>
 
 **Un editor de vídeo en el navegador que los agentes de IA pueden manejar.**
 

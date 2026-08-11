@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1><img src="../../favicon.svg" width="38" alt="" />&nbsp;FableCut</h1>
+<h1><picture><img src="../../favicon.svg" width="38" align="middle" alt="" /></picture>&nbsp;FableCut</h1>
 
 **一个 AI agent 可以直接驱动的浏览器视频编辑器。**
 
