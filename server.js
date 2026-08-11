@@ -20,13 +20,14 @@ const { spawn, spawnSync, execFile } = require("child_process");
 
 const { analyze } = require("./analyze");
 
-const ROOT = __dirname;
-const MEDIA_DIR = path.join(ROOT, "media");
-const EXPORTS_DIR = path.join(ROOT, "exports");
-const ANALYSIS_DIR = path.join(ROOT, "analysis");
-const LIBRARY_DIR = path.join(ROOT, "library");
-const LIBRARY_SUBDIRS = ["sfx", "elements", "svg", "fonts"];
-const PROJECT_FILE = path.join(ROOT, "project.json");
+const {
+  APP_DIR, DATA_DIR, MEDIA_DIR, EXPORTS_DIR, ANALYSIS_DIR, LIBRARY_DIR,
+  PROJECT_FILE, LIBRARY_SUBDIRS, ensureDirs,
+} = require("./paths");
+
+/* Static app files are served from the install dir; everything the user creates
+   lives under DATA_DIR. The two are the same unless FABLECUT_DATA_DIR is set. */
+const ROOT = APP_DIR;
 const PORT = process.env.PORT || 7777;
 const HOST = process.env.HOST || "127.0.0.1";
 
@@ -71,10 +72,7 @@ const MIME = {
   ".ttf": "font/ttf", ".otf": "font/otf", ".woff": "font/woff", ".woff2": "font/woff2",
 };
 
-if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR);
-if (!fs.existsSync(EXPORTS_DIR)) fs.mkdirSync(EXPORTS_DIR);
-if (!fs.existsSync(ANALYSIS_DIR)) fs.mkdirSync(ANALYSIS_DIR);
-for (const d of LIBRARY_SUBDIRS) fs.mkdirSync(path.join(LIBRARY_DIR, d), { recursive: true });
+ensureDirs();
 if (!fs.existsSync(PROJECT_FILE)) {
   fs.writeFileSync(PROJECT_FILE, JSON.stringify({
     name: "Untitled Project", width: 1280, height: 720, fps: 30,
@@ -94,7 +92,7 @@ function onFsChange() {
 }
 /* watch the directory, not the file — atomic tmp+rename writes would detach a
    direct file watcher on Windows */
-try { fs.watch(ROOT, (ev, f) => { if (f === "project.json") onFsChange(); }); } catch {}
+try { fs.watch(DATA_DIR, (ev, f) => { if (f === "project.json") onFsChange(); }); } catch {}
 try { fs.watch(MEDIA_DIR, onFsChange); } catch {}
 for (const d of LIBRARY_SUBDIRS) {
   try { fs.watch(path.join(LIBRARY_DIR, d), onFsChange); } catch {}
@@ -430,5 +428,6 @@ server.listen(PORT, HOST, () => {
   console.log(`  project file : ${PROJECT_FILE}`);
   console.log(`  media folder : ${MEDIA_DIR}`);
   console.log(`  library      : ${LIBRARY_DIR} (${LIBRARY_SUBDIRS.join(", ")})`);
+  if (DATA_DIR !== APP_DIR) console.log(`  app files    : ${APP_DIR}`);
   console.log(`  ffmpeg       : ${HAS_FFMPEG ? "found (fast export + faststart remux on)" : "not found (real-time export only)"}\n`);
 });

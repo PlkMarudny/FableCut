@@ -20,14 +20,50 @@ jobs:
 
       - name: Syntax-check JavaScript
         run: |
-          for f in server.js app.js mcp-server.js analyze.js; do
+          for f in server.js app.js mcp-server.js analyze.js paths.js; do
             echo "checking $f"
             node --check "$f"
           done
 
       - name: Validate JSON files
         run: |
-          node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('package.json OK')"
+          for f in package.json server.json manifest.json .mcp.json \
+                   .claude-plugin/plugin.json .claude-plugin/marketplace.json; do
+            node -e "JSON.parse(require('fs').readFileSync('$f','utf8')); console.log('$f OK')"
+          done
+
+      - name: Check the data-dir split
+        run: |
+          # Default: everything beside the code, as it has always been.
+          node -e "
+            const p = require('./paths');
+            if (p.SPLIT) { console.error('expected SPLIT=false with no env'); process.exit(1); }
+            if (p.PROJECT_FILE !== require('path').join(__dirname, 'project.json')) {
+              console.error('default project path moved:', p.PROJECT_FILE); process.exit(1);
+            }
+            console.log('default layout OK');
+          "
+          # With FABLECUT_DATA_DIR: user data moves, app files do not.
+          FABLECUT_DATA_DIR=/tmp/fc-data node -e "
+            const path = require('path');
+            const p = require('./paths');
+            if (!p.SPLIT) { console.error('expected SPLIT=true'); process.exit(1); }
+            for (const [k, v] of Object.entries({
+              PROJECT_FILE: 'project.json', MEDIA_DIR: 'media',
+              EXPORTS_DIR: 'exports', ANALYSIS_DIR: 'analysis', LIBRARY_DIR: 'library',
+            })) {
+              if (p[k] !== path.join('/tmp/fc-data', v)) {
+                console.error(k, 'did not move:', p[k]); process.exit(1);
+              }
+            }
+            if (p.APP_DIR !== __dirname) { console.error('APP_DIR moved'); process.exit(1); }
+            p.ensureDirs();
+            const fs = require('fs');
+            if (!fs.existsSync('/tmp/fc-data/library/svg/sparkles.svg')) {
+              console.error('library was not seeded'); process.exit(1);
+            }
+            console.log('split layout OK');
+          "
 
       - name: Validate library SVGs
         run: |

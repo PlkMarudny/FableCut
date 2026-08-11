@@ -193,6 +193,22 @@ your LAN, opt in explicitly: `HOST=0.0.0.0 FABLECUT_ALLOWED_HOSTS=<your-ip> node
 Drop media into the window (or `./media/`), drag clips onto the timeline, edit,
 export.
 
+To keep your work outside the checkout, set **`FABLECUT_DATA_DIR`** — it moves
+`project.json`, `media/`, `exports/`, `analysis/` and `library/` to a directory
+you choose. Leave it unset and everything stays in the repo, exactly as before.
+
+### Or install it as a Claude Code plugin
+
+```
+/plugin marketplace add ronak-create/FableCut
+/plugin install fablecut@fablecut
+```
+
+That registers the MCP server for you and adds two skills — `edit-video` and
+`remake-reel`. Your timeline and footage live in the plugin's own data
+directory, so an update never touches them. Node 18+ and (optionally) ffmpeg
+still need to be on your machine.
+
 ## Driving it with an AI agent
 
 Everything an agent needs is in **[CLAUDE.md](CLAUDE.md)** — the complete

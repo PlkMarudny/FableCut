@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Installable as a Claude Code plugin.** `.claude-plugin/plugin.json` plus a
+  `.claude-plugin/marketplace.json`, so the repo is its own marketplace:
+  `/plugin marketplace add ronak-create/FableCut` then
+  `/plugin install fablecut@fablecut`. Ships the MCP server via `.mcp.json` and
+  two skills (`edit-video`, `remake-reel`).
+- `FABLECUT_DATA_DIR` — put `project.json`, `media/`, `exports/`, `analysis/`
+  and `library/` somewhere other than the install directory. Unset (the default)
+  everything stays where it always has, so `node server.js` is unchanged. The
+  plugin points it at the per-plugin data directory, which is what keeps a
+  user's timeline and footage from being wiped when a plugin update replaces the
+  install directory. On first use with a split data dir the shipped `library/`
+  assets are copied across; files you add or edit there are never overwritten.
 - Project FPS select in the Program Monitor header (next to aspect presets) —
   pick 24 / 25 / 30 / 50 / 60 fps; writes `project.fps` and persists like canvas
   size. Non-preset rates appear as Custom.

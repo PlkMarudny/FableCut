@@ -62,6 +62,19 @@ For Claude Desktop, add to its MCP config:
 `{"mcpServers":{"fablecut":{"command":"node","args":["<path-to>/fablecut/mcp-server.js"]}}}`
 Direct file editing of `project.json` (below) works too and is equivalent.
 
+Installing as a Claude Code plugin (`/plugin marketplace add ronak-create/FableCut`,
+then `/plugin install fablecut@fablecut`) does the registration for you.
+
+### Where the files are
+
+`project.json`, `media/`, `exports/`, `analysis/` and `library/` normally sit in
+the repo next to `server.js`. Set **`FABLECUT_DATA_DIR`** to move all five
+somewhere else; the code and the static app files stay in the install directory
+either way. The plugin sets this so a plugin update can replace the install
+directory without touching anyone's timeline or footage. **Don't assume
+`project.json` is beside `mcp-server.js`** — call `fablecut_status`, which
+reports the real paths.
+
 ## Run
 
 ```
