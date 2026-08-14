@@ -229,6 +229,39 @@ Three equivalent control surfaces:
    claude mcp add -s user fablecut -- node "<path-to>/fablecut/mcp-server.js"
    ```
 
+   **OpenCode** can use the same stdio server from its project or global
+   `opencode.json` configuration:
+
+   ```json
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "mcp": {
+       "fablecut": {
+         "type": "local",
+         "command": ["node", "/absolute/path/to/FableCut/mcp-server.js"],
+         "enabled": true
+       }
+     }
+   }
+   ```
+
+   For another MCP client, register a local stdio server with this equivalent
+   command. The exact key names vary by client, but the command and arguments
+   do not:
+
+   ```json
+   {
+     "name": "fablecut",
+     "transport": "stdio",
+     "command": "node",
+     "args": ["/absolute/path/to/FableCut/mcp-server.js"]
+   }
+   ```
+
+   The server is intentionally client-neutral. It speaks MCP over stdio and
+   does not require Claude-specific environment variables. Keep the path
+   absolute, and use Node 18 or newer.
+
    Tools: `fablecut_status` (auto-starts the editor), `fablecut_docs`,
    `fablecut_get_project`, `fablecut_set_project`, `fablecut_patch_project`,
    `fablecut_import_media`, `fablecut_analyze_reference`.
