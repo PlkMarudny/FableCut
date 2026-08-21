@@ -154,7 +154,14 @@ function beginExport(fps, name) {
   const videoPath = path.join(dir, "video.mp4");
   const proc = spawn("ffmpeg", [
     "-y", "-f", "image2pipe", "-framerate", String(fps), "-i", "-",
+    // The browser's JPEG frames are full-range BT.601 (JFIF). Convert them to
+    // limited-range BT.709 and TAG the stream, otherwise x264 emits bt470bg/pc/
+    // unknown and players do the wrong YUV->RGB conversion — the render comes
+    // out darker than the preview.
+    "-vf", "scale=in_range=full:in_color_matrix=bt601:out_range=tv:out_color_matrix=bt709",
     "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+    "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+    "-color_range", "tv",
     videoPath,
   ], { stdio: ["pipe", "ignore", "pipe"] });
   let stderr = "";
@@ -339,12 +346,17 @@ const server = http.createServer(async (req, res) => {
       const code = await sess.done;
       if (code !== 0) throw new Error("ffmpeg encode failed: " + sess.err());
       const out = uniquePath(EXPORTS_DIR, sess.name.replace(/\.mp4$/i, "") + ".mp4");
+      // Re-assert the bt709 tags on the mux — a stream-copy pass can drop the
+      // container-level colr atom even though the SPS still carries them.
+      const TAGS = ["-colorspace", "bt709", "-color_primaries", "bt709",
+                    "-color_trc", "bt709", "-color_range", "tv"];
       if (sess.wav && fs.existsSync(sess.wav))
         await run("ffmpeg", ["-y", "-i", sess.videoPath, "-i", sess.wav,
           "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest",
-          "-movflags", "+faststart", out]);
+          ...TAGS, "-movflags", "+faststart", out]);
       else
-        await run("ffmpeg", ["-y", "-i", sess.videoPath, "-c", "copy", "-movflags", "+faststart", out]);
+        await run("ffmpeg", ["-y", "-i", sess.videoPath, "-c", "copy",
+          ...TAGS, "-movflags", "+faststart", out]);
       cleanupExport(id);
       sendJSON(res, 200, { ok: true, src: "/exports/" + encodeURIComponent(path.basename(out)) });
     } catch (e) { cleanupExport(id); sendJSON(res, 500, { error: String(e) }); }
