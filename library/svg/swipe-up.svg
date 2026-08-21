@@ -22,6 +22,7 @@
     }
     .fade-arrow {
       animation: fadeUp 1s ease-in-out infinite;
+      animation-delay: var(--d, 0s);
     }
     @keyframes fadeUp {
       0%, 100% { opacity: 0.2; transform: translateY(10px); }

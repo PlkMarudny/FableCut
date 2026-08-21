@@ -12,6 +12,7 @@
       transform-box: fill-box;
       transform-origin: center;
       animation: sweep 1s cubic-bezier(.4,0,.2,1) both;
+      animation-delay: var(--d, 0s);
     }
     @keyframes sweep {
       0%   { stroke-dashoffset: 502.65; opacity: 0.3; }
@@ -28,13 +29,18 @@
       dominant-baseline: central;
       transform-box: fill-box;
       transform-origin: center;
-      animation: pop 0.4s cubic-bezier(.34,1.56,.64,1) both;
+      animation: pop 0.4s cubic-bezier(.34,1.56,.64,1) both,
+                 hideAtEnd 0.01s linear 1s both;
+      animation-delay: var(--d, 0s), calc(var(--d, 0s) + 0.99s);
       opacity: 0;
     }
     @keyframes pop {
       0%   { transform: scale(0.3); opacity: 0; }
       60%  { transform: scale(1.1); opacity: 1; }
       100% { transform: scale(1);   opacity: 1; }
+    }
+    @keyframes hideAtEnd {
+      to { opacity: 0; }
     }
 
     /* Digit fade-out at end of each second */
@@ -52,6 +58,7 @@
       stroke-width: 2;
       opacity: 0;
       animation: glowPulse 1s ease-out both;
+      animation-delay: var(--d, 0s);
     }
     @keyframes glowPulse {
       0%   { opacity: 0.6; stroke-width: 8; }
