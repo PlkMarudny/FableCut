@@ -26,6 +26,14 @@ ensureDirs();
 const PORT = process.env.FABLECUT_PORT || 7777;
 const BASE = `http://localhost:${PORT}`;
 
+/* MCP initialize must echo a version we actually speak. Echoing an unknown
+   client version (or crashing) fails handshake with stock SDK clients. */
+const MCP_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2024-11-05"];
+const MCP_DEFAULT_PROTOCOL_VERSION = MCP_PROTOCOL_VERSIONS[0];
+function negotiateProtocolVersion(requested) {
+  return MCP_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_DEFAULT_PROTOCOL_VERSION;
+}
+
 /* ── Helpers ── */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function readProject() {
@@ -454,7 +462,7 @@ async function handle(msg) {
       return send({
         jsonrpc: "2.0", id,
         result: {
-          protocolVersion: params?.protocolVersion || "2025-06-18",
+          protocolVersion: negotiateProtocolVersion(params?.protocolVersion),
           capabilities: { tools: {} },
           serverInfo: { name: "fablecut", version: "1.7.0" },
         },
