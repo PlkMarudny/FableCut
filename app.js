@@ -590,12 +590,17 @@ function startFolderRename(folderId) {
     if (e.key === "Escape") { e.preventDefault(); row.textContent = getFolder(folderId)?.name || "Folder"; row.blur(); }
   });
 }
+/** Floor to even ≥ 8 — required for libx264 + yuv420p (chroma 2×2). */
+function evenFloor(n) {
+  return Math.max(8, Math.floor(n / 2) * 2);
+}
 function normalizeExportFrame(raw, canvasW, canvasH) {
   if (!raw || typeof raw !== "object") return null;
   let w = Math.round(+raw.w), h = Math.round(+raw.h);
   if (!w || !h || w < 8 || h < 8) return null;
   let x = Math.round(+raw.x || 0), y = Math.round(+raw.y || 0);
-  w = Math.min(w, canvasW); h = Math.min(h, canvasH);
+  w = evenFloor(Math.min(w, canvasW));
+  h = evenFloor(Math.min(h, canvasH));
   x = clamp(x, 0, Math.max(0, canvasW - w));
   y = clamp(y, 0, Math.max(0, canvasH - h));
   if (w >= canvasW && h >= canvasH) return null;
@@ -604,13 +609,15 @@ function normalizeExportFrame(raw, canvasW, canvasH) {
 function getExportFrame() {
   return normalizeExportFrame(project.exportFrame, project.width, project.height);
 }
-/** Largest axis-aligned rect of aspect aw×ah that fits inside the canvas. */
+/** Largest axis-aligned rect of aspect aw×ah that fits inside the canvas.
+ *  Width/height are snapped even so Fast export (H.264 yuv420p) can encode. */
 function fitExportFrameAspect(aw, ah, canvasW = project.width, canvasH = project.height) {
   const target = aw / ah, canvas = canvasW / canvasH;
   let w, h;
   if (target > canvas) { w = canvasW; h = Math.round(canvasW / target); }
   else { h = canvasH; w = Math.round(canvasH * target); }
-  w = clamp(w, 8, canvasW); h = clamp(h, 8, canvasH);
+  w = evenFloor(Math.min(w, canvasW));
+  h = evenFloor(Math.min(h, canvasH));
   return {
     x: Math.round((canvasW - w) / 2),
     y: Math.round((canvasH - h) / 2),
@@ -5293,23 +5300,31 @@ function openExportSetup() {
   if (!project.clips.length) { alert("Timeline is empty — add some clips first."); return; }
   const ef = getExportFrame();
   const fastOk = state.connected && state.ffmpeg;
+  const rtOk = !ef; // realtime cannot crop to the delivery frame
   els.engineFast.disabled = !fastOk;
-  els.engineRealtime.disabled = false;
-  if (ef && fastOk) {
+  els.engineRealtime.disabled = !rtOk;
+  if (fastOk) {
     els.engineFast.checked = true;
     els.engineRealtime.checked = false;
+  } else if (rtOk) {
+    els.engineFast.checked = false;
+    els.engineRealtime.checked = true;
   } else {
-    els.engineFast.checked = fastOk;
-    els.engineRealtime.checked = !fastOk;
+    // Frame set but no ffmpeg — neither engine can run; prefer Fast in the UI.
+    els.engineFast.checked = true;
+    els.engineRealtime.checked = false;
   }
-  if (ef) els.engineRealtime.disabled = true;
   $("engineFastNote").textContent = fastOk
     ? (ef ? "Exports the " + ef.w + "×" + ef.h + " delivery frame (cropped). Keeps rendering if you switch tabs."
       : "Frame-accurate ffmpeg encode. Keeps rendering if you switch tabs.")
-    : "Needs the server + ffmpeg on PATH.";
+    : (ef
+      ? "Needs the server + ffmpeg on PATH to export a cropped delivery frame."
+      : "Needs the server + ffmpeg on PATH.");
   const rtNote = $("engineRealtime")?.closest(".engine-opt")?.querySelector(".dim");
   if (rtNote) rtNote.textContent = ef
-    ? "Unavailable while an export frame is set — use Fast export."
+    ? (fastOk
+      ? "Unavailable while an export frame is set — use Fast export."
+      : "Unavailable while an export frame is set. Install ffmpeg, or clear the export frame to use Realtime.")
     : "Plays the timeline once and records it. Keep the tab focused.";
   const warn = $("exportTrackWarn");
   const disabled = TRACKS.filter((t) =>
@@ -5328,8 +5343,19 @@ function openExportSetup() {
   els.exportSetup.classList.remove("hidden");
 }
 function startChosenExport() {
+  const useFast = els.engineFast.checked && !els.engineFast.disabled;
+  const useRt = els.engineRealtime.checked && !els.engineRealtime.disabled;
+  if (!useFast && !useRt) {
+    const ef = getExportFrame();
+    if (ef && !(state.connected && state.ffmpeg)) {
+      alert("Export frame cropping needs Fast export (server + ffmpeg). Clear the export frame, or install ffmpeg and try again.");
+      return;
+    }
+    alert("No export engine is available.");
+    return;
+  }
   els.exportSetup.classList.add("hidden");
-  if (els.engineFast.checked && !els.engineFast.disabled) fastExport();
+  if (useFast) fastExport();
   else startExport();
 }
 
