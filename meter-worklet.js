@@ -1,7 +1,6 @@
-/* FableCut per-track meter worklet.
-   Each input = one timeline audio track. Pass-through mix to stereo out.
-   Reports per-track: RMS, sample peak, and momentary LUFS (ITU-R BS.1770-4,
-   400 ms, K-weighted stereo). */
+/* FableCut per-track + stereo master meter worklet.
+   Inputs 0…nAudio−1 = A-track buses; input nAudio = video/other spill on master.
+   Pass-through sum → stereo out. Reports per A-track + post-sum master L/R. */
 function shelfCoeffs(fs) {
   const f0 = 1681.974450955533;
   const G = 3.999843853973347;
@@ -47,6 +46,7 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
     const opts = (options && options.processorOptions) || {};
     this._hopBlocks = Math.max(1, opts.hopBlocks || 8);
     this._nTracks = Math.max(1, opts.nTracks || 1);
+    this._nAudio = Math.max(0, opts.nAudioTracks ?? opts.nTracks ?? 1);
     this._ids = opts.trackIds || [];
     this._block = 0;
     this._sumSq = new Float64Array(this._nTracks);
@@ -78,6 +78,20 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
       this._lufsIdx.push(0);
       this._lufsFilled.push(0);
     }
+
+    // Stereo master (post-sum L/R + momentary stereo LUFS)
+    this._mSumSqL = 0;
+    this._mSumSqR = 0;
+    this._mPeakL = 0;
+    this._mPeakR = 0;
+    this._mSumSqK = 0;
+    this._mShelfL = makeBiquad(shelf);
+    this._mHpfL = makeBiquad(hpf);
+    this._mShelfR = makeBiquad(shelf);
+    this._mHpfR = makeBiquad(hpf);
+    this._mLufsRing = new Float64Array(this._lufsLen);
+    this._mLufsIdx = 0;
+    this._mLufsFilled = 0;
   }
 
   process(inputs, outputs) {
@@ -124,15 +138,43 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
       this._sumSqK[t] = sumK;
     }
 
+    if (outL && frames) {
+      let mSqL = this._mSumSqL;
+      let mSqR = this._mSumSqR;
+      let mPkL = this._mPeakL;
+      let mPkR = this._mPeakR;
+      let mSqK = this._mSumSqK;
+      const mSL = this._mShelfL, mHL = this._mHpfL;
+      const mSR = this._mShelfR, mHR = this._mHpfR;
+      for (let i = 0; i < frames; i++) {
+        const l = outL[i];
+        const r = outR ? outR[i] : l;
+        mSqL += l * l;
+        mSqR += r * r;
+        const aL = l >= 0 ? l : -l;
+        const aR = r >= 0 ? r : -r;
+        if (aL > mPkL) mPkL = aL;
+        if (aR > mPkR) mPkR = aR;
+        const fl = biquadStep(mHL, biquadStep(mSL, l));
+        const fr = biquadStep(mHR, biquadStep(mSR, r));
+        mSqK += fl * fl + fr * fr;
+      }
+      this._mSumSqL = mSqL;
+      this._mSumSqR = mSqR;
+      this._mPeakL = mPkL;
+      this._mPeakR = mPkR;
+      this._mSumSqK = mSqK;
+    }
+
     if (frames) this._frames += frames;
     this._block++;
 
     if (this._block >= this._hopBlocks) {
       const n = Math.max(1, this._frames);
-      const rms = new Array(this._nTracks);
-      const peak = new Array(this._nTracks);
-      const lufs = new Array(this._nTracks);
-      for (let t = 0; t < this._nTracks; t++) {
+      const rms = new Array(this._nAudio);
+      const peak = new Array(this._nAudio);
+      const lufs = new Array(this._nAudio);
+      for (let t = 0; t < this._nAudio; t++) {
         rms[t] = Math.sqrt(this._sumSq[t] / n);
         peak[t] = this._peak[t];
 
@@ -153,12 +195,36 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
         this._peak[t] = 0;
         this._sumSqK[t] = 0;
       }
+
+      const blockMs = this._mSumSqK / n;
+      const mRing = this._mLufsRing;
+      const mIdx = this._mLufsIdx;
+      mRing[mIdx] = blockMs;
+      this._mLufsIdx = (mIdx + 1) % this._lufsLen;
+      if (this._mLufsFilled < this._lufsLen) this._mLufsFilled++;
+      let mAcc = 0;
+      for (let i = 0; i < this._mLufsFilled; i++) mAcc += mRing[i];
+      const mMeanMs = mAcc / Math.max(1, this._mLufsFilled);
+      const master = {
+        rmsL: Math.sqrt(this._mSumSqL / n),
+        rmsR: Math.sqrt(this._mSumSqR / n),
+        peakL: this._mPeakL,
+        peakR: this._mPeakR,
+        lufs: mMeanMs > 1e-12 ? -0.691 + 10 * Math.log10(mMeanMs) : -70,
+      };
+      this._mSumSqL = 0;
+      this._mSumSqR = 0;
+      this._mPeakL = 0;
+      this._mPeakR = 0;
+      this._mSumSqK = 0;
+
       this.port.postMessage({
         type: "meter",
         trackIds: this._ids,
         rms,
         peak,
         lufs,
+        master,
         frames: n,
       });
       this._block = 0;

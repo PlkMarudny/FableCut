@@ -3887,6 +3887,16 @@ function paintMeterSegs(entry, lit, hold) {
     }
   }
 }
+const MASTER_METER_L = "M:L";
+const MASTER_METER_R = "M:R";
+const MASTER_METER_IDS = [MASTER_METER_L, MASTER_METER_R];
+function resetMasterMeterBallistics() {
+  meterState.master.dispL = meterState.master.dispR = METER_DB_MIN;
+  meterState.master.peakHoldL = meterState.master.peakHoldR = METER_DB_MIN;
+  meterState.master.peakHoldTL = meterState.master.peakHoldTR = 0;
+  meterState.lastLit[MASTER_METER_L] = meterState.lastLit[MASTER_METER_R] = -1;
+  meterState.lastHold[MASTER_METER_L] = meterState.lastHold[MASTER_METER_R] = -1;
+}
 const meterState = {
   mode: (() => {
     try {
@@ -3905,6 +3915,10 @@ const meterState = {
   lastLit: {},   // id -> last-painted lit/hold seg indices, to skip redundant DOM writes
   lastHold: {},
   modeBtn: null,
+  master: { rmsL: 0, rmsR: 0, peakL: 0, peakR: 0, lufs: -70,
+    dispL: METER_DB_MIN, dispR: METER_DB_MIN,
+    peakHoldL: METER_DB_MIN, peakHoldR: METER_DB_MIN,
+    peakHoldTL: 0, peakHoldTR: 0 },
 };
 function audioMeterTracks() {
   return TRACKS.filter((t) => t.kind === "audio");
@@ -3923,21 +3937,23 @@ function cycleMeterMode(ev) {
     meterState.peakHold[id] = METER_DB_MIN;
     meterState.peakHoldT[id] = 0;
   }
+  resetMasterMeterBallistics();
 }
 async function installMeterWorklet(audio) {
   if (audio.meterReady || !audio.ctx.audioWorklet || meterState._loading) return;
   meterState._loading = true;
   const trackIds = audio.audioTrackIds.slice();
+  const nAudio = trackIds.length;
+  const nInputs = Math.max(1, nAudio + 1); // +1 = video/other spill on master
   try {
-    await audio.ctx.audioWorklet.addModule("meter-worklet.js?v=2");
-    const n = trackIds.length;
+    await audio.ctx.audioWorklet.addModule("meter-worklet.js?v=3");
     const meter = new AudioWorkletNode(audio.ctx, "fablecut-meter", {
-      numberOfInputs: n,
+      numberOfInputs: nInputs,
       numberOfOutputs: 1,
       outputChannelCount: [2],
       channelCount: 2,
       channelCountMode: "explicit",
-      processorOptions: { hopBlocks: 8, nTracks: n, trackIds },
+      processorOptions: { hopBlocks: 8, nTracks: nInputs, nAudioTracks: nAudio, trackIds },
     });
     meter.port.onmessage = (ev) => {
       const msg = ev.data;
@@ -3949,17 +3965,25 @@ async function installMeterWorklet(audio) {
         meterState.peak[id] = msg.peak[i] || 0;
         meterState.lufs[id] = msg.lufs[i] != null ? msg.lufs[i] : -70;
       }
+      if (msg.master) {
+        const m = msg.master;
+        meterState.master.rmsL = m.rmsL || 0;
+        meterState.master.rmsR = m.rmsR || 0;
+        meterState.master.peakL = m.peakL || 0;
+        meterState.master.peakR = m.peakR || 0;
+        meterState.master.lufs = m.lufs != null ? m.lufs : -70;
+      }
     };
 
-    // Reroute: trackBus → meter inputs → speakers/rec (no double via master)
+    // Full mix: A-buses + master spill → meter → speakers/rec (single summed path)
     for (const id of trackIds) {
       const bus = audio.trackBus[id];
       try { bus.disconnect(); } catch {}
       bus.connect(meter, 0, trackIds.indexOf(id));
     }
-    // master still carries video-track embedded audio (recDest already wired)
     try { audio.master.disconnect(audio.ctx.destination); } catch {}
-    audio.master.connect(audio.ctx.destination);
+    try { audio.master.disconnect(audio.recDest); } catch {}
+    audio.master.connect(meter, 0, nAudio);
     meter.connect(audio.ctx.destination);
     meter.connect(audio.recDest);
 
@@ -3974,6 +3998,7 @@ async function installMeterWorklet(audio) {
       meterState.peakHold[id] = METER_DB_MIN;
       meterState.peakHoldT[id] = 0;
     }
+    resetMasterMeterBallistics();
     buildMeterDOM();
   } catch (err) {
     console.warn("[FableCut] meter worklet unavailable:", err);
@@ -4016,6 +4041,7 @@ function buildMeterDOM() {
   meterState.lastLit = {};
   meterState.lastHold = {};
   meterState.trackIds = tracks.map((t) => t.id);
+
   for (const t of tracks) {
     if (meterState.disp[t.id] == null) {
       meterState.disp[t.id] = METER_DB_MIN;
@@ -4040,6 +4066,27 @@ function buildMeterDOM() {
     col.appendChild(label);
     row.appendChild(col);
   }
+
+  const masterWrap = document.createElement("div");
+  masterWrap.className = "vu-master";
+  for (const ch of ["L", "R"]) {
+    const id = ch === "L" ? MASTER_METER_L : MASTER_METER_R;
+    const col = document.createElement("div");
+    col.className = "vu-channel vu-master-ch";
+    col.dataset.track = id;
+    const segsCv = document.createElement("canvas");
+    segsCv.className = "vu-segs";
+    const entry = makeMeterCanvas(segsCv);
+    meterState.segs[id] = entry;
+    paintMeterSegs(entry, 0, -1);
+    const label = document.createElement("span");
+    label.className = "vu-label";
+    label.textContent = ch;
+    col.appendChild(segsCv);
+    col.appendChild(label);
+    masterWrap.appendChild(col);
+  }
+  row.appendChild(masterWrap);
   root.appendChild(row);
 }
 function rmsToDb(rms) {
@@ -4047,6 +4094,16 @@ function rmsToDb(rms) {
 }
 function meterReadingDb(id) {
   const mode = meterState.mode;
+  if (id === MASTER_METER_L || id === MASTER_METER_R) {
+    const m = meterState.master;
+    const isL = id === MASTER_METER_L;
+    if (mode === "peak") return rmsToDb(isL ? m.peakL : m.peakR);
+    if (mode === "lufs") {
+      const v = m.lufs;
+      return v == null || v < METER_DB_MIN ? METER_DB_MIN : Math.min(METER_DB_MAX, v);
+    }
+    return rmsToDb(isL ? m.rmsL : m.rmsR);
+  }
   if (mode === "peak") return rmsToDb(meterState.peak[id] || 0);
   if (mode === "lufs") {
     const v = meterState.lufs[id];
@@ -4054,9 +4111,55 @@ function meterReadingDb(id) {
   }
   return rmsToDb(meterState.rms[id] || 0);
 }
+function updateMeterChannel(id, target, dt, attack, release, now) {
+  const curKey = id === MASTER_METER_L ? "dispL" : id === MASTER_METER_R ? "dispR" : null;
+  const holdKey = id === MASTER_METER_L ? "peakHoldL" : id === MASTER_METER_R ? "peakHoldR" : null;
+  const holdTKey = id === MASTER_METER_L ? "peakHoldTL" : id === MASTER_METER_R ? "peakHoldTR" : null;
+  let cur, peakHold, peakHoldT;
+  if (curKey) {
+    cur = meterState.master[curKey] ?? METER_DB_MIN;
+    peakHold = meterState.master[holdKey] ?? METER_DB_MIN;
+    peakHoldT = meterState.master[holdTKey] || 0;
+  } else {
+    cur = meterState.disp[id] ?? METER_DB_MIN;
+    peakHold = meterState.peakHold[id] ?? METER_DB_MIN;
+    peakHoldT = meterState.peakHoldT[id] || 0;
+  }
+  const a = target > cur ? attack : release;
+  const next = cur + (target - cur) * a;
+  if (curKey) meterState.master[curKey] = next;
+  else meterState.disp[id] = next;
+
+  const pk = target;
+  if (pk >= peakHold) {
+    if (curKey) {
+      meterState.master[holdKey] = pk;
+      meterState.master[holdTKey] = now;
+    } else {
+      meterState.peakHold[id] = pk;
+      meterState.peakHoldT[id] = now;
+    }
+    peakHold = pk;
+  } else if (now - peakHoldT > 800) {
+    peakHold += (METER_DB_MIN - peakHold) * release;
+    if (curKey) meterState.master[holdKey] = peakHold;
+    else meterState.peakHold[id] = peakHold;
+  }
+
+  const segs = meterState.segs[id];
+  if (!segs) return;
+  const level = (next - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN);
+  const lit = Math.round(clamp(level, 0, 1) * METER_SEGS);
+  const hold = Math.round(clamp(
+    (peakHold - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN), 0, 1
+  ) * (METER_SEGS - 1));
+  if (meterState.lastLit[id] === lit && meterState.lastHold[id] === hold) return;
+  meterState.lastLit[id] = lit;
+  meterState.lastHold[id] = hold;
+  paintMeterSegs(segs, lit, hold);
+}
 function updateMeterUI(dt) {
   const ids = meterState.trackIds;
-  if (!ids.length) return;
   const metering = (state.playing || state.audioHold) && runtime.audio?.meterReady;
   const mode = meterState.mode;
   // Peak: snappy; LUFS already smoothed in-worklet (400 ms); RMS: classic VU feel
@@ -4065,36 +4168,10 @@ function updateMeterUI(dt) {
   const attack = 1 - Math.exp(-dt / atkMs);
   const release = 1 - Math.exp(-dt / relMs);
   const now = performance.now();
-  for (const id of ids) {
-    const target = metering ? meterReadingDb(id) : METER_DB_MIN;
-    const cur = meterState.disp[id] ?? METER_DB_MIN;
-    const a = target > cur ? attack : release;
-    const next = cur + (target - cur) * a;
-    meterState.disp[id] = next;
-
-    // Hold tip follows the active mode reading (not always sample-peak)
-    const pk = target;
-    if (pk >= (meterState.peakHold[id] ?? METER_DB_MIN)) {
-      meterState.peakHold[id] = pk;
-      meterState.peakHoldT[id] = now;
-    } else if (now - (meterState.peakHoldT[id] || 0) > 800) {
-      meterState.peakHold[id] += (METER_DB_MIN - meterState.peakHold[id]) * release;
-    }
-
-    const segs = meterState.segs[id];
-    if (!segs) continue;
-    const level = (next - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN);
-    const lit = Math.round(clamp(level, 0, 1) * METER_SEGS);
-    const hold = Math.round(clamp(
-      ((meterState.peakHold[id] ?? METER_DB_MIN) - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN), 0, 1
-    ) * (METER_SEGS - 1));
-    // The ballistics above still run every frame (needed for smooth decay),
-    // but the canvas only needs repainting when the result actually differs —
-    // skips a redraw for most tracks most frames.
-    if (meterState.lastLit[id] === lit && meterState.lastHold[id] === hold) continue;
-    meterState.lastLit[id] = lit;
-    meterState.lastHold[id] = hold;
-    paintMeterSegs(segs, lit, hold);
+  const floor = METER_DB_MIN;
+  for (const id of [...ids, ...MASTER_METER_IDS]) {
+    const target = metering ? meterReadingDb(id) : floor;
+    updateMeterChannel(id, target, dt, attack, release, now);
   }
 }
 

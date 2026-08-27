@@ -893,6 +893,14 @@ body.track-size-s .clip.selected {
 }
 .vu-scale-tick:first-child { transform: translateY(0); }
 .vu-scale-tick:last-child { transform: translateY(-100%); }
+.vu-master {
+  display: flex;
+  gap: 2px;
+  padding-left: 5px;
+  margin-left: 3px;
+  border-left: 1px solid #ffffff18;
+}
+.vu-master .vu-label { color: #d4d4dc; }
 .vu-channel {
   display: flex;
   flex-direction: column;
