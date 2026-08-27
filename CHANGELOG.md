@@ -36,7 +36,8 @@ installs as a Claude Code plugin.
   re-hard-pan a centered stem). Compact MCP keeps `pan` on linked stems.
 - Stereo **master meter** (L/R) on the monitor — post-pan program sum in the
   same RMS / LUFS / Peak modes as the per-track bars; A-tracks + video spill
-  route through one summed path when the meter worklet is active.
+  route through one summed path when the meter worklet is active. Per-track
+  bars collapse via **◂** / **▸** beside the master strip (master L/R stay visible).
 - Preview playback speed — a monitor toolbar toggle plus **J**/**K**/**L** shortcuts cycle the preview player through 1×, 1.5×, 2×, and 4× (L faster, J slower, K play/pause and reset to 1×). It rides on top of each clip's own speed and is forced back to 1× during export, so renders always come out at real time.
   (thanks @ur5fot, #18)
 - **Separate audio and video tracks.** Imported video now shows its audio as

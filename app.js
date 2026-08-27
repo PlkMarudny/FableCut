@@ -233,25 +233,6 @@ function addTimelineTrack(kind) {
   scheduleSave();
   return t;
 }
-/* Add A5, A6, … until there are `need` audio tracks (capped at MAX_AUDIO_TRACKS),
-   so multi-channel sources beyond stereo/quad (5.1, 7.1…) each get their own
-   linked audio track. Returns how many were added. */
-function ensureAudioTrackCount(need) {
-  need = Math.min(need, MAX_AUDIO_TRACKS);
-  let added = 0;
-  while (audioTrackIds().length < need) {
-    TRACKS.push(makeTrack(nextTrackId("audio"), "audio"));
-    added++;
-  }
-  if (added) {
-    sortTracksInPlace();
-    applyTrackHeights();
-    project.tracks = serializeTracks();
-    buildTrackDOM();
-    if (runtime.audio) syncAudioGraphTracks();
-  }
-  return added;
-}
 function trackHasClips(trackId) {
   return project.clips.some((c) => c.track === trackId);
 }
@@ -3707,15 +3688,27 @@ function releaseClipEl(id) {
     runtime.clipGain.delete(id);
   }
 }
+/** Configure an A-track bus so stereo panner output stays L/R through the meter. */
+function configureTrackBus(g) {
+  g.channelCount = 2;
+  g.channelCountMode = "explicit";
+  g.channelInterpretation = "discrete";
+}
+/** Master spill bus (V-track / direct video audio) — same stereo rules as A-buses. */
+function configureMasterBus(g) {
+  configureTrackBus(g);
+}
 function ensureAudio() {
   if (runtime.audio) return runtime.audio;
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const master = ctx.createGain();
+  configureMasterBus(master);
   const recDest = ctx.createMediaStreamDestination();
   const ids = audioTrackIds();
   const trackBus = {};
   for (const id of ids) {
     trackBus[id] = ctx.createGain();
+    configureTrackBus(trackBus[id]);
   }
   // Until the worklet is ready, audio-track buses and master both feed speakers.
   master.connect(ctx.destination);
@@ -3747,7 +3740,8 @@ function connectChannelIsolated(ctx, src, g, ch, nCh) {
   return { split: null };
 }
 /** Gain → StereoPanner; panner becomes `_fcOut` for routing.
- * Falls back to gain-as-out when StereoPannerNode is unavailable. */
+ * Falls back to gain-as-out when StereoPannerNode is unavailable.
+ * Keep default `speakers` interpretation — `discrete` leaves mono on L at pan 0. */
 function attachClipPanner(ctx, g) {
   try {
     const panner = ctx.createStereoPanner();
@@ -3775,17 +3769,18 @@ function syncAudioGraphTracks() {
   }
   for (const id of ids) {
     if (!audio.trackBus[id]) audio.trackBus[id] = audio.ctx.createGain();
+    configureTrackBus(audio.trackBus[id]);
   }
   audio.audioTrackIds = ids.slice();
   // Tear down meter so installMeterWorklet can rebuild with the new input count.
   if (audio.meter) {
-    try { audio.meter.disconnect(); } catch { }
-    try { audio.master.disconnect(); } catch { }
-    audio.master.connect(audio.ctx.destination);
-    audio.master.connect(audio.recDest);
+    teardownMeterNode(audio);
     audio.meter = null;
-    audio.meterReady = false;
   }
+  audio.meterReady = false;
+  // Allow a new install even if a previous addModule is still in flight — that
+  // call's finally will see _reloadMeter and run again.
+  meterState._reloadMeter = true;
   // Always wire current buses → master so re-added tracks stay audible if meter install fails.
   for (const id of ids) {
     const g = audio.trackBus[id];
@@ -3845,6 +3840,9 @@ const METER_DB_MIN = -48;
 const METER_DB_MAX = 0;
 /** Scale tick marks shown beside the meter bars (dBFS). */
 const METER_DB_MARKS = [0, -6, -12, -24, -36, -48];
+function meterMarkTopPct(db) {
+  return ((METER_DB_MAX - db) / (METER_DB_MAX - METER_DB_MIN)) * 100;
+}
 const METER_MODES = ["rms", "lufs", "peak"];
 const METER_MODE_LABEL = { rms: "RMS", lufs: "LUFS", peak: "PEAK" };
 /* Each channel's segment ladder is one <canvas> instead of METER_SEGS separate
@@ -3897,6 +3895,66 @@ function resetMasterMeterBallistics() {
   meterState.lastLit[MASTER_METER_L] = meterState.lastLit[MASTER_METER_R] = -1;
   meterState.lastHold[MASTER_METER_L] = meterState.lastHold[MASTER_METER_R] = -1;
 }
+/** Tap the post-meter stereo bus for true L/R master readings (matches headphones). */
+function disposeMasterAnalysers(audio) {
+  if (!audio?.masterSplit) return;
+  try { audio.meter?.disconnect(audio.masterSplit); } catch {}
+  try { audio.masterSplit.disconnect(); } catch {}
+  audio.masterSplit = null;
+  audio.masterAnalysers = null;
+}
+/** Disconnect meter + analysers; restore buses→master→speakers fallback. */
+function teardownMeterNode(audio) {
+  if (!audio) return;
+  disposeMasterAnalysers(audio);
+  if (audio.meter) {
+    try { audio.meter.port.onmessage = null; } catch {}
+    try { audio.meter.disconnect(); } catch {}
+  }
+  try { audio.master.disconnect(); } catch {}
+  try { audio.master.connect(audio.ctx.destination); } catch {}
+  try { audio.master.connect(audio.recDest); } catch {}
+}
+function installMasterAnalysers(audio, meterNode) {
+  disposeMasterAnalysers(audio);
+  const meter = meterNode || audio?.meter;
+  if (!meter) return;
+  const ctx = audio.ctx;
+  const split = ctx.createChannelSplitter(2);
+  const aL = ctx.createAnalyser();
+  const aR = ctx.createAnalyser();
+  const n = 2048;
+  aL.fftSize = n;
+  aR.fftSize = n;
+  aL.smoothingTimeConstant = 0;
+  aR.smoothingTimeConstant = 0;
+  meter.connect(split);
+  split.connect(aL, 0);
+  split.connect(aR, 1);
+  audio.masterSplit = split;
+  audio.masterAnalysers = { L: aL, R: aR, bufL: new Float32Array(n), bufR: new Float32Array(n) };
+}
+function sampleMasterAnalysers() {
+  const a = runtime.audio?.masterAnalysers;
+  if (!a) return;
+  a.L.getFloatTimeDomainData(a.bufL);
+  a.R.getFloatTimeDomainData(a.bufR);
+  let sumL = 0, sumR = 0, pkL = 0, pkR = 0;
+  const n = a.bufL.length;
+  for (let i = 0; i < n; i++) {
+    const l = a.bufL[i], r = a.bufR[i];
+    sumL += l * l;
+    sumR += r * r;
+    const al = l >= 0 ? l : -l, ar = r >= 0 ? r : -r;
+    if (al > pkL) pkL = al;
+    if (ar > pkR) pkR = ar;
+  }
+  const inv = 1 / Math.max(1, n);
+  meterState.master.rmsL = Math.sqrt(sumL * inv);
+  meterState.master.rmsR = Math.sqrt(sumR * inv);
+  meterState.master.peakL = pkL;
+  meterState.master.peakR = pkR;
+}
 const meterState = {
   mode: (() => {
     try {
@@ -3915,6 +3973,11 @@ const meterState = {
   lastLit: {},   // id -> last-painted lit/hold seg indices, to skip redundant DOM writes
   lastHold: {},
   modeBtn: null,
+  tracksToggleBtn: null,
+  tracksExpanded: (() => {
+    try { return localStorage.getItem("fablecut-meter-tracks-expanded") !== "0"; }
+    catch { return true; }
+  })(),
   master: { rmsL: 0, rmsR: 0, peakL: 0, peakR: 0, lufs: -70,
     dispL: METER_DB_MIN, dispR: METER_DB_MIN,
     peakHoldL: METER_DB_MIN, peakHoldR: METER_DB_MIN,
@@ -3939,55 +4002,85 @@ function cycleMeterMode(ev) {
   }
   resetMasterMeterBallistics();
 }
+function syncMeterTracksExpandedUI() {
+  const root = $("vuMeter");
+  if (!root) return;
+  root.classList.toggle("vu-tracks-open", meterState.tracksExpanded);
+  const btn = meterState.tracksToggleBtn;
+  if (btn) {
+    btn.textContent = meterState.tracksExpanded ? "▸" : "◂";
+    btn.title = meterState.tracksExpanded ? "Hide track meters" : "Show track meters";
+    btn.setAttribute("aria-expanded", meterState.tracksExpanded ? "true" : "false");
+  }
+  if (meterState.tracksExpanded) {
+    for (const id of meterState.trackIds) {
+      meterState.lastLit[id] = -1;
+      meterState.lastHold[id] = -1;
+    }
+  }
+}
+function toggleMeterTracksExpanded(ev) {
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+  meterState.tracksExpanded = !meterState.tracksExpanded;
+  try { localStorage.setItem("fablecut-meter-tracks-expanded", meterState.tracksExpanded ? "1" : "0"); } catch {}
+  syncMeterTracksExpandedUI();
+}
 async function installMeterWorklet(audio) {
-  if (audio.meterReady || !audio.ctx.audioWorklet || meterState._loading) return;
+  if (audio.meterReady || !audio.ctx.audioWorklet) return;
+  if (meterState._loading) {
+    meterState._reloadMeter = true; // sync tore down mid-install — retry in finally
+    return;
+  }
   meterState._loading = true;
+  meterState._reloadMeter = false;
   const trackIds = audio.audioTrackIds.slice();
   const nAudio = trackIds.length;
   const nInputs = Math.max(1, nAudio + 1); // +1 = video/other spill on master
+  let meter = null;
   try {
-    await audio.ctx.audioWorklet.addModule("meter-worklet.js?v=3");
-    const meter = new AudioWorkletNode(audio.ctx, "fablecut-meter", {
+    await audio.ctx.audioWorklet.addModule("meter-worklet.js?v=7");
+    // Aborted by syncAudioGraphTracks while we were loading — retry fresh.
+    if (meterState._reloadMeter) return;
+    meter = new AudioWorkletNode(audio.ctx, "fablecut-meter", {
       numberOfInputs: nInputs,
       numberOfOutputs: 1,
       outputChannelCount: [2],
       channelCount: 2,
       channelCountMode: "explicit",
+      channelInterpretation: "discrete",
       processorOptions: { hopBlocks: 8, nTracks: nInputs, nAudioTracks: nAudio, trackIds },
     });
     meter.port.onmessage = (ev) => {
       const msg = ev.data;
       if (!msg || msg.type !== "meter") return;
-      const ids = msg.trackIds || trackIds;
-      for (let i = 0; i < ids.length; i++) {
-        const id = ids[i];
+      for (let i = 0; i < nAudio; i++) {
+        const id = trackIds[i];
+        if (!id) continue;
         meterState.rms[id] = msg.rms[i] || 0;
         meterState.peak[id] = msg.peak[i] || 0;
         meterState.lufs[id] = msg.lufs[i] != null ? msg.lufs[i] : -70;
       }
-      if (msg.master) {
-        const m = msg.master;
-        meterState.master.rmsL = m.rmsL || 0;
-        meterState.master.rmsR = m.rmsR || 0;
-        meterState.master.peakL = m.peakL || 0;
-        meterState.master.peakR = m.peakR || 0;
-        meterState.master.lufs = m.lufs != null ? m.lufs : -70;
-      }
     };
 
-    // Full mix: A-buses + master spill → meter → speakers/rec (single summed path)
-    for (const id of trackIds) {
-      const bus = audio.trackBus[id];
+    // Connect outputs first so a wiring error never leaves the graph silent.
+    meter.connect(audio.ctx.destination);
+    meter.connect(audio.recDest);
+
+    // Full mix: A-buses + master spill → meter (single summed path).
+    for (let i = 0; i < trackIds.length; i++) {
+      const bus = audio.trackBus[trackIds[i]];
+      if (!bus) continue;
       try { bus.disconnect(); } catch {}
-      bus.connect(meter, 0, trackIds.indexOf(id));
+      bus.connect(meter, 0, i);
     }
     try { audio.master.disconnect(audio.ctx.destination); } catch {}
     try { audio.master.disconnect(audio.recDest); } catch {}
     audio.master.connect(meter, 0, nAudio);
-    meter.connect(audio.ctx.destination);
-    meter.connect(audio.recDest);
+
+    installMasterAnalysers(audio, meter);
 
     audio.meter = meter;
+    meter = null; // ownership transferred — catch must not tear down live node
     audio.meterReady = true;
     meterState.trackIds = trackIds;
     for (const id of trackIds) {
@@ -4002,8 +4095,26 @@ async function installMeterWorklet(audio) {
     buildMeterDOM();
   } catch (err) {
     console.warn("[FableCut] meter worklet unavailable:", err);
+    if (meter) {
+      try { meter.port.onmessage = null; } catch {}
+      try { meter.disconnect(); } catch {}
+    }
+    // Buses were disconnected above — restore direct master path.
+    for (const id of trackIds) {
+      const bus = audio.trackBus[id];
+      if (!bus) continue;
+      try { bus.disconnect(); } catch {}
+      try { bus.connect(audio.master); } catch {}
+    }
+    try { audio.master.disconnect(); } catch {}
+    try { audio.master.connect(audio.ctx.destination); } catch {}
+    try { audio.master.connect(audio.recDest); } catch {}
   } finally {
     meterState._loading = false;
+    if (meterState._reloadMeter && !audio.meterReady) {
+      meterState._reloadMeter = false;
+      installMeterWorklet(audio).catch(() => {});
+    }
   }
 }
 function buildMeterDOM() {
@@ -4011,31 +4122,13 @@ function buildMeterDOM() {
   if (!root) return;
   const tracks = audioMeterTracks();
   root.innerHTML = "";
-  root.title = `Mode: ${METER_MODE_LABEL[meterState.mode]} — click to switch`;
-
-  const modeBtn = document.createElement("button");
-  modeBtn.type = "button";
-  modeBtn.className = "vu-mode";
-  modeBtn.textContent = METER_MODE_LABEL[meterState.mode];
-  modeBtn.title = "Cycle RMS → LUFS → Peak";
-  modeBtn.addEventListener("click", cycleMeterMode);
-  root.appendChild(modeBtn);
-  meterState.modeBtn = modeBtn;
+  root.classList.toggle("vu-tracks-open", meterState.tracksExpanded);
 
   const row = document.createElement("div");
   row.className = "vu-channels";
 
-  const scale = document.createElement("div");
-  scale.className = "vu-scale";
-  const span = METER_DB_MAX - METER_DB_MIN;
-  for (const db of METER_DB_MARKS) {
-    const tick = document.createElement("span");
-    tick.className = "vu-scale-tick";
-    tick.textContent = db === 0 ? "0" : String(db);
-    tick.style.top = ((METER_DB_MAX - db) / span * 100) + "%";
-    scale.appendChild(tick);
-  }
-  row.appendChild(scale);
+  const tracksWrap = document.createElement("div");
+  tracksWrap.className = "vu-tracks-wrap";
 
   meterState.segs = {};
   meterState.lastLit = {};
@@ -4064,8 +4157,45 @@ function buildMeterDOM() {
     label.textContent = t.id;
     col.appendChild(segsCv);
     col.appendChild(label);
-    row.appendChild(col);
+    tracksWrap.appendChild(col);
   }
+  row.appendChild(tracksWrap);
+
+  const scaleMaster = document.createElement("div");
+  scaleMaster.className = "vu-scale-master";
+
+  const scale = document.createElement("div");
+  scale.className = "vu-scale";
+  for (const db of METER_DB_MARKS) {
+    const tick = document.createElement("span");
+    tick.className = "vu-scale-tick";
+    tick.textContent = db === 0 ? "0" : String(db);
+    tick.style.top = meterMarkTopPct(db) + "%";
+    scale.appendChild(tick);
+  }
+
+  const masterStack = document.createElement("div");
+  masterStack.className = "vu-master-stack";
+
+  if (tracks.length) {
+    const tracksBtn = document.createElement("button");
+    tracksBtn.type = "button";
+    tracksBtn.className = "vu-tracks-toggle";
+    tracksBtn.addEventListener("click", toggleMeterTracksExpanded);
+    masterStack.appendChild(tracksBtn);
+    meterState.tracksToggleBtn = tracksBtn;
+  } else {
+    meterState.tracksToggleBtn = null;
+  }
+
+  const modeBtn = document.createElement("button");
+  modeBtn.type = "button";
+  modeBtn.className = "vu-mode";
+  modeBtn.textContent = METER_MODE_LABEL[meterState.mode];
+  modeBtn.title = "Cycle RMS → LUFS → Peak";
+  modeBtn.addEventListener("click", cycleMeterMode);
+  masterStack.appendChild(modeBtn);
+  meterState.modeBtn = modeBtn;
 
   const masterWrap = document.createElement("div");
   masterWrap.className = "vu-master";
@@ -4086,8 +4216,13 @@ function buildMeterDOM() {
     col.appendChild(label);
     masterWrap.appendChild(col);
   }
-  row.appendChild(masterWrap);
+  masterStack.appendChild(masterWrap);
+  scaleMaster.appendChild(masterStack);
+  scaleMaster.appendChild(scale);
+  row.appendChild(scaleMaster);
+  if (!tracks.length) masterStack.classList.add("vu-master-only");
   root.appendChild(row);
+  syncMeterTracksExpandedUI();
 }
 function rmsToDb(rms) {
   return rms > 1e-8 ? 20 * Math.log10(rms) : METER_DB_MIN;
@@ -4099,8 +4234,8 @@ function meterReadingDb(id) {
     const isL = id === MASTER_METER_L;
     if (mode === "peak") return rmsToDb(isL ? m.peakL : m.peakR);
     if (mode === "lufs") {
-      const v = m.lufs;
-      return v == null || v < METER_DB_MIN ? METER_DB_MIN : Math.min(METER_DB_MAX, v);
+      // Per-channel level for stereo master bars (worklet stereo LUFS is one combined value).
+      return rmsToDb(isL ? m.rmsL : m.rmsR);
     }
     return rmsToDb(isL ? m.rmsL : m.rmsR);
   }
@@ -4148,6 +4283,8 @@ function updateMeterChannel(id, target, dt, attack, release, now) {
 
   const segs = meterState.segs[id];
   if (!segs) return;
+  const isMaster = id === MASTER_METER_L || id === MASTER_METER_R;
+  if (!isMaster && !meterState.tracksExpanded) return;
   const level = (next - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN);
   const lit = Math.round(clamp(level, 0, 1) * METER_SEGS);
   const hold = Math.round(clamp(
@@ -4159,8 +4296,8 @@ function updateMeterChannel(id, target, dt, attack, release, now) {
   paintMeterSegs(segs, lit, hold);
 }
 function updateMeterUI(dt) {
-  const ids = meterState.trackIds;
   const metering = (state.playing || state.audioHold) && runtime.audio?.meterReady;
+  if (metering) sampleMasterAnalysers();
   const mode = meterState.mode;
   // Peak: snappy; LUFS already smoothed in-worklet (400 ms); RMS: classic VU feel
   const atkMs = mode === "peak" ? 0.005 : mode === "lufs" ? 0.04 : 0.015;
@@ -4169,7 +4306,7 @@ function updateMeterUI(dt) {
   const release = 1 - Math.exp(-dt / relMs);
   const now = performance.now();
   const floor = METER_DB_MIN;
-  for (const id of [...ids, ...MASTER_METER_IDS]) {
+  for (const id of [...meterState.trackIds, ...MASTER_METER_IDS]) {
     const target = metering ? meterReadingDb(id) : floor;
     updateMeterChannel(id, target, dt, attack, release, now);
   }
@@ -4277,12 +4414,12 @@ function refreshAudioHold() {
       src.loop = true;
       const g = audio.ctx.createGain();
       g.gain.value = vol;
-      const panner = audio.ctx.createStereoPanner();
-      panner.pan.value = clipPan(p.pan);
-      g.connect(panner);
       const ch = c.props?.audioChannel;
       const nCh = Math.max(buf.numberOfChannels, Number.isInteger(ch) ? ch + 1 : 0, 2);
       const { split } = connectChannelIsolated(audio.ctx, src, g, ch, nCh);
+      const panner = audio.ctx.createStereoPanner();
+      panner.pan.value = clipPan(p.pan);
+      g.connect(panner);
       const bus = audio.trackBus[c.track] || audio.master;
       panner.connect(bus);
       const node = { src, gain: g, panner, split };
