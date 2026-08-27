@@ -57,6 +57,12 @@ same time.
   `localStorage`. Enable **Link timeline and Project bin selection** so picking a
   timeline clip highlights its media in Project, and clicking a Project item
   selects every timeline clip that uses it (off by default).
+- Video + audio tracks (default 3+4), drag/trim/split/snap, undo/redo
+  - **+V** / **+A** in the track header add a video or audio lane (up to 16 each)
+  - Right-click an empty track header → **Remove track** (disabled if the lane
+    has clips, or if it would leave you with zero video/audio tracks)
+  - Track header **S** solos that lane (mutes all others); click again to restore
+    the previous mute state. Using the mute toggle while soloed exits solo.
 - **Direct manipulation on the monitor** — click a clip or title on the preview to
   move, resize (corner handles), or rotate (top handle, Shift-snap) it directly
 - **Timeline multi-select** — rubber-band marquee (drag on empty track area),
