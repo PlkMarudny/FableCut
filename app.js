@@ -7,21 +7,31 @@
 "use strict";
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
-const TRACKS = [
-  { id: "V3", kind: "video", h: 44, color: "#ffd166" },
-  { id: "V2", kind: "video", h: 58, color: "#7b6cff" },
-  { id: "V1", kind: "video", h: 58, color: "#4f8cff" },
-  { id: "A1", kind: "audio", h: 42, color: "#7ec249" },
-  { id: "A2", kind: "audio", h: 42, color: "#5a9e3a" },
-  { id: "A3", kind: "audio", h: 42, color: "#4a8a2f" },
-  { id: "A4", kind: "audio", h: 42, color: "#3a7226" },
+const VIDEO_TRACK_COLORS = ["#4f8cff", "#7b6cff", "#ffd166", "#ff6b9d", "#45d9c2", "#f4a261", "#e76f51", "#a8dadc"];
+const AUDIO_TRACK_COLORS = ["#7ec249", "#5a9e3a", "#4a8a2f", "#3a7226", "#2d5a1e", "#8fbc5a", "#6b9e3a", "#4d7a28"];
+const MAX_TRACKS_PER_KIND = 16;
+const DEFAULT_TRACK_DEFS = [
+  { id: "V3", kind: "video" },
+  { id: "V2", kind: "video" },
+  { id: "V1", kind: "video" },
+  { id: "A1", kind: "audio" },
+  { id: "A2", kind: "audio" },
+  { id: "A3", kind: "audio" },
+  { id: "A4", kind: "audio" },
 ];
+function makeTrack(id, kind) {
+  const n = Math.max(1, parseInt(String(id).slice(1), 10) || 1);
+  const colors = kind === "audio" ? AUDIO_TRACK_COLORS : VIDEO_TRACK_COLORS;
+  return { id, kind, h: kind === "audio" ? 42 : 58, color: colors[(n - 1) % colors.length] };
+}
+/** Live track list (top→bottom). Mutated by +V/+A; rebuilt from project.tracks on load. */
+let TRACKS = DEFAULT_TRACK_DEFS.map((d) => makeTrack(d.id, d.kind));
 /* Three timeline density presets. L matches the original track heights (with thumbs).
    S is compact solid-color rows; M is in between. */
 const TRACK_SIZE_PRESETS = {
-  s: { thumbs: false, h: { V3: 26, V2: 26, V1: 26, A1: 22, A2: 22, A3: 22, A4: 22 } },
-  m: { thumbs: true, h: { V3: 36, V2: 44, V1: 44, A1: 32, A2: 32, A3: 32, A4: 32 } },
-  l: { thumbs: true, h: { V3: 44, V2: 58, V1: 58, A1: 42, A2: 42, A3: 42, A4: 42 } },
+  s: { thumbs: false, hVideo: 26, hAudio: 22 },
+  m: { thumbs: true, hVideo: 44, hAudio: 32 },
+  l: { thumbs: true, hVideo: 58, hAudio: 42 },
 };
 // Generous cap on how many audio tracks can be auto-added for a multi-channel
 // source (e.g. 7.1 surround = 8 channels) — see ensureAudioTrackCount().
@@ -135,62 +145,101 @@ const ASPECT_PRESETS = [
 const FPS_PRESETS = [24, 25, 30, 50, 60];
 const WAVE_PEAKS_PER_SEC = 50;
 const TRACK_IDS = new Set(TRACKS.map((t) => t.id));
-// Audio lanes available for a video's per-channel linked audio (index = props.audioChannel).
-// Starts as the 4 built-in tracks; ensureAudioTrackCount() grows both this and
-// TRACKS/TRACK_IDS at runtime for sources with more channels (5.1, 7.1, …).
-const AUDIO_TRACK_IDS = TRACKS.filter((t) => t.kind === "audio").map((t) => t.id);
-/* Add A5, A6, … until there are `need` audio tracks (capped at
-   MAX_AUDIO_TRACKS), so multi-channel sources beyond stereo/quad (5.1, 7.1…)
-   each get their own linked audio track. Returns how many were added. */
+function syncTrackIds() {
+  TRACK_IDS.clear();
+  for (const t of TRACKS) TRACK_IDS.add(t.id);
+}
+function serializeTracks() {
+  return TRACKS.map(({ id, kind }) => ({ id, kind }));
+}
+function sortTracksInPlace() {
+  const vids = TRACKS.filter((t) => t.kind === "video")
+    .sort((a, b) => (parseInt(b.id.slice(1), 10) || 0) - (parseInt(a.id.slice(1), 10) || 0));
+  const auds = TRACKS.filter((t) => t.kind === "audio")
+    .sort((a, b) => (parseInt(a.id.slice(1), 10) || 0) - (parseInt(b.id.slice(1), 10) || 0));
+  TRACKS.length = 0;
+  TRACKS.push(...vids, ...auds);
+  syncTrackIds();
+}
+function applyTracksFromProject(defs) {
+  const list = Array.isArray(defs) && defs.length
+    ? defs.filter((d) => d && d.id && (d.kind === "video" || d.kind === "audio"))
+    : DEFAULT_TRACK_DEFS;
+  TRACKS.length = 0;
+  for (const d of list) TRACKS.push(makeTrack(d.id, d.kind === "audio" ? "audio" : "video"));
+  sortTracksInPlace();
+  applyTrackHeights();
+}
+/** Ensure every clip.track exists (agents may reference V4+ before the UI adds it). */
+function ensureTracksCoverClips() {
+  let added = false;
+  for (const c of project.clips) {
+    if (!c.track || TRACK_IDS.has(c.track)) continue;
+    const kind = c.kind === "audio" || /^A\d+$/i.test(c.track) ? "audio" : "video";
+    TRACKS.push(makeTrack(c.track, kind));
+    added = true;
+  }
+  if (added) {
+    sortTracksInPlace();
+    applyTrackHeights();
+  }
+}
+function audioTrackIds() {
+  return TRACKS.filter((t) => t.kind === "audio").map((t) => t.id);
+}
+function nextTrackId(kind) {
+  const prefix = kind === "audio" ? "A" : "V";
+  let max = 0;
+  for (const t of TRACKS) {
+    if (t.kind !== kind) continue;
+    const n = parseInt(t.id.slice(1), 10);
+    if (n > max) max = n;
+  }
+  return prefix + (max + 1);
+}
+function addTimelineTrack(kind) {
+  const existing = TRACKS.filter((t) => t.kind === kind).length;
+  if (existing >= MAX_TRACKS_PER_KIND) {
+    toast(`Maximum ${MAX_TRACKS_PER_KIND} ${kind} tracks`);
+    return null;
+  }
+  const id = nextTrackId(kind);
+  const t = makeTrack(id, kind);
+  TRACKS.push(t);
+  sortTracksInPlace();
+  applyTrackHeights();
+  project.tracks = serializeTracks();
+  if (kind === "audio") syncAudioGraphTracks();
+  buildTrackDOM();
+  syncAllTrackDisabledUI();
+  state.dirtyTimeline = true;
+  rebuildClips();
+  const h = setTimelineHeight(Math.max(
+    $("timelinePanel")?.getBoundingClientRect().height || 0,
+    defaultTimelineHeight()
+  ));
+  localStorage.setItem(TL_H_KEY, String(h));
+  scheduleSave();
+  return t;
+}
+/* Add A5, A6, … until there are `need` audio tracks (capped at MAX_AUDIO_TRACKS),
+   so multi-channel sources beyond stereo/quad (5.1, 7.1…) each get their own
+   linked audio track. Returns how many were added. */
 function ensureAudioTrackCount(need) {
   need = Math.min(need, MAX_AUDIO_TRACKS);
-  const palette = ["#7ec249", "#5a9e3a", "#4a8a2f", "#3a7226"];
-  const newIds = [];
-  while (AUDIO_TRACK_IDS.length < need) {
-    const n = AUDIO_TRACK_IDS.length + 1;
-    const id = "A" + n;
-    const preset = TRACK_SIZE_PRESETS[state.trackSize] || TRACK_SIZE_PRESETS.l;
-    TRACKS.push({ id, kind: "audio", h: preset.h.A1 || 42, color: palette[(n - 1) % palette.length] });
-    TRACK_IDS.add(id);
-    AUDIO_TRACK_IDS.push(id);
-    newIds.push(id);
+  let added = 0;
+  while (audioTrackIds().length < need) {
+    TRACKS.push(makeTrack(nextTrackId("audio"), "audio"));
+    added++;
   }
-  if (newIds.length) {
+  if (added) {
+    sortTracksInPlace();
+    applyTrackHeights();
+    project.tracks = serializeTracks();
     buildTrackDOM();
-    if (runtime.audio) addLiveAudioTrackBuses(newIds);
+    if (runtime.audio) syncAudioGraphTracks();
   }
-  return newIds.length;
-}
-/* Wire newly-added tracks into an already-running audio graph (playback may
-   have started before a multi-channel replace/add grew the track set). All
-   buses are created up front, then the meter is reinstalled at most once —
-   its AudioWorkletNode input count is fixed at creation, so adding several
-   tracks in one go (e.g. 4 new lanes for a 7.1 source) must snapshot the
-   full updated track list before rebuilding it, not one track at a time. */
-function addLiveAudioTrackBuses(ids) {
-  const audio = runtime.audio;
-  if (!audio) return;
-  for (const id of ids) {
-    if (audio.trackBus[id]) continue;
-    audio.trackBus[id] = audio.ctx.createGain();
-    audio.audioTrackIds.push(id);
-  }
-  if (!audio.meterReady) {
-    for (const id of ids) audio.trackBus[id]?.connect(audio.master);
-    return;
-  }
-  // Feed every bus (old + new) through master directly before tearing down
-  // the old meter — if the rebuild below fails, all tracks stay audible via
-  // this fallback instead of feeding an orphaned, disconnected meter node.
-  for (const id of Object.keys(audio.trackBus)) {
-    try { audio.trackBus[id].disconnect(); } catch {}
-    audio.trackBus[id].connect(audio.master);
-  }
-  try { audio.meter.port.onmessage = null; } catch {}
-  try { audio.meter.disconnect(); } catch {}
-  audio.meter = null;
-  audio.meterReady = false;
-  installMeterWorklet(audio).catch(() => {});
+  return added;
 }
 
 /* ── User settings (localStorage; optional behavior toggles) ── */
@@ -236,7 +285,8 @@ const project = {
   markers: [], // {t, label?} — beat/cue markers on the ruler; snap targets
   inPoint: null,  // timeline work-area IN (seconds), or null
   outPoint: null, // timeline work-area OUT (seconds), or null
-  disabledTracks: [], // track ids (V4…A3) hidden from preview/export when listed
+  disabledTracks: [], // track ids omitted from preview/export when listed
+  tracks: null, // optional [{id, kind}] — null means default V3…V1 + A1…A4
 };
 const state = {
   time: 0, playing: false, pps: 60, snap: true,
@@ -579,7 +629,6 @@ function startFolderRename(folderId) {
 }
 function applyProject(data) {
   const wa = normalizeWorkArea(data.inPoint, data.outPoint);
-  const disabledTracks = normalizeDisabledTracks(data.disabledTracks);
   Object.assign(project, {
     name: data.name || "Untitled Project",
     width: data.width || 1280, height: data.height || 720, fps: data.fps || 30,
@@ -591,8 +640,14 @@ function applyProject(data) {
     markers: (data.markers || []).filter((m) => m && isFinite(m.t)).sort((a, b) => a.t - b.t),
     inPoint: wa.inPoint,
     outPoint: wa.outPoint,
-    disabledTracks,
+    disabledTracks: [],
+    tracks: null,
   });
+  applyTracksFromProject(data.tracks);
+  ensureTracksCoverClips();
+  project.tracks = serializeTracks();
+  const disabledTracks = normalizeDisabledTracks(data.disabledTracks);
+  project.disabledTracks = disabledTracks;
   const folderIds = new Set(project.folders.map((f) => f.id));
   for (const m of project.media) {
     if (m.folderId && !folderIds.has(m.folderId)) m.folderId = null;
@@ -604,15 +659,6 @@ function applyProject(data) {
       if (Array.isArray(arr)) arr.sort((a, b) => a.t - b.t);
     if (c.kind === "text") ensureFont(c.props.font);
   }
-  // TRACKS isn't persisted — any extra audio lanes (A5+, from a multi-channel
-  // source) only exist as clip.track references on disk. Recreate them so
-  // those clips don't silently vanish from the timeline on reload.
-  let maxAudioTrack = AUDIO_TRACK_IDS.length;
-  for (const c of project.clips) {
-    const am = /^A(\d+)$/.exec(c.track || "");
-    if (am) maxAudioTrack = Math.max(maxAudioTrack, +am[1]);
-  }
-  if (maxAudioTrack > AUDIO_TRACK_IDS.length) ensureAudioTrackCount(maxAudioTrack);
   // AV links aren't always on disk (older saves / agents) — rebuild from matching timing.
   relinkClips();
   // reset runtime playback elements so they rebuild against new data
@@ -620,10 +666,12 @@ function applyProject(data) {
   else stopAudioHoldNodes();
   for (const el of runtime.clipEls.values()) { try { el.pause(); el.src = ""; } catch { } }
   runtime.clipEls.clear(); runtime.clipGain.clear();
+  if (runtime.audio) syncAudioGraphTracks();
   els.preview.width = project.width; els.preview.height = project.height;
   syncAspectSel();
   syncFpsSel();
   pruneSelection(); // keep the selection across external reloads where possible
+  buildTrackDOM();
   state.dirtyTimeline = true;
   renderBin(); renderInspector();
   updateWorkArea();
@@ -654,6 +702,7 @@ function projectJSON() {
     name, width, height, fps, background, revision,
     folders: (folders || []).map(({ id, name, parentId, open }) =>
       ({ id, name, parentId: parentId || null, open: open !== false })),
+    tracks: serializeTracks(),
     media: media.filter((m) => !m.transient).map(({ id, name, kind, src, duration, width, height, folderId }) =>
       ({ id, name, kind, src, duration, width, height, folderId: folderId || null })),
     clips: clips.map(({ id, mediaId, kind, track, start, in: inn, duration, name, props, keyframes, transitionIn, transitionOut, linkedId, linkGroup }) => {
@@ -1298,19 +1347,20 @@ function audioChannelLong(ch) {
 /** How many linked A-track stems we can create for a media item. */
 function linkedAudioChannelCount(m) {
   const n = Math.max(1, m.channels | 0);
-  return Math.min(n, AUDIO_TRACK_IDS.length);
+  return Math.min(n, audioTrackIds().length);
 }
-/** Attach one audio clip per source channel (A1…A4), sharing the video's linkGroup. */
+/** Attach one audio clip per source channel (A1…An), sharing the video's linkGroup. */
 function attachLinkedAudioChannels(videoClip, m, nCh) {
   if (!videoClip?.linkGroup || !getClip(videoClip.id)) return [];
   const lg = videoClip.linkGroup;
   // Drop any prior stems for this group (e.g. stereo placeholder → 3.0 upgrade).
   project.clips = project.clips.filter((x) => !(x.linkGroup === lg && x.kind === "audio"));
-  const n = Math.min(Math.max(1, nCh | 0), AUDIO_TRACK_IDS.length);
+  const ids = audioTrackIds();
+  const n = Math.min(Math.max(1, nCh | 0), ids.length);
   const out = [];
   for (let ch = 0; ch < n; ch++) {
     const a = {
-      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: AUDIO_TRACK_IDS[ch],
+      id: "c_" + uid(), mediaId: m.id, kind: "audio", track: ids[ch],
       start: videoClip.start, in: videoClip.in, duration: videoClip.duration,
       name: videoClip.name,
       props: { ...DEFAULT_PROPS, audioChannel: ch },
@@ -1352,7 +1402,7 @@ function addClipFromMedia(m, trackId, at) {
     props: { ...DEFAULT_PROPS },
   };
   project.clips.push(c);
-  // Video+audio: picture on a V track; one linked stem per source channel on A1…A4.
+  // Video+audio: picture on a V track; one linked stem per source channel on A-tracks.
   // Mute the video clip so audio isn't doubled.
   if (kind === "video") {
     c.props.volume = 0;
@@ -1405,10 +1455,11 @@ async function reconcileAudioChannels(videoClip) {
   const live = getClip(videoClip.id);
   if (!live || live.mediaId !== mediaId) return; // superseded by a newer add/replace
   const lg = live.linkGroup;
-  const tracksBefore = AUDIO_TRACK_IDS.length;
+  const tracksBefore = audioTrackIds().length;
   if (chCount > tracksBefore) ensureAudioTrackCount(chCount);
-  const newTracks = AUDIO_TRACK_IDS.length - tracksBefore;
-  const wantCh = Math.min(chCount, AUDIO_TRACK_IDS.length);
+  const ids = audioTrackIds();
+  const newTracks = ids.length - tracksBefore;
+  const wantCh = Math.min(chCount, ids.length);
   const have = project.clips.filter((c) => c.linkGroup === lg && c.kind === "audio");
   let added = 0, removed = 0;
   for (const c of have) {
@@ -1421,7 +1472,7 @@ async function reconcileAudioChannels(videoClip) {
   for (let ch = 0; ch < wantCh; ch++) {
     if (have.some((c) => c.props?.audioChannel === ch)) continue;
     project.clips.push({
-      id: "c_" + uid(), mediaId, kind: "audio", track: AUDIO_TRACK_IDS[ch],
+      id: "c_" + uid(), mediaId, kind: "audio", track: ids[ch],
       start: live.start, in: live.in, duration: live.duration, name: live.name,
       props: { ...DEFAULT_PROPS, audioChannel: ch },
       linkGroup: lg,
@@ -1431,7 +1482,7 @@ async function reconcileAudioChannels(videoClip) {
   if (!added && !removed) return;
   state.dirtyTimeline = true;
   scheduleSave(); renderInspector();
-  if (chCount > AUDIO_TRACK_IDS.length)
+  if (chCount > ids.length)
     toast(`${m.name}: ${chCount} audio channels, only ${MAX_AUDIO_TRACKS} tracks supported — extra channel(s) dropped`);
   else if (added)
     toast(newTracks
@@ -2033,11 +2084,14 @@ function trackToggleIcon(kind) {
     `</svg>`;
 }
 function buildTrackDOM() {
-  els.trackHeaders.innerHTML = "";
+  let inner = $("trackHeadInner");
+  if (!inner) {
+    inner = document.createElement("div");
+    inner.id = "trackHeadInner";
+    els.trackHeaders.appendChild(inner);
+  }
+  inner.innerHTML = "";
   els.tracks.innerHTML = "";
-  const inner = document.createElement("div");
-  inner.id = "trackHeadInner";
-  els.trackHeaders.appendChild(inner);
   for (const t of TRACKS) {
     const on = isTrackEnabled(t.id);
     const h = document.createElement("div");
@@ -2865,6 +2919,8 @@ function zoomToRange(t0, t1) {
 }
 els.zoomSlider.addEventListener("input", () => setZoom(+els.zoomSlider.value));
 $("btnZoomFit").addEventListener("click", zoomToFit);
+$("btnAddV").addEventListener("click", () => addTimelineTrack("video"));
+$("btnAddA").addEventListener("click", () => addTimelineTrack("audio"));
 els.timelineScroll.addEventListener("wheel", (e) => {
   if (e.ctrlKey || e.metaKey) {
     e.preventDefault();
@@ -3452,10 +3508,10 @@ function ensureAudio() {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const master = ctx.createGain();
   const recDest = ctx.createMediaStreamDestination();
-  const audioTracks = TRACKS.filter((t) => t.kind === "audio");
+  const ids = audioTrackIds();
   const trackBus = {};
-  for (const t of audioTracks) {
-    trackBus[t.id] = ctx.createGain();
+  for (const id of ids) {
+    trackBus[id] = ctx.createGain();
   }
   // Until the worklet is ready, audio-track buses and master both feed speakers.
   master.connect(ctx.destination);
@@ -3465,7 +3521,7 @@ function ensureAudio() {
   }
   runtime.audio = {
     ctx, master, recDest, trackBus,
-    audioTrackIds: audioTracks.map((t) => t.id),
+    audioTrackIds: ids.slice(),
     meter: null, meterReady: false,
   };
   installMeterWorklet(runtime.audio).catch(() => {});
@@ -3487,6 +3543,38 @@ function connectChannelIsolated(ctx, src, g, ch, nCh) {
   }
   src.connect(g);
   return { out: g, split: null, merge: null };
+}
+/** Create missing A-track buses and rebuild the meter when the track list changes. */
+function syncAudioGraphTracks() {
+  const audio = runtime.audio;
+  if (!audio) return;
+  const ids = audioTrackIds();
+  for (const id of ids) {
+    if (!audio.trackBus[id]) {
+      const g = audio.ctx.createGain();
+      audio.trackBus[id] = g;
+      g.connect(audio.master);
+    }
+  }
+  audio.audioTrackIds = ids.slice();
+  // Tear down meter so installMeterWorklet can rebuild with the new input count.
+  if (audio.meter) {
+    try { audio.meter.disconnect(); } catch { }
+    for (const id of Object.keys(audio.trackBus)) {
+      try { audio.trackBus[id].disconnect(); } catch { }
+      if (ids.includes(id)) audio.trackBus[id].connect(audio.master);
+    }
+    try { audio.master.disconnect(); } catch { }
+    audio.master.connect(audio.ctx.destination);
+    audio.master.connect(audio.recDest);
+    audio.meter = null;
+    audio.meterReady = false;
+  }
+  installMeterWorklet(audio).catch(() => {});
+  // Re-route clip gains onto (possibly new) buses
+  for (const c of project.clips) {
+    if (c.kind === "audio" || c.kind === "video") routeClipGain(c);
+  }
 }
 function hookAudio(c, el) {
   if (!runtime.audio || runtime.clipGain.has(c.id)) return;
@@ -5987,10 +6075,7 @@ function syncTrackSizeButtons() {
 function applyTrackHeights() {
   const preset = TRACK_SIZE_PRESETS[state.trackSize] || TRACK_SIZE_PRESETS.l;
   for (const t of TRACKS) {
-    // tracks beyond the static set (e.g. A5+, auto-added for >4-channel audio)
-    // aren't named in the preset map — size them like the first track of their kind.
-    const h = preset.h[t.id] ?? preset.h[t.kind === "audio" ? "A1" : "V1"];
-    if (h != null) t.h = h;
+    t.h = t.kind === "audio" ? preset.hAudio : preset.hVideo;
   }
 }
 /* Switch S/M/L track density, rebuild the timeline, and grow/shrink the pane
