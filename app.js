@@ -1470,11 +1470,6 @@ function defaultPanForChannel(ch) {
   return 0;
 }
 function clipPan(v) { return clamp(+v || 0, -1, 1); }
-/** How many linked A-track stems we can create for a media item. */
-function linkedAudioChannelCount(m) {
-  const n = Math.max(1, m.channels | 0);
-  return Math.min(n, audioTrackIds().length);
-}
 /** Grow A-tracks to at least `need` (capped at MAX_TRACKS_PER_KIND). Returns how many were added. */
 function ensureAudioTrackCount(need) {
   need = Math.min(Math.max(0, need | 0), MAX_TRACKS_PER_KIND);
@@ -1555,31 +1550,21 @@ function addClipFromMedia(m, trackId, at) {
   };
   project.clips.push(c);
   // Video+audio: picture on a V track; one linked stem per source channel on A-tracks.
-  // Mute the video clip so audio isn't doubled.
+  // Mute the video clip so audio isn't doubled. If channel count isn't known yet,
+  // plant a stereo placeholder now (so the drop isn't picture-only, and so the
+  // next pushUndo snapshot includes the AV link); reconcileAudioChannels upgrades
+  // or trims once decodeAudioData reports the real count.
   if (kind === "video") {
     c.props.volume = 0;
     c.linkGroup = "lg_" + uid();
-    const finish = (nCh) => {
-      if (!getClip(c.id) || !c.linkGroup) return;
-      m.channels = nCh;
-      const want = Math.min(Math.max(1, nCh | 0), MAX_TRACKS_PER_KIND);
-      const added = ensureAudioTrackCount(want);
-      if (added) {
-        toast(added === 1
-          ? `Added an audio track for ${nCh}-channel audio`
-          : `Added ${added} audio tracks for ${nCh}-channel audio`);
-      }
-      attachLinkedAudioChannels(c, m, linkedAudioChannelCount(m));
-      state.dirtyTimeline = true;
-      scheduleSave();
-      renderInspector();
-    };
-    if (m.channels > 0) {
-      finish(m.channels);
-    } else {
-      getAudioBuffer(m).then((buf) => finish(buf.numberOfChannels))
-        .catch(() => finish(2)); // unknown → stereo fallback
+    const nCh = m.channels > 0 ? m.channels : 2;
+    const added = ensureAudioTrackCount(Math.min(nCh, MAX_TRACKS_PER_KIND));
+    if (added) {
+      toast(added === 1
+        ? `Added an audio track for ${nCh}-channel audio`
+        : `Added ${added} audio tracks for ${nCh}-channel audio`);
     }
+    attachLinkedAudioChannels(c, m, nCh);
     ensureWave(m);
     reconcileAudioChannels(c);
   }
