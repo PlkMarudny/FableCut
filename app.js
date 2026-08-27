@@ -48,7 +48,7 @@ const TIMELINE_PAD_SEC = 15; // trailing empty seconds in the scrollable content
 const TIMELINE_FIT_FILL = 0.95; // ⇧Z / Fit — clip content fills this fraction of the viewport
 
 const DEFAULT_PROPS = {
-  x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, volume: 1,
+  x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, volume: 1, pan: 0,
   speed: 1,                                    // playback rate (video/audio)
   brightness: 100, contrast: 100, saturation: 100, hue: 0,
   blur: 0, grayscale: 0, sepia: 0, invert: 0,
@@ -74,7 +74,7 @@ const DEFAULT_PROPS = {
   boxFit: false,                               // false = wrap at fixed fontSize; true = scale font to fit box
   vAlign: "middle",                            // top | middle | bottom — vertical align of the text block in the box
 };
-const ANIMATABLE = ["x", "y", "scale", "rotation", "opacity", "volume", "speed",
+const ANIMATABLE = ["x", "y", "scale", "rotation", "opacity", "volume", "pan", "speed",
   "brightness", "contrast", "saturation", "hue", "blur", "grayscale", "sepia", "invert",
   "temperature", "tint", "vignette", "cornerRadius", "shake", "rgbSplit", "grain",
   "fontSize", "letterSpacing", "glow"];
@@ -376,6 +376,7 @@ const project = {
   outPoint: null, // timeline work-area OUT (seconds), or null
   disabledTracks: [], // track ids omitted from preview/export when listed
   tracks: null, // optional [{id, kind}] — null means default V3…V1 + A1…A4
+  panSchema: 1, // 1 = pan-aware; gates one-time L/R stem migration on load
 };
 const state = {
   time: 0, playing: false, pps: 60, snap: true,
@@ -781,19 +782,30 @@ function applyProject(data) {
   state.disabledTracks = new Set(disabledTracks);
   state.soloId = null;
   state.soloRestore = null;
+  // One-shot migration for projects saved before props.pan existed. Gated by
+  // panSchema so a later write that omits pan:0 (compact MCP / agent rebuild)
+  // does not re-hard-pan a deliberately centered stem.
+  const migratePan = !(data.panSchema >= 1);
   for (const c of project.clips) {
-    c.props = { ...DEFAULT_PROPS, ...(c.props || {}) };
+    const raw = c.props || {};
+    c.props = { ...DEFAULT_PROPS, ...raw };
+    if (migratePan && !Object.hasOwn(raw, "pan") && Number.isInteger(raw.audioChannel) && raw.audioChannel >= 0)
+      c.props.pan = defaultPanForChannel(raw.audioChannel);
     if (c.keyframes) for (const arr of Object.values(c.keyframes))
       if (Array.isArray(arr)) arr.sort((a, b) => a.t - b.t);
     if (c.kind === "text") ensureFont(c.props.font);
   }
+  project.panSchema = 1;
+  if (migratePan) scheduleSave(); // persist marker + migrated stem pans
   // AV links aren't always on disk (older saves / agents) — rebuild from matching timing.
   relinkClips();
   // reset runtime playback elements so they rebuild against new data
   if (state.audioHold) setAudioHold(false);
   else stopAudioHoldNodes();
-  for (const el of runtime.clipEls.values()) { try { el.pause(); el.src = ""; } catch { } }
-  runtime.clipEls.clear(); runtime.clipGain.clear();
+  // Tear down each clip's Web Audio chain (src→split→gain→panner→bus) before
+  // clearing the maps — otherwise nodes stay wired to live track buses and leak.
+  for (const id of new Set([...runtime.clipEls.keys(), ...runtime.clipGain.keys()]))
+    releaseClipEl(id);
   if (runtime.audio) syncAudioGraphTracks();
   els.preview.width = project.width; els.preview.height = project.height;
   syncAspectSel();
@@ -828,6 +840,7 @@ function projectJSON() {
   const { name, width, height, fps, background, revision, folders, media, clips, markers, inPoint, outPoint, disabledTracks } = project;
   return {
     name, width, height, fps, background, revision,
+    panSchema: 1,
     folders: (folders || []).map(({ id, name, parentId, open }) =>
       ({ id, name, parentId: parentId || null, open: open !== false })),
     tracks: serializeTracks(),
@@ -1472,6 +1485,13 @@ function audioChannelLong(ch) {
   if (!Number.isInteger(ch) || ch < 0) return null;
   return CHANNEL_LONG[ch] || `Channel ${ch + 1}`;
 }
+/** Default stereo pan for an isolated linked stem (L −1, R +1, else center). */
+function defaultPanForChannel(ch) {
+  if (ch === 0) return -1;
+  if (ch === 1) return 1;
+  return 0;
+}
+function clipPan(v) { return clamp(+v || 0, -1, 1); }
 /** How many linked A-track stems we can create for a media item. */
 function linkedAudioChannelCount(m) {
   const n = Math.max(1, m.channels | 0);
@@ -1522,7 +1542,7 @@ function attachLinkedAudioChannels(videoClip, m, nCh) {
       id: "c_" + uid(), mediaId: m.id, kind: "audio", track: ids[ch],
       start: videoClip.start, in: videoClip.in, duration: videoClip.duration,
       name: videoClip.name,
-      props: { ...DEFAULT_PROPS, audioChannel: ch },
+      props: { ...DEFAULT_PROPS, audioChannel: ch, pan: defaultPanForChannel(ch) },
       linkGroup: lg,
     };
     if (videoClip.props?.speed != null) a.props.speed = videoClip.props.speed;
@@ -1531,18 +1551,13 @@ function attachLinkedAudioChannels(videoClip, m, nCh) {
   }
   return out;
 }
-/** Wire a single source channel into the stereo bus: L→left, R→right, else→center. */
+/** Tap one source channel into a mono gain (pan places it in the stereo field). */
 function connectIsolatedChannel(ctx, srcNode, gainNode, ch, nCh) {
   const outputs = Math.max(2, nCh | 0, (ch | 0) + 1);
   const splitter = ctx.createChannelSplitter(outputs);
-  const merger = ctx.createChannelMerger(2);
   srcNode.connect(splitter);
   splitter.connect(gainNode, ch);
-  if (ch === 0) gainNode.connect(merger, 0, 0);
-  else if (ch === 1) gainNode.connect(merger, 0, 1);
-  else { gainNode.connect(merger, 0, 0); gainNode.connect(merger, 0, 1); }
   gainNode._fcSplit = splitter;
-  gainNode._fcOut = merger;
   gainNode._fcChannel = ch;
 }
 
@@ -1640,7 +1655,7 @@ async function reconcileAudioChannels(videoClip) {
     project.clips.push({
       id: "c_" + uid(), mediaId, kind: "audio", track: ids[ch],
       start: live.start, in: live.in, duration: live.duration, name: live.name,
-      props: { ...DEFAULT_PROPS, audioChannel: ch },
+      props: { ...DEFAULT_PROPS, audioChannel: ch, pan: defaultPanForChannel(ch) },
       linkGroup: lg,
     });
     added++;
@@ -3291,6 +3306,7 @@ function renderInspector(lite) {
     html += `<div class="insp-section"><h3>Audio / Time</h3>
       ${chLabel ? row("Channel", `<span style="opacity:.75">${chLabel}</span>`) : ""}
       ${slider("volume", 0, 2, 0.01, p.volume)}
+      ${slider("pan", -1, 1, 0.01, p.pan)}
       ${slider("speed", 0.25, 4, 0.05, p.speed, "×")}
     </div>`;
   }
@@ -3417,6 +3433,7 @@ function renderInspector(lite) {
       else { c.props[k] = v; if (k === "text") state.dirtyTimeline = true; }
       const valEl = els.inspector.querySelector(`[data-val="${k}"]`);
       if (valEl) valEl.textContent = input.value;
+      if (state.audioHold && (k === "volume" || k === "pan")) scheduleAudioHoldRefresh();
       scheduleSave();
     });
     input.addEventListener("focus", () => pushUndo(), { once: true });
@@ -3500,7 +3517,7 @@ function renderInspector(lite) {
 /* ── Keyframe graphs (program-monitor left gutter) ── */
 const KF_GRAPH_LABEL = {
   x: "Pos X", y: "Pos Y", scale: "Scale", rotation: "Rotation", opacity: "Opacity",
-  volume: "Volume", speed: "Speed", brightness: "Bright", contrast: "Contrast",
+  volume: "Volume", pan: "Pan", speed: "Speed", brightness: "Bright", contrast: "Contrast",
   saturation: "Sat", hue: "Hue", blur: "Blur", grayscale: "Gray", sepia: "Sepia",
   invert: "Invert", temperature: "Temp", tint: "Tint", vignette: "Vignette",
   cornerRadius: "Radius", shake: "Shake", rgbSplit: "RGB", grain: "Grain",
@@ -3679,9 +3696,14 @@ function releaseClipEl(id) {
   if (el) { try { el.pause(); el.src = ""; } catch { } runtime.clipEls.delete(id); }
   const g = runtime.clipGain.get(id);
   if (g) {
+    const out = g._fcOut || g;
+    try { out.disconnect(); } catch {}
+    out._fcBus = null;
+    if (g._fcPanner && g._fcPanner !== out) { try { g._fcPanner.disconnect(); } catch {} }
     try { g.disconnect(); } catch {}
-    if (g._fcOut) { try { g._fcOut.disconnect(); } catch {} }
     if (g._fcSplit) { try { g._fcSplit.disconnect(); } catch {} }
+    if (g._fcSrc) { try { g._fcSrc.disconnect(); } catch {} }
+    g._fcOut = g._fcPanner = g._fcSplit = g._fcSrc = null;
     runtime.clipGain.delete(id);
   }
 }
@@ -3713,18 +3735,31 @@ function ensureAudio() {
   }
   return runtime.audio;
 }
-/** Route `src -> g -> (channel-isolated ->) out` on `ctx`. When `ch` is set,
- * only that source channel is fed through `g` (L→left, R→right, else→center).
- * Returns the node to connect downstream plus split/merge nodes (null when
- * unused) so callers can track them for later disconnect/dispose. Shared by
- * hookAudio, refreshAudioHold and the offline export mixdown. */
+/** Route `src → gain → (optional channel split) → stereoPanner → bus`.
+ * When `ch` is set, only that source channel feeds the gain (mono); pan places
+ * it in the stereo field. Returns split node when used (for dispose). */
 function connectChannelIsolated(ctx, src, g, ch, nCh) {
   if (Number.isInteger(ch) && ch >= 0) {
     connectIsolatedChannel(ctx, src, g, ch, nCh);
-    return { out: g._fcOut, split: g._fcSplit, merge: g._fcOut };
+    return { split: g._fcSplit };
   }
   src.connect(g);
-  return { out: g, split: null, merge: null };
+  return { split: null };
+}
+/** Gain → StereoPanner; panner becomes `_fcOut` for routing.
+ * Falls back to gain-as-out when StereoPannerNode is unavailable. */
+function attachClipPanner(ctx, g) {
+  try {
+    const panner = ctx.createStereoPanner();
+    g.connect(panner);
+    g._fcPanner = panner;
+    g._fcOut = panner;
+    return panner;
+  } catch {
+    g._fcPanner = null;
+    g._fcOut = g;
+    return null;
+  }
 }
 /** Create missing A-track buses and rebuild the meter when the track list changes. */
 function syncAudioGraphTracks() {
@@ -3768,8 +3803,13 @@ function hookAudio(c, el) {
   if (c.kind !== "video" && c.kind !== "audio") return;
   try {
     const ctx = runtime.audio.ctx;
+    // createMediaElementSource irreversibly diverts element audio into the
+    // graph — register the gain first so releaseClipEl can always tear it down
+    // even if a later step throws.
     const src = ctx.createMediaElementSource(el);
     const g = ctx.createGain();
+    g._fcSrc = src;
+    runtime.clipGain.set(c.id, g);
     const ch = c.props?.audioChannel;
     if (Number.isInteger(ch) && ch >= 0) {
       const m = getMedia(c.mediaId);
@@ -3779,9 +3819,12 @@ function hookAudio(c, el) {
     } else {
       src.connect(g);
     }
-    runtime.clipGain.set(c.id, g);
+    attachClipPanner(ctx, g); // degrades to gain-as-out if StereoPanner fails
     routeClipGain(c);
-  } catch {}
+  } catch {
+    // Element source was created but graph setup failed — keep the map entry
+    // so a later releaseClipEl can disconnect whatever did get wired.
+  }
 }
 /** Reconnect a clip's gain to the correct track bus (or master for video tracks). */
 function routeClipGain(c) {
@@ -3791,6 +3834,7 @@ function routeClipGain(c) {
   const out = g._fcOut || g;
   if (out._fcBus === bus) return;
   try { out.disconnect(); } catch {}
+  out._fcBus = null;
   out.connect(bus);
   out._fcBus = bus;
 }
@@ -4090,8 +4134,8 @@ function disposeAudioHoldNode(n) {
   try { n.src.disconnect(); } catch { }
   try { if (n.src) n.src.buffer = null; } catch { }
   try { n.gain.disconnect(); } catch { }
+  if (n.panner) { try { n.panner.disconnect(); } catch { } }
   if (n.split) { try { n.split.disconnect(); } catch { } }
-  if (n.merge) { try { n.merge.disconnect(); } catch { } }
 }
 function stopAudioHoldNodes() {
   audioHoldGen++;
@@ -4156,12 +4200,15 @@ function refreshAudioHold() {
       src.loop = true;
       const g = audio.ctx.createGain();
       g.gain.value = vol;
+      const panner = audio.ctx.createStereoPanner();
+      panner.pan.value = clipPan(p.pan);
+      g.connect(panner);
       const ch = c.props?.audioChannel;
       const nCh = Math.max(buf.numberOfChannels, Number.isInteger(ch) ? ch + 1 : 0, 2);
-      const { out, split, merge } = connectChannelIsolated(audio.ctx, src, g, ch, nCh);
+      const { split } = connectChannelIsolated(audio.ctx, src, g, ch, nCh);
       const bus = audio.trackBus[c.track] || audio.master;
-      out.connect(bus);
-      const node = { src, gain: g, split, merge };
+      panner.connect(bus);
+      const node = { src, gain: g, panner, split };
       try { src.start(0); } catch { disposeAudioHoldNode(node); return; }
       // Re-check after start: a newer refresh/stop may have run while we built the graph.
       if (gen !== audioHoldGen || !state.audioHold || state.playing) {
@@ -4232,7 +4279,10 @@ function syncMedia() {
       if (Math.abs(el.currentTime - mt) > 0.25 * eff) { try { el.currentTime = mt; } catch {} }
       const vol = clamp(p.volume, 0, 4);
       const g = runtime.clipGain.get(c.id);
-      if (g) g.gain.value = vol;
+      if (g) {
+        g.gain.value = vol;
+        if (g._fcPanner) g._fcPanner.pan.value = clipPan(p.pan);
+      }
       else el.volume = clamp(vol, 0, 1);
     } else {
       if (!el.paused) el.pause();
@@ -5621,16 +5671,27 @@ async function renderAudioMix(dur) {
   for (const { c, buf } of sources) {
     const src = off.createBufferSource(); src.buffer = buf;
     const g = off.createGain();
+    const panner = off.createStereoPanner();
+    g.connect(panner);
     const n = Math.max(2, Math.ceil(c.duration * 30));
-    const curve = new Float32Array(n);
-    for (let i = 0; i < n; i++)
-      curve[i] = clamp(evalProps(c, c.start + (i / (n - 1)) * c.duration).volume, 0, 4);
-    g.gain.setValueCurveAtTime(curve, Math.max(0, c.start), Math.max(0.01, c.duration));
+    const volCurve = new Float32Array(n);
+    const panCurve = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const ep = evalProps(c, c.start + (i / (n - 1)) * c.duration);
+      volCurve[i] = clamp(ep.volume, 0, 4);
+      panCurve[i] = clipPan(ep.pan);
+    }
+    g.gain.setValueCurveAtTime(volCurve, Math.max(0, c.start), Math.max(0.01, c.duration));
+    try {
+      panner.pan.setValueCurveAtTime(panCurve, Math.max(0, c.start), Math.max(0.01, c.duration));
+    } catch {
+      panner.pan.value = panCurve[0] ?? 0;
+    }
     const ch = c.props?.audioChannel;
-    const { out } = Number.isInteger(ch) && ch >= 0
-      ? connectChannelIsolated(off, src, g, ch, Math.max(buf.numberOfChannels, ch + 1, 2))
-      : (src.connect(g), { out: g });
-    out.connect(off.destination);
+    if (Number.isInteger(ch) && ch >= 0)
+      connectChannelIsolated(off, src, g, ch, Math.max(buf.numberOfChannels, ch + 1, 2));
+    else src.connect(g);
+    panner.connect(off.destination);
     if (hasSpeedRamp(c)) {
       const rc = new Float32Array(n);
       for (let i = 0; i < n; i++)

@@ -170,6 +170,7 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
   "width": 1280, "height": 720, "fps": 30,   // timeline + export rate (UI: Program Monitor FPS select)
   "background": "#000000",                    // canvas color behind all clips (optional)
   "revision": 7,                              // bump on every write!
+  "panSchema": 1,                             // 1 = pan-aware; omit only on pre-pan projects (UI migrates once)
   "markers": [ { "t": 2.5 }, { "t": 5.0, "label": "drop" } ],
   // ^ beat/cue markers: gold diamonds on the ruler, snap targets for clip edges.
   "inPoint": 10.023, // in timeline marker; paired with outPoint sets the focus on the part of the timeline
@@ -272,6 +273,7 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
 | prop | default | notes |
 |---|---|---|
 | `volume` | 1 | 0–2 |
+| `pan` | 0 | −1 (full left) … 0 (center) … +1 (full right). Linked stems default L `−1` / R `+1` / other `0`. Projects saved before pan migrate once on load (`panSchema`); keep `panSchema: 1` (and explicit `pan` on stems) when rewriting the document so a centered stem is not re-hard-panned. |
 | `speed` | 1 | 0.25–4× playback rate. **Keyframable → speed ramps**: with `keyframes.speed` the engine time-remaps (media time = `in` + ∫speed dt), in preview and in the export audio mix. Static case: source window consumed = `duration × speed`, so `in + duration×speed ≤ media.duration`. |
 
 **Text clips only:**
@@ -337,7 +339,7 @@ footage. Example: 0.3 s impact shake over everything =
 `{kind:"adjust", track:"V3", duration:0.3, props:{shake:18}}`.
 
 **Animatable props** (usable in `keyframes`): x, y, scale, rotation, opacity,
-volume, speed, brightness, contrast, saturation, hue, blur, grayscale, sepia,
+volume, pan, speed, brightness, contrast, saturation, hue, blur, grayscale, sepia,
 invert, temperature, tint, vignette, cornerRadius, shake, rgbSplit, grain,
 fontSize, letterSpacing, glow.
 
@@ -355,8 +357,9 @@ glitch (RGB split + jitter) · pop (overshoot scale — stickers/captions).
 - **Audio tracks A1–An** hold both standalone audio files *and* linked companions
   for imported video. Dropping a video creates the picture on a V track
   (`props.volume: 0` so it isn't doubled) plus one `kind:"audio"` clip per source
-  channel (L/R/C/…) on consecutive A-tracks that share a `linkGroup` (and the same
-  `mediaId` / timing). Standalone music/SFX also live on A-tracks. Linked partners
+  channel on consecutive A-tracks that share a `linkGroup` (and the same
+  `mediaId` / timing). Each stem is mono-isolated then placed with `pan` (defaults
+  preserve stereo: L `−1`, R `+1`). Standalone music/SFX also live on A-tracks. Linked partners
   move/trim/split together — edit timing on any member of the group; do not treat
   A-tracks as music-only.
 - Media is `fit`-ted to the canvas (default "contain"), then crop → scale/x/y/
@@ -450,6 +453,8 @@ of previous durations.
 **Title card**: `{kind:"text", mediaId:null, track:"V2", props:{text,fontSize,color}}`.
 
 **Music bed**: audio file on A1, `props.volume: 0.3`, trim with `in`/`duration`.
+
+**Center a mono stem**: linked or standalone audio clip with `props.pan: 0` (inspector **Pan** slider, −1…+1). Stereo video stems default to L `−1` / R `+1`; set A1 to `0` to center that channel in the mix.
 
 **Cinematic grade**: `props.filterPreset: "teal-orange"` (tweak with
 `temperature`/`vignette` on top).
