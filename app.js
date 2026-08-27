@@ -162,9 +162,15 @@ function sortTracksInPlace() {
   syncTrackIds();
 }
 function applyTracksFromProject(defs) {
-  const list = Array.isArray(defs) && defs.length
+  const raw = Array.isArray(defs) && defs.length
     ? defs.filter((d) => d && d.id && (d.kind === "video" || d.kind === "audio"))
     : DEFAULT_TRACK_DEFS;
+  const seen = new Set();
+  const list = raw.filter((d) => {
+    if (seen.has(d.id)) return false;
+    seen.add(d.id);
+    return true;
+  });
   TRACKS.length = 0;
   for (const d of list) TRACKS.push(makeTrack(d.id, d.kind === "audio" ? "audio" : "video"));
   sortTracksInPlace();
@@ -316,6 +322,7 @@ function showTrackCtxMenu(clientX, clientY, track) {
   if (y + h + pad > window.innerHeight) y = window.innerHeight - h - pad;
   menu.style.left = Math.max(pad, x) + "px";
   menu.style.top = Math.max(pad, y) + "px";
+  btn.focus();
 }
 document.addEventListener("pointerdown", (e) => {
   if (trackCtxMenu && !trackCtxMenu.contains(e.target)) hideTrackCtxMenu();
@@ -1496,6 +1503,7 @@ function ensureAudioTrackCount(need) {
     defaultTimelineHeight()
   ));
   localStorage.setItem(TL_H_KEY, String(h));
+  scheduleSave();
   return added;
 }
 /** Attach one audio clip per source channel (A1…An), sharing the video's linkGroup. */
@@ -1503,6 +1511,8 @@ function attachLinkedAudioChannels(videoClip, m, nCh) {
   if (!videoClip?.linkGroup || !getClip(videoClip.id)) return [];
   const lg = videoClip.linkGroup;
   // Drop any prior stems for this group (e.g. stereo placeholder → 3.0 upgrade).
+  const doomed = project.clips.filter((x) => x.linkGroup === lg && x.kind === "audio");
+  for (const c of doomed) releaseClipEl(c.id);
   project.clips = project.clips.filter((x) => !(x.linkGroup === lg && x.kind === "audio"));
   const ids = audioTrackIds();
   const n = Math.min(Math.max(1, nCh | 0), ids.length);
@@ -1635,7 +1645,10 @@ async function reconcileAudioChannels(videoClip) {
     });
     added++;
   }
-  if (!added && !removed) return;
+  if (!added && !removed) {
+    if (newTracks > 0) scheduleSave();
+    return;
+  }
   state.dirtyTimeline = true;
   scheduleSave(); renderInspector();
   if (chCount > ids.length)
