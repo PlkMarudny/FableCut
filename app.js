@@ -9,7 +9,7 @@
 /* ── Constants ─────────────────────────────────────────────────────────── */
 const VIDEO_TRACK_COLORS = ["#4f8cff", "#7b6cff", "#ffd166", "#ff6b9d", "#45d9c2", "#f4a261", "#e76f51", "#a8dadc"];
 const AUDIO_TRACK_COLORS = ["#7ec249", "#5a9e3a", "#4a8a2f", "#3a7226", "#2d5a1e", "#8fbc5a", "#6b9e3a", "#4d7a28"];
-const MAX_TRACKS_PER_KIND = 16;
+const MAX_TRACKS_PER_KIND = 16; // +V/+A and auto-grown A-tracks for multi-channel sources
 const DEFAULT_TRACK_DEFS = [
   { id: "V3", kind: "video" },
   { id: "V2", kind: "video" },
@@ -33,9 +33,6 @@ const TRACK_SIZE_PRESETS = {
   m: { thumbs: true, hVideo: 44, hAudio: 32 },
   l: { thumbs: true, hVideo: 58, hAudio: 42 },
 };
-// Generous cap on how many audio tracks can be auto-added for a multi-channel
-// source (e.g. 7.1 surround = 8 channels) — see ensureAudioTrackCount().
-const MAX_AUDIO_TRACKS = 16;
 const TRACK_SIZE_KEY = "fablecut-track-size";
 const LAST_TRANS_KEY = { in: "fablecut-last-trans-in", out: "fablecut-last-trans-out" };
 const DEFAULT_LAST_TRANS = { type: "fade", duration: 1 };
@@ -1607,7 +1604,7 @@ async function detectChannelCount(m) {
    ensureAudioTrackCount() for sources beyond 4 channels (5.1, 7.1…), and is
    also re-run after replaceClipMedia swaps the source. Drops linked clips
    for channels the (new) source no longer has, and warns only if a source
-   has more channels than MAX_AUDIO_TRACKS. */
+   has more channels than MAX_TRACKS_PER_KIND. */
 async function reconcileAudioChannels(videoClip) {
   if (videoClip.kind !== "video" || !videoClip.linkGroup) return;
   const mediaId = videoClip.mediaId;
@@ -1648,7 +1645,7 @@ async function reconcileAudioChannels(videoClip) {
   state.dirtyTimeline = true;
   scheduleSave(); renderInspector();
   if (chCount > ids.length)
-    toast(`${m.name}: ${chCount} audio channels, only ${MAX_AUDIO_TRACKS} tracks supported — extra channel(s) dropped`);
+    toast(`${m.name}: ${chCount} audio channels, only ${MAX_TRACKS_PER_KIND} tracks supported — extra channel(s) dropped`);
   else if (added)
     toast(newTracks
       ? `${m.name}: added ${newTracks} audio track${newTracks === 1 ? "" : "s"} and linked ${wantCh} channels`
