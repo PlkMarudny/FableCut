@@ -1,10 +1,11 @@
 {
   "name": "fablecut",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Zero-dependency browser video editor that AI agents can drive — JSON timeline, MCP server, REST API, live-reloading UI.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "keywords": [
     "video-editor",

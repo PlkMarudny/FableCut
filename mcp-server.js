@@ -15,11 +15,24 @@ const path = require("path");
 const http = require("http");
 const { spawn, spawnSync } = require("child_process");
 
-const ROOT = __dirname;
-const PROJECT_FILE = path.join(ROOT, "project.json");
-const MEDIA_DIR = path.join(ROOT, "media");
+const {
+  APP_DIR, DATA_DIR, MEDIA_DIR, ANALYSIS_DIR, LIBRARY_DIR, PROJECT_FILE, ensureDirs,
+} = require("./paths");
+
+/* ROOT is where the code lives (server.js, CLAUDE.md); the user's timeline and
+   media live under DATA_DIR. Identical unless FABLECUT_DATA_DIR is set. */
+const ROOT = APP_DIR;
+ensureDirs();
 const PORT = process.env.FABLECUT_PORT || 7777;
 const BASE = `http://localhost:${PORT}`;
+
+/* MCP initialize must echo a version we actually speak. Echoing an unknown
+   client version (or crashing) fails handshake with stock SDK clients. */
+const MCP_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2024-11-05"];
+const MCP_DEFAULT_PROTOCOL_VERSION = MCP_PROTOCOL_VERSIONS[0];
+function negotiateProtocolVersion(requested) {
+  return MCP_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_DEFAULT_PROTOCOL_VERSION;
+}
 
 /* ── Helpers ── */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -155,7 +168,7 @@ async function callTool(name, args) {
         ? fs.readdirSync(MEDIA_DIR).filter((f) => fs.statSync(path.join(MEDIA_DIR, f)).isFile())
         : [];
       const libSummary = ["sfx", "elements", "svg", "fonts"].map((d) => {
-        const dir = path.join(ROOT, "library", d);
+        const dir = path.join(LIBRARY_DIR, d);
         const n = fs.existsSync(dir) ? fs.readdirSync(dir).length : 0;
         return `${d}: ${n}`;
       }).join(", ");
@@ -389,8 +402,8 @@ async function callTool(name, args) {
         bp.music.mediaId = entry.id;
         musicNote = `Music extracted and registered as media "${entry.id}" — place it on A1 (in:0, duration:${bp.duration}).`;
       }
-      const dir = path.join(ROOT, "analysis");
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+      const dir = ANALYSIS_DIR;
+      fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(path.join(dir, path.basename(file, path.extname(file)) + ".json"),
         JSON.stringify(bp, null, 2));
       return JSON.stringify(bp, null, 2) + "\n\n" + [
@@ -449,9 +462,9 @@ async function handle(msg) {
       return send({
         jsonrpc: "2.0", id,
         result: {
-          protocolVersion: params?.protocolVersion || "2025-06-18",
+          protocolVersion: negotiateProtocolVersion(params?.protocolVersion),
           capabilities: { tools: {} },
-          serverInfo: { name: "fablecut", version: "1.6.0" },
+          serverInfo: { name: "fablecut", version: "1.7.0" },
         },
       });
     }

@@ -1,4 +1,13 @@
-# FableCut
+<div align="center">
+
+<pre align="center">
+███████╗ █████╗ ██████╗ ██╗     ███████╗ ██████╗██╗   ██╗████████╗
+██╔════╝██╔══██╗██╔══██╗██║     ██╔════╝██╔════╝██║   ██║╚══██╔══╝
+█████╗  ███████║██████╔╝██║     █████╗  ██║     ██║   ██║   ██║   
+██╔══╝  ██╔══██║██╔══██╗██║     ██╔══╝  ██║     ██║   ██║   ██║   
+██║     ██║  ██║██████╔╝███████╗███████╗╚██████╗╚██████╔╝   ██║   
+╚═╝     ╚═╝  ╚═╝╚═════╝ ╚══════╝╚══════╝ ╚═════╝ ╚═════╝    ╚═╝   
+</pre>
 
 **A browser video editor that AI agents can drive.**
 
@@ -11,6 +20,10 @@
 [![Glama score](https://glama.ai/mcp/servers/ronak-create/FableCut/badges/score.svg)](https://glama.ai/mcp/servers/ronak-create/FableCut)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ronak-create/FableCut)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/WBKScy52F)
+
+**English** · [简体中文](docs/i18n/README.zh-CN.md) · [日本語](docs/i18n/README.ja.md) · [Español](docs/i18n/README.es.md) · [Português (BR)](docs/i18n/README.pt-BR.md)
+
+</div>
 
 <https://github.com/user-attachments/assets/2430b854-168b-4a9a-af2e-489e5efa7543>
 
@@ -184,6 +197,22 @@ your LAN, opt in explicitly: `HOST=0.0.0.0 FABLECUT_ALLOWED_HOSTS=<your-ip> node
 Drop media into the window (or `./media/`), drag clips onto the timeline, edit,
 export.
 
+To keep your work outside the checkout, set **`FABLECUT_DATA_DIR`** — it moves
+`project.json`, `media/`, `exports/`, `analysis/` and `library/` to a directory
+you choose. Leave it unset and everything stays in the repo, exactly as before.
+
+### Or install it as a Claude Code plugin
+
+```
+/plugin marketplace add ronak-create/FableCut
+/plugin install fablecut@fablecut
+```
+
+That registers the MCP server for you and adds two skills — `edit-video` and
+`remake-reel`. Your timeline and footage live in the plugin's own data
+directory, so an update never touches them. Node 18+ and (optionally) ffmpeg
+still need to be on your machine.
+
 ## Driving it with an AI agent
 
 Everything an agent needs is in **[CLAUDE.md](CLAUDE.md)** — the complete
@@ -203,6 +232,39 @@ Three equivalent control surfaces:
    ```bash
    claude mcp add -s user fablecut -- node "<path-to>/fablecut/mcp-server.js"
    ```
+
+   **OpenCode** can use the same stdio server from its project or global
+   `opencode.json` configuration:
+
+   ```json
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "mcp": {
+       "fablecut": {
+         "type": "local",
+         "command": ["node", "/absolute/path/to/FableCut/mcp-server.js"],
+         "enabled": true
+       }
+     }
+   }
+   ```
+
+   For another MCP client, register a local stdio server with this equivalent
+   command. The exact key names vary by client, but the command and arguments
+   do not:
+
+   ```json
+   {
+     "name": "fablecut",
+     "transport": "stdio",
+     "command": "node",
+     "args": ["/absolute/path/to/FableCut/mcp-server.js"]
+   }
+   ```
+
+   The server is intentionally client-neutral. It speaks MCP over stdio and
+   does not require Claude-specific environment variables. Keep the path
+   absolute, and use Node 18 or newer.
 
    Tools: `fablecut_status` (auto-starts the editor), `fablecut_docs`,
    `fablecut_get_project`, `fablecut_set_project`, `fablecut_patch_project`,

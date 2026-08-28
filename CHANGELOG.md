@@ -8,10 +8,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A real test suite (`npm test`, zero dependencies, `node:test`): MCP protocol
+  negotiation and framing, MCP tool semantics including the conflict rules, the
+  REST API with its Host/Origin and path-traversal guards, and the shipped SVG
+  library. CI runs it on Node 18, 20 and 22 for every pull request.
+
+### Fixed
+- MCP `initialize` no longer echoes an unsupported `protocolVersion`. Missing or unknown versions now negotiate to `2025-11-25` instead of claiming a revision the server does not speak (#58).
+- `CLAUDE.md` pointed agents at `fablecut_docs {section:"props"}`, which matches no `## ` heading and returns nothing useful; it now names a real section.
+
+## [1.7.0] - 2026-08-25
+
+The community release — 20 merged pull requests. Audio gets real tracks and real
+metering, the monitor gets zoom, the Project tab gets folders, and FableCut
+installs as a Claude Code plugin.
+
+### Added
+- **Installable as a Claude Code plugin.** `.claude-plugin/plugin.json` plus a
+  `.claude-plugin/marketplace.json`, so the repo is its own marketplace:
+  `/plugin marketplace add ronak-create/FableCut` then
+  `/plugin install fablecut@fablecut`. Ships the MCP server via `.mcp.json` and
+  two skills (`edit-video`, `remake-reel`).
+- `FABLECUT_DATA_DIR` — put `project.json`, `media/`, `exports/`, `analysis/`
+  and `library/` somewhere other than the install directory. Unset (the default)
+  everything stays where it always has, so `node server.js` is unchanged. The
+  plugin points it at the per-plugin data directory, which is what keeps a
+  user's timeline and footage from being wiped when a plugin update replaces the
+  install directory. On first use with a split data dir the shipped `library/`
+  assets are copied across; files you add or edit there are never overwritten.
 - Project FPS select in the Program Monitor header (next to aspect presets) —
   pick 24 / 25 / 30 / 50 / 60 fps; writes `project.fps` and persists like canvas
   size. Non-preset rates appear as Custom.
 - Preview playback speed — a monitor toolbar toggle plus **J**/**K**/**L** shortcuts cycle the preview player through 1×, 1.5×, 2×, and 4× (L faster, J slower, K play/pause and reset to 1×). It rides on top of each clip's own speed and is forced back to 1× during export, so renders always come out at real time.
+  (thanks @ur5fot, #18)
+- **Separate audio and video tracks.** Imported video now shows its audio as
+  linked companion clips on the A-tracks (sharing a `linkGroup`, relinked on
+  project reload), with switchable RMS / LUFS / peak metering and dBFS labels
+  (thanks @PlkMarudny, #17)
+- **Track enable/disable** buttons, with the disabled state persisted to
+  `project.json` as `disabledTracks`, plus an export-time warning when a disabled
+  track still holds clips (thanks @PlkMarudny, #20, #22)
+- **Keyframe graphs** — interpolated curves drawn on the clip, keyframe markers,
+  and a keyframe count per time point (thanks @PlkMarudny, #34)
+- **Text layout engine** — word wrapping inside a text box with horizontal and
+  vertical alignment (`boxW`/`boxH`/`vAlign`) (thanks @PlkMarudny, #37)
+- **Project folders** — a folder tree in the Project tab with drag-and-drop and
+  in-place rename, stored as `folders[]` (thanks @PlkMarudny, #38)
+- **Monitor zoom** — mousewheel over the Program Monitor zooms the composition
+  (clamped to 2× real pixels), with scrollbars when zoomed in and a restyled
+  zoom-reset button (thanks @PlkMarudny, #39)
+- **Linked selection** between the Project tab and the timeline
+  (thanks @PlkMarudny, #40)
+- **Audio hold** — a single frame of audio loops while the playhead is held, so
+  scrubbing is audible (thanks @PlkMarudny, #42)
+- **Clip replacement and rename** — swap a clip's source media in place
+  (thanks @PlkMarudny, #45)
+- **Animated SVG overlays** — `countdown-ring`, `rec-indicator` and `swipe-up`
+  join the shipped `library/svg/` set (thanks @madebysaira, #55)
+- **In/out points** on the timeline — `inPoint`/`outPoint` mark the working
+  range (thanks @PlkMarudny, #21)
+- **Transition overlay** — transitions are now drawn on the clip itself
+  (thanks @PlkMarudny, #23)
+- **RTL support for titles** — `direction: auto | ltr | rtl`, with every
+  `textAnim` mode staggering in reading order (thanks @PlkMarudny, #25)
+- `sunset` and `midnight` filter presets (thanks @Azizbek, #29)
+- `luxury` title style — Cinzel, cream→gold gradient, wide letter-spacing
+  (thanks @Azizbek, #30)
+- Ctrl+click an inspector label to reset that property to its default
+  (thanks @PlkMarudny, #36)
+- Two-column help dialog (thanks @PlkMarudny, #33)
+- Word-timestamp auto-caption example (thanks @madebysaira, #53)
+- Multi-agent MCP setup documentation (thanks @madebysaira, #54)
+- MCP registry metadata — `server.json` plus an MCPB manifest, so FableCut is
+  installable as a one-click `.mcpb` bundle.
+
+### Fixed
+- **Exports are tagged BT.709**, so they no longer render noticeably darker than
+  the preview (thanks @dntmcq, #56)
+- **XSS in the Project tab** — user-controlled media and folder names were
+  rendered through `innerHTML` unescaped.
+- Zoom to timeline now scales the timeline to 95% of the viewport instead of
+  overflowing it (thanks @PlkMarudny, #47)
+- `syncMedia` no longer desyncs when playout is paused (thanks @PlkMarudny, #32)
+- Gap closing on the timeline (thanks @PlkMarudny, #31)
+- Vertical drag of clips between tracks.
+- Font weight is preserved in `drawText()` on the `font-cut` path.
+- Audio meter labels are placed correctly at 'S' track density.
+
+### Changed
+- VU meter and timeline ruler now render on canvases rather than DOM nodes — a
+  large drop in layout cost during playback (thanks @PlkMarudny, #44)
+- Monochrome icons throughout (thanks @PlkMarudny, #19)
+- Play button restyled to be more visible (thanks @PlkMarudny, #35)
+- Overlapping helpers deduplicated into shared general-purpose functions
+  (thanks @PlkMarudny, #43)
+- Landing page: liquid-glass theme, live GitHub star count, and a minimal hero
+  over an ASCII field.
+- README: ASCII block wordmark, zh-CN / ja / es / pt-BR translations, DeepWiki
+  link, community Discord link, and a Trendshift badge.
 
 ## [1.6.0] - 2026-07-14
 
@@ -182,6 +276,7 @@ the report in [#1](https://github.com/ronak-create/FableCut/issues/1) — thanks
 - Three control surfaces for AI agents: **MCP server**, direct `project.json`
   editing, and a **REST API** with live-reload over server-sent events.
 
+[1.7.0]: https://github.com/ronak-create/FableCut/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ronak-create/FableCut/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/ronak-create/FableCut/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ronak-create/FableCut/compare/v1.3.1...v1.4.0

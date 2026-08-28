@@ -40,12 +40,20 @@ recommended) **ffmpeg on PATH** for fast export and upload remuxing.
 
 1. Fork and branch from `main` (`git checkout -b my-feature`).
 2. Make your change. Keep commits focused.
-3. **Sanity-check the JS** before pushing:
+3. **Run the test suite** before pushing:
    ```bash
-   node --check server.js && node --check app.js && node --check mcp-server.js
+   npm test          # node --test — no install needed, no dependencies
    ```
+   It covers the MCP protocol and tools, the REST API and its path/Host guards,
+   and the shipped SVG library. CI runs the same command on Node 18, 20 and 22
+   for every pull request. Add a test with your change when it touches any of
+   those surfaces — see [`test/`](test/) and the harness in `test/helpers.js`
+   (every test gets a throwaway data dir and its own port, so the suite never
+   touches your real `project.json`).
+
    Then open the editor and confirm your change renders in **both** preview and a
-   test export.
+   test export — the compositor itself runs in the browser and is not covered by
+   the suite.
 4. If you touched the `project.json` schema, props, transitions, text anims, or
    the API, **update `CLAUDE.md` and the `README.md` feature list** in the same PR.
 5. Open a pull request against `main` using the PR template. Describe what changed
@@ -62,6 +70,25 @@ recommended) **ffmpeg on PATH** for fast export and upload remuxing.
   following the conventions in
   [CLAUDE.md](CLAUDE.md#authoring-animated-svgs-the-svg-clip-kind) (use `--d` for
   staggered delays, CSS `@keyframes` only — never SMIL).
+
+## Translations (`docs/i18n/`)
+
+The English `README.md` is the single source of truth; `docs/i18n/` holds full
+translations of it, section for section.
+
+- **Don't translate identifiers.** Prop names, tool names, file paths, CLI
+  commands, filter/transition/text-anim names, UI labels that appear in the app
+  in English (`Source`, `Browse file…`, `Scale to fit`, `Fit`, `Limit`) and
+  everything inside code fences stay as-is. Translate the prose around them.
+- Each file ends with a sync note giving the `README.md` commit it was written
+  against. Update that short SHA whenever you re-sync a translation.
+- Adding a language: copy `docs/i18n/README.es.md`, translate, then add your
+  language to the selector line at the top of **every** i18n file and of the
+  root `README.md`. Relative links resolve from `docs/i18n/`, so the repo root
+  is `../../` (e.g. `../../CLAUDE.md`) and the screenshot is `../screenshot.png`.
+- **Feature PRs only need to touch the English README.** Translations are
+  re-synced separately; a translation that lags is expected, and the sync note
+  tells readers how far behind it is.
 
 ## Reporting bugs & requesting features
 

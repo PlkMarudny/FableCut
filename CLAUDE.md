@@ -35,7 +35,7 @@ Editing via full get→modify→set costs thousands of tokens per change. Cheape
    `{ops:[{op:"updateClip", id:"c_v2", set:{props:{filterPreset:"noir"}}}]}`.
    It re-reads the latest document internally, so it is merge-safe by design
    (no CONFLICT dance) and never destroys concurrent UI tweaks.
-3. **Docs**: request `fablecut_docs {section:"props"}` (or "Recipes", "Remake", …)
+3. **Docs**: request `fablecut_docs {section:"schema"}` (or "Recipes", "Remake", …)
    instead of the whole manual; skip it entirely if the schema is already in context.
 4. **Media questions** (duration, fps, size): read them from the registered media
    entries — don't shell out to ffprobe; the browser probes and writes them back.
@@ -61,6 +61,19 @@ new media entry and always merges safely — no conflict check needed.
 For Claude Desktop, add to its MCP config:
 `{"mcpServers":{"fablecut":{"command":"node","args":["<path-to>/fablecut/mcp-server.js"]}}}`
 Direct file editing of `project.json` (below) works too and is equivalent.
+
+Installing as a Claude Code plugin (`/plugin marketplace add ronak-create/FableCut`,
+then `/plugin install fablecut@fablecut`) does the registration for you.
+
+### Where the files are
+
+`project.json`, `media/`, `exports/`, `analysis/` and `library/` normally sit in
+the repo next to `server.js`. Set **`FABLECUT_DATA_DIR`** to move all five
+somewhere else; the code and the static app files stay in the install directory
+either way. The plugin sets this so a plugin update can replace the install
+directory without touching anyone's timeline or footage. **Don't assume
+`project.json` is beside `mcp-server.js`** — call `fablecut_status`, which
+reports the real paths.
 
 ## Run
 
