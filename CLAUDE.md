@@ -35,7 +35,7 @@ Editing via full get→modify→set costs thousands of tokens per change. Cheape
    `{ops:[{op:"updateClip", id:"c_v2", set:{props:{filterPreset:"noir"}}}]}`.
    It re-reads the latest document internally, so it is merge-safe by design
    (no CONFLICT dance) and never destroys concurrent UI tweaks.
-3. **Docs**: request `fablecut_docs {section:"props"}` (or "Recipes", "Remake", …)
+3. **Docs**: request `fablecut_docs {section:"schema"}` (or "Recipes", "Remake", …)
    instead of the whole manual; skip it entirely if the schema is already in context.
 4. **Media questions** (duration, fps, size): read them from the registered media
    entries — don't shell out to ffprobe; the browser probes and writes them back.

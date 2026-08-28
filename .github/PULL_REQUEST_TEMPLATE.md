@@ -15,7 +15,8 @@ Closes #
 
 ## How was it verified?
 
-- [ ] `node --check server.js && node --check app.js && node --check mcp-server.js` passes
+- [ ] `npm test` passes (CI runs it on Node 18 / 20 / 22)
+- [ ] Added or updated a test in `test/` if this touches the MCP surface, the REST API, or the SVG library
 - [ ] Opened the editor and confirmed the change in **preview**
 - [ ] Confirmed the change in an **export** (fast or realtime), if it affects rendering
 - [ ] Updated `CLAUDE.md` / `README.md` if the schema, props, or API changed

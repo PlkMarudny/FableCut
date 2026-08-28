@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A real test suite (`npm test`, zero dependencies, `node:test`): MCP protocol
+  negotiation and framing, MCP tool semantics including the conflict rules, the
+  REST API with its Host/Origin and path-traversal guards, and the shipped SVG
+  library. CI runs it on Node 18, 20 and 22 for every pull request.
+
 ### Fixed
 - MCP `initialize` no longer echoes an unsupported `protocolVersion`. Missing or unknown versions now negotiate to `2025-11-25` instead of claiming a revision the server does not speak (#58).
+- `CLAUDE.md` pointed agents at `fablecut_docs {section:"props"}`, which matches no `## ` heading and returns nothing useful; it now names a real section.
 
 ## [1.7.0] - 2026-08-25
 
