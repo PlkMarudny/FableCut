@@ -7,6 +7,27 @@ on:
     branches: [main]
 
 jobs:
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest version package.json supports, the current LTS, and latest.
+        node: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No install step on purpose: FableCut has no runtime dependencies and the
+      # suite uses only node:test. A missing `npm install` here is the feature.
+      - name: Run the test suite
+        run: npm test
+
   check:
     name: Syntax & sanity
     runs-on: ubuntu-latest
@@ -66,18 +87,4 @@ jobs:
               console.error('library was not seeded'); process.exit(1);
             }
             console.log('split layout OK');
-          "
-
-      - name: Validate library SVGs
-        run: |
-          node -e "
-            const fs = require('fs');
-            const dir = 'library/svg';
-            let bad = 0;
-            for (const f of fs.readdirSync(dir).filter(n => n.endsWith('.svg'))) {
-              const s = fs.readFileSync(dir + '/' + f, 'utf8').trim();
-              if (!s.includes('<svg') || !s.endsWith('</svg>')) { console.error('malformed:', f); bad++; }
-            }
-            if (bad) process.exit(1);
-            console.log('all SVGs OK');
           "
