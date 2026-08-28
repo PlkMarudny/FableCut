@@ -72,6 +72,10 @@ same time.
   turns it off.
 - Canvas aspect presets (16:9, 9:16 reels, 4:5, 1:1) + project FPS select
   (24 / 25 / 30 / 50 / 60; non-preset rates show as Custom) + safe-area guides
+- **Export frame / reframing** — composition canvas can be larger than the delivery
+  crop (`exportFrame` in `project.json`). Preview dims the overscan; drag the
+  **Export frame** handle to reframe (e.g. 16:9 canvas → 9:16 export). Fast export
+  crops to the frame; Realtime export is disabled while a frame is set
 - **Program Monitor zoom** — mouse-wheel over the preview zooms the composition
   toward the cursor (fit → up to **2 screen pixels per canvas pixel**). Magnified
   view uses **native scrollbars** so overflow stays reachable; middle-click or

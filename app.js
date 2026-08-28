@@ -133,6 +133,14 @@ const ASPECT_PRESETS = [
   { label: "1:1 · 1080×1080", w: 1080, h: 1080 },
 ];
 const FPS_PRESETS = [24, 25, 30, 50, 60];
+/** Delivery-aspect presets fitted inside the composition canvas (export crop). */
+const EXPORT_FRAME_ASPECTS = [
+  { label: "Full canvas", w: 0, h: 0 },
+  { label: "9:16 Reel", w: 9, h: 16 },
+  { label: "16:9", w: 16, h: 9 },
+  { label: "4:5 IG", w: 4, h: 5 },
+  { label: "1:1 Square", w: 1, h: 1 },
+];
 const WAVE_PEAKS_PER_SEC = 50;
 const TRACK_IDS = new Set(TRACKS.map((t) => t.id));
 // Audio lanes available for a video's per-channel linked audio (index = props.audioChannel).
@@ -237,6 +245,7 @@ const project = {
   inPoint: null,  // timeline work-area IN (seconds), or null
   outPoint: null, // timeline work-area OUT (seconds), or null
   disabledTracks: [], // track ids (V4…A3) hidden from preview/export when listed
+  exportFrame: null, // optional {x,y,w,h} delivery crop inside width×height canvas
 };
 const state = {
   time: 0, playing: false, pps: 60, snap: true,
@@ -247,6 +256,7 @@ const state = {
   connected: false, exporting: false,
   rendering: false,      // fast (server/ffmpeg) export in progress
   guides: false,         // safe-area overlay on the monitor
+  exportFrameView: true, // dimmed overscan + export frame overlay
   viewZoom: 1,           // program-monitor display zoom (1 = fit stage)
   audioHold: false,      // while paused, loop one frame of audio at the playhead
   ffmpeg: false,         // server reports ffmpeg available
@@ -321,8 +331,11 @@ const els = {
   btnAudioHold: $("btnAudioHold"),
   exportOverlay: $("exportOverlay"), exportProgress: $("exportProgress"),
   exportTitle: $("exportTitle"), exportNote: $("exportNote"),
-  projectName: $("projectName"),
-  aspectSel: $("aspectSel"), fpsSel: $("fpsSel"), btnGuides: $("btnGuides"), btnZoom100: $("btnZoom100"),
+  projectName: $("projectName"), monitorRes: $("monitorRes"),
+  aspectSel: $("aspectSel"), fpsSel: $("fpsSel"),
+  btnGuides: $("btnGuides"), btnExportFrame: $("btnExportFrame"),
+  exportFrameSel: $("exportFrameSel"), exportFrameOverlay: $("exportFrameOverlay"),
+  btnZoom100: $("btnZoom100"),
   safeOverlay: $("safeOverlay"), btnSpeed: $("btnSpeed"),
   monitorStage: $("monitorStage"), monitorScroll: $("monitorScroll"),
   monitorZoomInner: $("monitorZoomInner"), kfGraphs: $("kfGraphs"),
@@ -577,6 +590,69 @@ function startFolderRename(folderId) {
     if (e.key === "Escape") { e.preventDefault(); row.textContent = getFolder(folderId)?.name || "Folder"; row.blur(); }
   });
 }
+/** Floor to even ≥ 8 — required for libx264 + yuv420p (chroma 2×2). */
+function evenFloor(n) {
+  return Math.max(8, Math.floor(n / 2) * 2);
+}
+function normalizeExportFrame(raw, canvasW, canvasH) {
+  if (!raw || typeof raw !== "object") return null;
+  let w = Math.round(+raw.w), h = Math.round(+raw.h);
+  if (!w || !h || w < 8 || h < 8) return null;
+  let x = Math.round(+raw.x || 0), y = Math.round(+raw.y || 0);
+  w = evenFloor(Math.min(w, canvasW));
+  h = evenFloor(Math.min(h, canvasH));
+  x = clamp(x, 0, Math.max(0, canvasW - w));
+  y = clamp(y, 0, Math.max(0, canvasH - h));
+  if (w >= canvasW && h >= canvasH) return null;
+  return { x, y, w, h };
+}
+function getExportFrame() {
+  return normalizeExportFrame(project.exportFrame, project.width, project.height);
+}
+/** Largest axis-aligned rect of aspect aw×ah that fits inside the canvas.
+ *  Width/height are snapped even so Fast export (H.264 yuv420p) can encode. */
+function fitExportFrameAspect(aw, ah, canvasW = project.width, canvasH = project.height) {
+  const target = aw / ah, canvas = canvasW / canvasH;
+  let w, h;
+  if (target > canvas) { w = canvasW; h = Math.round(canvasW / target); }
+  else { h = canvasH; w = Math.round(canvasH * target); }
+  w = evenFloor(Math.min(w, canvasW));
+  h = evenFloor(Math.min(h, canvasH));
+  return {
+    x: Math.round((canvasW - w) / 2),
+    y: Math.round((canvasH - h) / 2),
+    w, h,
+  };
+}
+function exportFrameAspectIndex(ef) {
+  if (!ef) return 0;
+  const r = ef.w / ef.h;
+  for (let i = 1; i < EXPORT_FRAME_ASPECTS.length; i++) {
+    const a = EXPORT_FRAME_ASPECTS[i];
+    const ar = a.w / a.h;
+    if (Math.abs(r - ar) < 0.02) return i;
+  }
+  return -1;
+}
+function updateMonitorRes() {
+  if (!els.monitorRes) return;
+  const ef = getExportFrame();
+  els.monitorRes.textContent = ef
+    ? `${project.width}×${project.height} canvas → ${ef.w}×${ef.h} export · ${project.fps}fps`
+    : `${project.width} × ${project.height} · ${project.fps}fps`;
+}
+function syncExportFrameSel() {
+  if (!els.exportFrameSel) return;
+  const ef = getExportFrame();
+  const i = exportFrameAspectIndex(ef);
+  let html = EXPORT_FRAME_ASPECTS.map((a, j) => {
+    const sel = ef ? (i === j) : (j === 0);
+    return `<option value="${j}" ${sel ? "selected" : ""}>${a.label}</option>`;
+  }).join("");
+  if (ef && i < 0)
+    html += `<option value="custom" selected>Custom · ${ef.w}×${ef.h}</option>`;
+  els.exportFrameSel.innerHTML = html;
+}
 function applyProject(data) {
   const wa = normalizeWorkArea(data.inPoint, data.outPoint);
   const disabledTracks = normalizeDisabledTracks(data.disabledTracks);
@@ -592,6 +668,7 @@ function applyProject(data) {
     inPoint: wa.inPoint,
     outPoint: wa.outPoint,
     disabledTracks,
+    exportFrame: normalizeExportFrame(data.exportFrame, data.width || 1280, data.height || 720),
   });
   const folderIds = new Set(project.folders.map((f) => f.id));
   for (const m of project.media) {
@@ -621,8 +698,12 @@ function applyProject(data) {
   for (const el of runtime.clipEls.values()) { try { el.pause(); el.src = ""; } catch { } }
   runtime.clipEls.clear(); runtime.clipGain.clear();
   els.preview.width = project.width; els.preview.height = project.height;
+  updateMonitorRes();
   syncAspectSel();
   syncFpsSel();
+  syncExportFrameSel();
+  updateExportFrameOverlay();
+  els.btnExportFrame?.classList.toggle("on", state.exportFrameView && !!getExportFrame());
   pruneSelection(); // keep the selection across external reloads where possible
   state.dirtyTimeline = true;
   renderBin(); renderInspector();
@@ -649,8 +730,8 @@ function scheduleSave() {
   }, 400);
 }
 function projectJSON() {
-  const { name, width, height, fps, background, revision, folders, media, clips, markers, inPoint, outPoint, disabledTracks } = project;
-  return {
+  const { name, width, height, fps, background, revision, folders, media, clips, markers, inPoint, outPoint, disabledTracks, exportFrame } = project;
+  const out = {
     name, width, height, fps, background, revision,
     folders: (folders || []).map(({ id, name, parentId, open }) =>
       ({ id, name, parentId: parentId || null, open: open !== false })),
@@ -667,6 +748,9 @@ function projectJSON() {
     outPoint: outPoint == null ? null : outPoint,
     disabledTracks: normalizeDisabledTracks(disabledTracks),
   };
+  const ef = getExportFrame();
+  if (ef) out.exportFrame = ef;
+  return out;
 }
 function listenSSE() {
   const es = new EventSource("/api/events");
@@ -5214,13 +5298,34 @@ function loop(ts) {
 function openExportSetup() {
   if (state.exporting) return;
   if (!project.clips.length) { alert("Timeline is empty — add some clips first."); return; }
+  const ef = getExportFrame();
   const fastOk = state.connected && state.ffmpeg;
+  const rtOk = !ef; // realtime cannot crop to the delivery frame
   els.engineFast.disabled = !fastOk;
-  els.engineFast.checked = fastOk;
-  els.engineRealtime.checked = !fastOk;
+  els.engineRealtime.disabled = !rtOk;
+  if (fastOk) {
+    els.engineFast.checked = true;
+    els.engineRealtime.checked = false;
+  } else if (rtOk) {
+    els.engineFast.checked = false;
+    els.engineRealtime.checked = true;
+  } else {
+    // Frame set but no ffmpeg — neither engine can run; prefer Fast in the UI.
+    els.engineFast.checked = true;
+    els.engineRealtime.checked = false;
+  }
   $("engineFastNote").textContent = fastOk
-    ? "Frame-accurate ffmpeg encode. Keeps rendering if you switch tabs."
-    : "Needs the server + ffmpeg on PATH.";
+    ? (ef ? "Exports the " + ef.w + "×" + ef.h + " delivery frame (cropped). Keeps rendering if you switch tabs."
+      : "Frame-accurate ffmpeg encode. Keeps rendering if you switch tabs.")
+    : (ef
+      ? "Needs the server + ffmpeg on PATH to export a cropped delivery frame."
+      : "Needs the server + ffmpeg on PATH.");
+  const rtNote = $("engineRealtime")?.closest(".engine-opt")?.querySelector(".dim");
+  if (rtNote) rtNote.textContent = ef
+    ? (fastOk
+      ? "Unavailable while an export frame is set — use Fast export."
+      : "Unavailable while an export frame is set. Install ffmpeg, or clear the export frame to use Realtime.")
+    : "Plays the timeline once and records it. Keep the tab focused.";
   const warn = $("exportTrackWarn");
   const disabled = TRACKS.filter((t) =>
     !isTrackEnabled(t.id) && project.clips.some((c) => c.track === t.id)
@@ -5238,13 +5343,35 @@ function openExportSetup() {
   els.exportSetup.classList.remove("hidden");
 }
 function startChosenExport() {
+  const useFast = els.engineFast.checked && !els.engineFast.disabled;
+  const useRt = els.engineRealtime.checked && !els.engineRealtime.disabled;
+  if (!useFast && !useRt) {
+    const ef = getExportFrame();
+    if (ef && !(state.connected && state.ffmpeg)) {
+      alert("Export frame cropping needs Fast export (server + ffmpeg). Clear the export frame, or install ffmpeg and try again.");
+      return;
+    }
+    alert("No export engine is available.");
+    return;
+  }
   els.exportSetup.classList.add("hidden");
-  if (els.engineFast.checked && !els.engineFast.disabled) fastExport();
+  if (useFast) fastExport();
   else startExport();
 }
 
 /* ── Fast export ── */
 let renderCancelled = false;
+let exportCropCanvas = null;
+function previewToExportBlob(quality = 0.95) {
+  const ef = getExportFrame();
+  if (!ef) return new Promise((res) => els.preview.toBlob(res, "image/jpeg", quality));
+  if (!exportCropCanvas) exportCropCanvas = document.createElement("canvas");
+  exportCropCanvas.width = ef.w;
+  exportCropCanvas.height = ef.h;
+  exportCropCanvas.getContext("2d").drawImage(
+    els.preview, ef.x, ef.y, ef.w, ef.h, 0, 0, ef.w, ef.h);
+  return new Promise((res) => exportCropCanvas.toBlob(res, "image/jpeg", quality));
+}
 function seekVideosTo(t) {
   const waits = [];
   for (const c of project.clips) {
@@ -5363,7 +5490,7 @@ async function fastExport() {
       await seekVideosTo(t);
       await prepareFrameAssets(t);       // exact SVG frames + AI masks
       drawFrame(t);
-      const blob = await new Promise((res) => els.preview.toBlob(res, "image/jpeg", 0.95));
+      const blob = await previewToExportBlob(0.95);
       const r = await fetch("/api/export/frame?id=" + sessId, { method: "POST", body: blob });
       if (!r.ok) throw new Error((await r.json()).error || "frame upload failed");
       const pct = ((f + 1) / frames) * 100;
@@ -5600,7 +5727,12 @@ els.aspectSel.addEventListener("change", () => {
   if (!a) return;
   project.width = a.w; project.height = a.h;
   els.preview.width = a.w; els.preview.height = a.h;
+  if (project.exportFrame)
+    project.exportFrame = normalizeExportFrame(project.exportFrame, a.w, a.h);
+  updateMonitorRes();
   syncAspectSel();
+  syncExportFrameSel();
+  updateExportFrameOverlay();
   seekMediaWhilePaused();
   scheduleSave();
 });
@@ -5609,9 +5741,43 @@ els.fpsSel?.addEventListener("change", () => {
   if (!(v > 0)) return;
   project.fps = v;
   syncFpsSel();
+  updateMonitorRes();
   state.dirtyTimeline = true;
   seekMediaWhilePaused();
   scheduleSave();
+});
+els.exportFrameSel?.addEventListener("change", () => {
+  const v = els.exportFrameSel.value;
+  if (v === "custom") return;
+  const preset = EXPORT_FRAME_ASPECTS[+v];
+  if (!preset) return;
+  if (!preset.w) project.exportFrame = null;
+  else project.exportFrame = fitExportFrameAspect(preset.w, preset.h);
+  state.exportFrameView = !!getExportFrame();
+  els.btnExportFrame?.classList.toggle("on", state.exportFrameView && !!getExportFrame());
+  updateMonitorRes();
+  syncExportFrameSel();
+  updateExportFrameOverlay();
+  scheduleSave();
+});
+els.btnExportFrame?.addEventListener("click", () => {
+  if (!getExportFrame()) {
+    const preset = EXPORT_FRAME_ASPECTS[1]; // 9:16 — common reframe default
+    project.exportFrame = fitExportFrameAspect(preset.w, preset.h);
+    state.exportFrameView = true;
+    syncExportFrameSel();
+    updateMonitorRes();
+    scheduleSave();
+  } else if (state.exportFrameView) {
+    state.exportFrameView = false;
+    syncExportFrameSel();
+    updateMonitorRes();
+    scheduleSave();
+  } else {
+    state.exportFrameView = true;
+  }
+  els.btnExportFrame.classList.toggle("on", state.exportFrameView && !!getExportFrame());
+  updateExportFrameOverlay();
 });
 els.btnGuides.addEventListener("click", () => {
   state.guides = !state.guides;
@@ -5679,6 +5845,7 @@ function applyMonitorView() {
   els.btnZoom100.classList.toggle("hidden", !zoomed);
   scroll.classList.toggle("is-zoomed", zoomed);
   updateSafeOverlay();
+  updateExportFrameOverlay();
 }
 let monitorViewRaf = 0;
 let monitorViewAfter = null;
@@ -5771,6 +5938,7 @@ els.monitorScroll.addEventListener("pointercancel", endViewPan);
 els.monitorScroll.addEventListener("auxclick", (e) => { if (e.button === 1) e.preventDefault(); });
 els.monitorScroll.addEventListener("scroll", () => {
   if (state.guides) updateSafeOverlay();
+  if (state.exportFrameView && getExportFrame()) updateExportFrameOverlay();
   scheduleMonitorView();
 });
 if (typeof ResizeObserver !== "undefined") {
@@ -5778,6 +5946,7 @@ if (typeof ResizeObserver !== "undefined") {
     if (state.viewZoom <= 1.001) {
       monitorFitCache = null;
       if (state.guides) updateSafeOverlay();
+      if (state.exportFrameView && getExportFrame()) updateExportFrameOverlay();
       return;
     }
     const scroll = els.monitorScroll;
@@ -5801,6 +5970,112 @@ function updateSafeOverlay() {
   o.height = cv.offsetHeight + "px";
   els.safeOverlay.classList.toggle("vertical", project.height > project.width);
 }
+/* Dimmed overscan outside the delivery export frame (preview-only overlay). */
+const EF_EDGE = 10;
+function layoutExportFrameOverlayPart(el, left, top, w, h) {
+  el.style.left = left + "px";
+  el.style.top = top + "px";
+  el.style.width = w + "px";
+  el.style.height = h + "px";
+}
+function updateExportFrameOverlay() {
+  const ov = els.exportFrameOverlay;
+  if (!ov) return;
+  const ef = getExportFrame();
+  const show = state.exportFrameView && ef;
+  ov.classList.toggle("hidden", !show);
+  if (!show) return;
+  const cv = els.preview;
+  const root = ov.style;
+  root.left = cv.offsetLeft + "px";
+  root.top = cv.offsetTop + "px";
+  root.width = cv.offsetWidth + "px";
+  root.height = cv.offsetHeight + "px";
+  const sx = cv.offsetWidth / project.width;
+  const sy = cv.offsetHeight / project.height;
+  const hole = ov.querySelector(".ef-shade");
+  const handle = ov.querySelector(".ef-handle");
+  const edgeT = ov.querySelector(".ef-edge-t");
+  const edgeB = ov.querySelector(".ef-edge-b");
+  const edgeL = ov.querySelector(".ef-edge-l");
+  const edgeR = ov.querySelector(".ef-edge-r");
+  if (!hole) return;
+  const left = ef.x * sx, top = ef.y * sy, w = ef.w * sx, h = ef.h * sy;
+  layoutExportFrameOverlayPart(hole, left, top, w, h);
+  if (handle) layoutExportFrameOverlayPart(handle, left + 6, top + 6, Math.min(w - 12, 120), 22);
+  if (edgeT) layoutExportFrameOverlayPart(edgeT, left, top, w, EF_EDGE);
+  if (edgeB) layoutExportFrameOverlayPart(edgeB, left, top + h - EF_EDGE, w, EF_EDGE);
+  if (edgeL) layoutExportFrameOverlayPart(edgeL, left, top + EF_EDGE, EF_EDGE, Math.max(0, h - EF_EDGE * 2));
+  if (edgeR) layoutExportFrameOverlayPart(edgeR, left + w - EF_EDGE, top + EF_EDGE, EF_EDGE, Math.max(0, h - EF_EDGE * 2));
+}
+let exportFrameDrag = null;
+function exportFrameDragTarget(e) {
+  return e.target.closest(".ef-handle, .ef-edge-t, .ef-edge-b, .ef-edge-l, .ef-edge-r");
+}
+function exportFrameDragMove(e) {
+  if (!exportFrameDrag) return;
+  const cv = els.preview;
+  const sx = project.width / cv.offsetWidth;
+  const sy = project.height / cv.offsetHeight;
+  const ef = getExportFrame();
+  if (!ef) return;
+  project.exportFrame = normalizeExportFrame({
+    x: exportFrameDrag.ox + (e.clientX - exportFrameDrag.startX) * sx,
+    y: exportFrameDrag.oy + (e.clientY - exportFrameDrag.startY) * sy,
+    w: ef.w, h: ef.h,
+  }, project.width, project.height);
+  updateExportFrameOverlay();
+}
+function exportFrameDragEnd(e) {
+  if (!exportFrameDrag) return;
+  exportFrameDrag = null;
+  els.exportFrameOverlay?.classList.remove("is-dragging");
+  syncExportFrameSel();
+  updateMonitorRes();
+  scheduleSave();
+  document.removeEventListener("pointermove", exportFrameDragMove);
+  document.removeEventListener("pointerup", exportFrameDragEnd, true);
+  document.removeEventListener("pointercancel", exportFrameDragEnd, true);
+  try { els.exportFrameOverlay?.releasePointerCapture(e.pointerId); } catch { }
+}
+const EF_NUDGE_PX = 1;
+const EF_NUDGE_SHIFT_PX = 10;
+function nudgeExportFrame(dx, dy) {
+  const ef = getExportFrame();
+  if (!ef) return;
+  project.exportFrame = normalizeExportFrame({
+    x: ef.x + dx, y: ef.y + dy, w: ef.w, h: ef.h,
+  }, project.width, project.height);
+  updateExportFrameOverlay();
+  syncExportFrameSel();
+  updateMonitorRes();
+  scheduleSave();
+}
+function exportFrameHandleKeydown(e) {
+  const k = e.key;
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(k)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const step = e.shiftKey ? EF_NUDGE_SHIFT_PX : EF_NUDGE_PX;
+  nudgeExportFrame(
+    k === "ArrowLeft" ? -step : k === "ArrowRight" ? step : 0,
+    k === "ArrowUp" ? -step : k === "ArrowDown" ? step : 0,
+  );
+}
+els.exportFrameOverlay?.addEventListener("pointerdown", (e) => {
+  if (!exportFrameDragTarget(e)) return;
+  const ef = getExportFrame();
+  if (!ef) return;
+  e.preventDefault();
+  e.stopPropagation();
+  els.exportFrameOverlay?.classList.add("is-dragging");
+  exportFrameDrag = { startX: e.clientX, startY: e.clientY, ox: ef.x, oy: ef.y };
+  try { els.exportFrameOverlay.setPointerCapture(e.pointerId); } catch { }
+  document.addEventListener("pointermove", exportFrameDragMove);
+  document.addEventListener("pointerup", exportFrameDragEnd, true);
+  document.addEventListener("pointercancel", exportFrameDragEnd, true);
+});
+els.exportFrameOverlay?.querySelector(".ef-handle")?.addEventListener("keydown", exportFrameHandleKeydown);
 
 window.addEventListener("keydown", (e) => {
   const k = e.key;

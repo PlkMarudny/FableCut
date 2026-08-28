@@ -167,7 +167,11 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
 ```jsonc
 {
   "name": "My Edit",
-  "width": 1280, "height": 720, "fps": 30,   // timeline + export rate (UI: Program Monitor FPS select)
+  "width": 1280, "height": 720, "fps": 30,   // composition canvas + timeline/export rate (UI: FPS select)
+  "exportFrame": { "x": 438, "y": 0, "w": 404, "h": 720 },  // optional delivery crop (even w/h for H.264)
+  // ^ omit = export the full canvas. Preview dims outside this rect; Fast export crops
+  // JPEGs to w×h. Clip x/y/scale stay relative to the composition center, not the frame.
+  // Frame size is always even (yuv420p / libx264); 9:16 on 1280×720 → 404×720, not 405.
   "background": "#000000",                    // canvas color behind all clips (optional)
   "revision": 7,                              // bump on every write!
   "markers": [ { "t": 2.5 }, { "t": 5.0, "label": "drop" } ],
@@ -532,6 +536,12 @@ to them (the UI also snaps drags to markers).
 or simply `transitionOut: {type:"fade", duration:3}`.
 
 **Pulse / emphasis**: `keyframes: { scale:[{t:0,v:1},{t:0.3,v:1.12},{t:0.6,v:1}] }`.
+
+**Reframe horizontal → vertical**: keep a wide composition canvas and crop for
+delivery — e.g. `width:1920, height:1080` with
+`exportFrame:{x:656,y:0,w:608,h:1080}` (9:16 fitted to canvas height). Position
+footage with clip `x`/`y`/`scale`; the export frame can be dragged in the UI.
+Omit `exportFrame` to export the full canvas.
 
 **Vertical reel**: set project `width:1080, height:1920`; use the UI's safe-area
 guides (▦) to keep captions out of platform UI zones.

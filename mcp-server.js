@@ -311,7 +311,7 @@ async function callTool(name, args) {
             break;
           }
           case "setProject": {
-            const allowed = ["name", "width", "height", "fps", "background", "markers", "disabledTracks"];
+            const allowed = ["name", "width", "height", "fps", "background", "markers", "disabledTracks", "exportFrame"];
             for (const [k, v] of Object.entries(op.set || {})) {
               if (!allowed.includes(k)) throw new Error(`setProject: '${k}' not settable (allowed: ${allowed.join(", ")})`);
               if (v === null) delete proj[k]; else proj[k] = v;

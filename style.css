@@ -968,6 +968,72 @@ body.track-size-s .clip.selected {
   border-left: 1px dashed #ff4d6a80;
 }
 
+/* ── Export frame overlay (dimmed overscan, preview-only) ── */
+#exportFrameOverlay {
+  position: absolute;
+  pointer-events: none;
+  z-index: 6;
+}
+#exportFrameOverlay .ef-shade {
+  position: absolute;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.58);
+  border: 2px solid rgba(255, 255, 255, 0.88);
+  box-sizing: border-box;
+  pointer-events: none;
+}
+#exportFrameOverlay .ef-handle {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  height: 22px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 8px;
+  font: 600 10px/1 "Segoe UI", sans-serif;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+  background: rgba(79, 140, 255, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 4px;
+  cursor: move;
+  pointer-events: auto;
+  touch-action: none;
+  white-space: nowrap;
+  user-select: none;
+  transition: background 0.12s ease;
+  appearance: none;
+  -webkit-appearance: none;
+}
+#exportFrameOverlay .ef-handle:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+#exportFrameOverlay .ef-handle:hover {
+  background: rgba(79, 140, 255, 1);
+}
+#exportFrameOverlay.is-dragging .ef-handle,
+#exportFrameOverlay .ef-handle:active {
+  background: rgba(79, 140, 255, 0.9);
+}
+#exportFrameOverlay .ef-edge {
+  position: absolute;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: move;
+  user-select: none;
+}
+#exportFrameOverlay .ef-edge-t,
+#exportFrameOverlay .ef-edge-b {
+  height: 10px;
+}
+#exportFrameOverlay .ef-edge-l,
+#exportFrameOverlay .ef-edge-r {
+  width: 10px;
+}
+
 .transport {
   display: flex;
   align-items: center;
