@@ -5491,6 +5491,9 @@ function playAdvanceVideo(el, mt, eps, rate) {
     let settled = false;
     let rvfcId = null;
     let poll = null;
+    const prevMuted = el.muted;
+    let prevRate = 1;
+    try { prevRate = el.playbackRate; } catch { }
     const cleanup = () => {
       clearTimeout(tm);
       if (poll) { clearInterval(poll); poll = null; }
@@ -5499,6 +5502,8 @@ function playAdvanceVideo(el, mt, eps, rate) {
         rvfcId = null;
       }
       try { el.pause(); } catch { }
+      try { el.muted = prevMuted; } catch { }
+      try { el.playbackRate = prevRate; } catch { }
     };
     const finish = () => {
       if (settled) return;
@@ -5538,14 +5543,20 @@ function playAdvanceVideo(el, mt, eps, rate) {
     }
   });
 }
-function seekVideosTo(t) {
+async function seekVideosTo(t) {
   const fps = Math.max(1, Number(project.fps) || 30);
   const waits = [];
+  const restoreGain = [];
   for (const c of project.clips) {
     if (c.kind !== "video") continue;
     if (!isTrackEnabled(c.track)) continue;
     const el = getClipEl(c); if (!el) continue;
-    if (!activeAt(c, t)) { if (!el.paused) el.pause(); continue; }
+    if (!activeAt(c, t)) {
+      if (!el.paused) el.pause();
+      const g = runtime.clipGain.get(c.id);
+      if (g) g.gain.value = clamp(evalProps(c, t).volume, 0, 4);
+      continue;
+    }
     const mt = mediaTimeAt(c, t);
     const local = clamp(t - c.start, 0, c.duration);
     const sp = clamp(kfChannel(c, "speed", local, clipSpeed(c)), 0.1, 8);
@@ -5555,7 +5566,10 @@ function seekVideosTo(t) {
     if (el.readyState >= 2 && Math.abs(el.currentTime - mt) <= eps) continue;
 
     const g = runtime.clipGain.get(c.id);
-    if (g) g.gain.value = 0;
+    if (g) {
+      g.gain.value = 0;
+      restoreGain.push(c);
+    }
 
     const delta = mt - el.currentTime;
     // ~4 timeline frames forward + data in buffer → sequential play instead of seek storm
@@ -5566,7 +5580,11 @@ function seekVideosTo(t) {
       waits.push(hardSeekVideo(el, mt));
     }
   }
-  return Promise.all(waits);
+  await Promise.all(waits);
+  for (const c of restoreGain) {
+    const g = runtime.clipGain.get(c.id);
+    if (g) g.gain.value = clamp(evalProps(c, t).volume, 0, 4);
+  }
 }
 function encodeWAV(buf) {
   const ch = buf.numberOfChannels, len = buf.length, sr = buf.sampleRate;
