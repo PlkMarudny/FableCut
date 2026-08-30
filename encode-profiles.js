@@ -105,6 +105,8 @@ function validateVideo(v, fallback, warn) {
     if (s && SAFE_FFMPEG_STR.test(s)) out[key] = s;
     else drop(key, "contains characters outside the allowed ffmpeg option set");
   }
+  if (out.x264opts && out.codec !== "libx264")
+    drop("x264opts", `only applies to libx264, not ${out.codec} (which takes -x265-params)`);
   return out;
 }
 
@@ -334,7 +336,8 @@ function buildVideoEncodeArgs(profile, fps, outputPath) {
     if (v.g) args.push("-g", String(v.g));
     if (v.maxrate) args.push("-maxrate", v.maxrate);
     if (v.bufsize) args.push("-bufsize", v.bufsize);
-    if (v.x264opts) args.push("-x264opts", v.x264opts);
+    // libx264-only private option (libx265 takes -x265-params instead)
+    if (v.x264opts && v.codec === "libx264") args.push("-x264opts", v.x264opts);
     if (v.tune) args.push("-tune", v.tune);
     if (v.profile) args.push("-profile:v", v.profile);
   }
