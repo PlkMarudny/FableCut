@@ -1811,13 +1811,13 @@ body.track-size-s .clip .clip-kf-n {
 
 .export-profile-sel {
   width: 100%;
-  padding: 7px 10px;
+  padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .export-profile-note,
