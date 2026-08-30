@@ -430,7 +430,7 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 - `GET  /api/events`  — SSE, emits `change` when project.json, ./media or ./library changes
 - Fast / WebCodecs export (browser compositor → server ffmpeg):
   `GET /api/export/ffmpeg` → `{available}` · `POST /api/export/begin`
-  `{fps,name,mode?,"hasAudio"?}` → `{id,mode}` where `mode` is `"jpeg"` (default,
+  `{fps,name,mode?}` → `{id,mode}` where `mode` is `"jpeg"` (default,
   Fast) or `"annexb"` (WebCodecs H.264 elementary stream)
   · `POST /api/export/frame?id=` (JPEG body for jpeg mode, Annex-B NAL bytes for
   annexb — must be after audio; ffmpeg is spawned on the first frame in both modes)

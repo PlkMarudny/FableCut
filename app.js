@@ -5800,7 +5800,6 @@ async function webCodecsExport() {
         fps,
         name: project.name.replace(/[^\w\- ]+/g, "") || "export",
         mode: "annexb",
-        hasAudio: !!wav,
       }),
       signal,
     }).then((r) => r.json());
