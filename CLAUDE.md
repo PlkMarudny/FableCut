@@ -448,8 +448,10 @@ of previous durations.
 
 **Slide (slip) source**: with the playhead over a video/audio clip, raise `in`
 so the frame under the playhead becomes the clip in-point; leave `start` and
-`duration` unchanged. The UI **Slide** button does this and toasts if the
-source has no unused tail (`in + duration×speed` would exceed `media.duration`).
+`duration` unchanged. The UI **Slide** button does this and toasts if there is
+no unused source tail — i.e. if the new `in` plus the integrated source window
+(`mediaTimeAt(clipEnd) − in`, which covers static speed and speed ramps) would
+exceed `media.duration`.
 
 **Cinematic grade**: `props.filterPreset: "teal-orange"` (tweak with
 `temperature`/`vignette` on top).
