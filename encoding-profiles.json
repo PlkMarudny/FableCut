@@ -49,7 +49,7 @@
       ]
     },
     "prores422": {
-      "label": "ProRes 422 HQ · MOV - do not use it",
+      "label": "ProRes 422 HQ · MOV",
       "description": "Mezzanine / round-trip master. Large files, edits well anywhere.",
       "jpegQuality": 1,
       "extension": ".mov",
