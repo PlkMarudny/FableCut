@@ -87,14 +87,17 @@ function normalizeProfile(id, raw) {
   const args = Array.isArray(p.args)
     ? p.args.map(String)
     : String(p.args || "").split(/\s+/).filter(Boolean);
-  const ext = String(p.extension || BUILTIN.extension).trim().toLowerCase();
+  let ext = String(p.extension || BUILTIN.extension).trim().toLowerCase();
+  if (ext && !ext.startsWith(".")) ext = `.${ext}`;
+  // one suffix only (".mp4") — reject paths, extra dots, empty, or odd chars
+  if (!/^\.[a-z0-9]+$/.test(ext)) ext = BUILTIN.extension;
   const q = Number(p.jpegQuality);
   return {
     id,
     label: String(p.label || id),
     description: String(p.description || p.desc || ""),
     jpegQuality: q >= 0.1 && q <= 1 ? q : BUILTIN.jpegQuality,
-    extension: ext.startsWith(".") ? ext : `.${ext}`,
+    extension: ext,
     color: normalizeColor(p.color),
     args,
   };
@@ -218,6 +221,8 @@ function buildExportArgs(profile, { fps, wavPath, outPath }) {
   return args;
 }
 
+const DRY_RUN_TIMEOUT_MS = 15_000;
+
 /* Run the profile's args once against a synthetic input before the browser
    renders anything. Without this a typo (or an encoder this ffmpeg build lacks)
    would only surface when ffmpeg exits — i.e. after every frame was rendered.
@@ -232,19 +237,25 @@ function dryRunProfile(profile, { fps = 30, hasAudio = true } = {}) {
   return new Promise((resolve) => {
     let stderr = "";
     let settled = false;
+    let proc;
+    let timer;
     const finish = (result) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch { }
       resolve(result);
     };
-    let proc;
     try {
       proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
     } catch (e) {
       finish({ ok: false, error: e.message || String(e) });
       return;
     }
+    timer = setTimeout(() => {
+      try { proc.kill(); } catch { }
+      finish({ ok: false, error: `ffmpeg dry-run timed out after ${DRY_RUN_TIMEOUT_MS}ms` });
+    }, DRY_RUN_TIMEOUT_MS);
     proc.on("error", (e) => finish({ ok: false, error: e.message || String(e) }));
     proc.stderr.on("data", (d) => { stderr = (stderr + d).slice(-4000); });
     proc.on("close", (code) => {

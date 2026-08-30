@@ -199,7 +199,7 @@ async function beginExport(fps, name, profileId, hasAudio) {
   // cannot both see the same free path. The empty .part file is overwritten by ffmpeg (-y).
   const { outPath, partPath } = reserveExportPaths(EXPORTS_DIR, safe, profile.extension);
   const sess = {
-    proc: null, fps, profile, name: safe,
+    proc: null, fps, profile, name: safe, hasAudio: !!hasAudio,
     dir: fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-")),
     wav: null, partPath, outPath,
     stderr: "", done: null,
@@ -415,7 +415,11 @@ const server = http.createServer(async (req, res) => {
     if (!sess) { sendJSON(res, 404, { error: "no such export session" }); return; }
     try {
       const body = await readBody(req);
-      if (!sess.proc) startEncoder(sess); // the WAV has landed by now
+      if (sess.hasAudio && !sess.wav) {
+        sendJSON(res, 409, { error: "audio mix has not been uploaded yet" });
+        return;
+      }
+      if (!sess.proc) startEncoder(sess);
       await writeExportFrame(sess, body);
       sendJSON(res, 200, { ok: true });
     } catch (e) {
@@ -428,8 +432,9 @@ const server = http.createServer(async (req, res) => {
     const sess = exportSessions.get(url.searchParams.get("id"));
     if (!sess) { sendJSON(res, 404, { error: "no such export session" }); return; }
     try {
-      sess.wav = path.join(sess.dir, "audio.wav");
-      fs.writeFileSync(sess.wav, await readBody(req));
+      const wavPath = path.join(sess.dir, "audio.wav");
+      fs.writeFileSync(wavPath, await readBody(req));
+      sess.wav = wavPath;
       sendJSON(res, 200, { ok: true });
     } catch (e) { sendJSON(res, 500, { error: String(e) }); }
     return;
