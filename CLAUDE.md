@@ -24,8 +24,8 @@ Every Claude Code session then has these tools:
 - `fablecut_import_media` — copy a local file into `./media/` and register it.
 - `fablecut_analyze_reference` — turn a reference video into an edit blueprint
   (shots, beats, BPM, energy, drop) + extract its music. See "Remake a reference video".
-- `fablecut_encode_profiles` — list ffmpeg encoding presets from `encoding-profiles.json`
-  (codec, CRF, JPEG quality). Set `project.encodeProfile` via patch to pin a project default.
+- `fablecut_encode_profiles` — list export presets from `encoding-profiles.json` (each is a
+  raw ffmpeg args list). Set `project.encodeProfile` via patch to pin a project default.
 
 ### Token-efficient editing (important for agents)
 
@@ -433,9 +433,11 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 - `GET  /api/events`  — SSE, emits `change` when project.json, ./media or ./library changes
 - Fast export (used by the UI; browser renders frames, ffmpeg encodes):
   `GET /api/export/ffmpeg` → `{available}` · `GET /api/export/profiles[?detail=1]` →
-  `{default, profiles, issues}` · `POST /api/export/begin` `{fps,name,profile?}` →
-  `{id,profile,label,summary}` (**400** if `profile` is not a defined id)
-  · `POST /api/export/frame?id=` (JPEG body, in order) · `POST /api/export/audio?id=` (WAV body)
+  `{default, profiles, issues}` · `POST /api/export/begin` `{fps,name,profile?,hasAudio?}` →
+  `{id,profile,label,summary}` (**400** if `profile` is not a defined id, or if ffmpeg
+  rejects its args in the dry run)
+  · `POST /api/export/frame?id=` (JPEG body, in order) · `POST /api/export/audio?id=` (WAV
+  body — must be sent before the first frame; ffmpeg is spawned on frame 1)
   · `POST /api/export/end?id=[&discard=1]` → `{src}` under `/exports/`
 
 ## Recipes
@@ -560,17 +562,18 @@ Realtime export, and `/api/export/begin` all use this value; pass the same
 
 Export is user-driven (Export button → dialog). Two engines: **Fast** (browser
 renders each frame with the normal compositor — including SVG frames, keys and
-AI masks — streams JPEG frames + an offline WAV mix to the server, ffmpeg
-encodes via an **encoding profile** into `./exports/`) and **Realtime**
+AI masks — streams JPEG frames + an offline WAV mix to the server, a single ffmpeg
+pass encodes them via an **encoding profile** into `./exports/`) and **Realtime**
 (MediaRecorder fallback). Claude cannot trigger export headlessly — the
 compositor lives in the browser; ask the user to click Export, or render with
 ffmpeg directly from `media/` sources if a file is needed.
 
 ### Encoding profiles (`encoding-profiles.json`)
 
-User-editable at the repo root. Defines ffmpeg settings for Fast export. The
-server validates all fields (no raw ffmpeg strings from the client). Edit the
-file while the server runs — the UI hot-reloads the profile list via SSE.
+User-editable at the repo root. A profile is a **raw ffmpeg argument list** plus the
+two things that are not ffmpeg arguments: `jpegQuality` (the browser's frame quality)
+and `extension` (which names the file and therefore picks the muxer). Edit the file
+while the server runs — the UI hot-reloads the profile list via SSE.
 
 ```jsonc
 {
@@ -579,62 +582,43 @@ file while the server runs — the UI hot-reloads the profile list via SSE.
     "draft": {
       "label": "Draft · H.264 fast",
       "description": "Quick preview — smaller file, faster encode.",
-      "jpegQuality": 0.85,         // browser JPEG frame quality (0.5–1)
-      "video": { "codec": "libx264", "preset": "veryfast", "crf": 23, "pixFmt": "yuv420p" },
-      "audio": { "codec": "aac", "bitrate": "128k" },
-      "mux": { "movflags": "+faststart" }
-    },
-    "delivery": { /* … balanced default … */ },
-    "hq": { /* … slow preset, lower CRF … */ }
+      "jpegQuality": 0.85,         // browser JPEG frame quality (0.1–1)
+      "extension": ".mp4",
+      "args": ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+               "-movflags", "+faststart", "-shortest"]
+    }
   }
 }
 ```
 
-**Allowed values:** video codecs `libx264` · `libx265`; presets `ultrafast`…`veryslow`;
-CRF 0–51; pixel formats `yuv420p` · `yuv422p` · `yuv444p`; audio `aac` · `libopus`
-with bitrates like `192k`. Optional x264 `tune` / `profile` on a profile's `video` object.
+Export is **one ffmpeg pass**. The server owns the input side and the output path;
+`args` is everything in between, verbatim:
 
-**Advanced fields** (optional — for broadcast / custom ffmpeg):
+```
+ffmpeg -y -f image2pipe -framerate <fps> -i -  [-i audio.wav]  <args…>  exports/<name><extension>
+```
 
-| block | fields | maps to ffmpeg |
-| --- | --- | --- |
-| `encode` | `hideBanner`, `stats`, `loglevel` | global flags on both encode passes |
-| `video` | `g`, `maxrate`, `bufsize`, `x264opts`, `vf` | GOP, rate cap, x264 opts, filter chain |
-| `audio` | `sampleRate`, `strict` | `-ar`, `-strict` (e.g. AAC `-2`) |
-| `mux` | `format`, `extension`, `movflags` | `-f mov`, output `.mov`, faststart |
-
-Notes on how these are handled:
-
-- **Profiles inherit** from the same-named built-in (or `delivery` for new ids), so a
-  profile that only sets `video.crf` keeps the rest. Set `"movflags": null` to clear an
-  inherited value.
-- `mux.format` accepts `mp4` · `mov` · `matroska` (`mkv` is normalized to `matroska`,
-  since `-f mkv` is not a valid muxer name). The output extension follows the container
-  unless `mux.extension` overrides it with one that matches (`.m4v` for `mp4` is fine).
-  A conflicting pair is **reconciled, not just flagged**: `format` picks the muxer, so the
-  extension is corrected to match it (`mov` + `.mp4` → `.mov`) and the change is reported.
-  Giving only `mux.extension` infers the container from it.
-- `libopus` is switched to `aac` for MOV (no mapping exists) and gets `-strict -2`
-  automatically in MP4 — otherwise the mux pass would fail *after* every frame is rendered.
-- A `loglevel` of `quiet`/`panic`/`fatal` is raised to `error` for the encode passes: that
-  stderr is only ever read back to report *why* an export failed.
-- Anything invalid is **corrected and reported**, never silently applied. Rejected and
-  clamped values are listed on server startup, in `GET /api/export/profiles` (`issues`),
-  and per profile via `fablecut_encode_profiles {detail:true}` (`warnings`).
-- `vf` / `x264opts` are restricted to `[\w=.,:/+\-[\]()%| ]`, so filters needing quotes
-  (e.g. `drawtext=text='hi'`) are refused. Do that work in the timeline instead.
+- **There is no allow-list.** Any codec, filter, container or flag your local ffmpeg
+  supports works — ProRes, DNxHD, NVENC/QSV/VideoToolbox, VP9/AV1, 10-bit, HDR tags.
+  See the shipped `prores422` and `broadcast1080i50` profiles.
+- **Args are validated by ffmpeg itself**, not by a schema: when an export starts the
+  server dry-runs the profile against a 0.1 s synthetic input (`lavfi`). A typo or an
+  encoder your build lacks is rejected up front with ffmpeg's own message, instead of
+  failing after every frame has been rendered.
+- Use the **array form** — each element is passed to `spawn` untouched, so no quoting
+  is needed (`["-vf", "drawtext=text='hi there'"]` just works). A plain string is
+  accepted and split on whitespace.
+- Nothing is injected for you: `+faststart`, `-shortest`, `-strict -2` for Opus in MP4
+  and pixel-format choices are all yours to write.
 - Frames arrive as **JPEG (4:2:0)**, so `yuv422p`/`yuv444p` cannot recover chroma the
   source never had; raise `jpegQuality` before reaching for a wider pixel format.
-
-Example **`broadcast1080i50`** (included in `encoding-profiles.json`) builds an interlaced
-1080i50 `.mov` with your x264 opts, `tinterlace`, 384k AAC @ 48 kHz. Set the project to
-**1920×1080 @ 25fps** — the browser renders progressive frames; the profile's `vf` does
-`fps=50` + `tinterlace=interleave_top`.
+- The audio mix is only present when the timeline has audio; with no audio there is a
+  single input, so avoid hardcoded `-map 1:a`.
 
 **Note:** Fast export pipes **composited JPEG frames** from the browser (`-f image2pipe`),
-not `-i source.mp4`. Filters and x264 settings apply to that frame stream. To transcode an
-existing file verbatim (your one-liner with `-i source.mp4`), run ffmpeg directly — that is
-outside the editor compositor path.
+not `-i source.mp4`. Filters and codec settings apply to that frame stream. To transcode
+an existing file verbatim, run ffmpeg directly — that is outside the compositor path.
 
 **Which profile is used (priority):**
 1. Profile picked in the Export dialog (one-off; saved to browser settings unless overridden)
@@ -642,5 +626,5 @@ outside the editor compositor path.
 3. Browser setting `encodeProfile` in localStorage (set when you change the Export dropdown)
 4. `default` in `encoding-profiles.json`
 
-**MCP:** `fablecut_encode_profiles` lists profiles; `{detail:true}` includes full settings;
-`{profile:"hq"}` returns one profile. `fablecut_status` shows the effective profile for the project.
+**MCP:** `fablecut_encode_profiles` lists profiles; `{detail:true}` includes each `args`
+array; `{profile:"hq"}` returns one profile. `fablecut_status` shows the effective profile.

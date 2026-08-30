@@ -26,9 +26,8 @@ const {
   resolveProfile,
   listProfilesPublic,
   profileSummary,
-  buildVideoEncodeArgs,
-  buildMuxArgs,
-  exportOutputExtension,
+  buildExportArgs,
+  dryRunProfile,
 } = require("./encode-profiles");
 
 const {
@@ -163,32 +162,52 @@ async function faststart(file) {
 
 /* ── Fast export sessions ──
    The browser renders frames with its own compositor and streams them here as
-   JPEGs; ffmpeg encodes them (plus an optional WAV mix) into a real MP4. */
+   JPEGs; a single ffmpeg pass encodes them plus the WAV mix into the final file.
+   ffmpeg is spawned on the FIRST frame, not here: the audio mix is uploaded
+   between /begin and the first frame, and a one-pass encode needs it on disk. */
 const exportSessions = new Map();
-function beginExport(fps, name, profileId) {
+function beginExport(fps, name, profileId, hasAudio) {
   const profile = resolveProfile(profileId);
+  const dry = dryRunProfile(profile, { fps, hasAudio });
+  if (!dry.ok) throw new Error(`profile "${profile.id}" was rejected by ffmpeg: ${dry.error}`);
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-"));
-  const videoPath = path.join(dir, "video.mp4");
-  const proc = spawn("ffmpeg", buildVideoEncodeArgs(profile, fps, videoPath),
-    { stdio: ["pipe", "ignore", "pipe"] });
-  let stderr = "";
-  proc.stderr.on("data", (d) => { stderr = (stderr + d).slice(-2000); });
-  proc.stdin.on("error", () => {}); // EPIPE if ffmpeg dies mid-stream; surfaced via exit code
   const sess = {
-    proc, dir, videoPath, profile, name: safeName(name || "export"),
-    wav: null, err: () => stderr,
-    done: new Promise((res) => proc.on("close", res)),
+    proc: null, fps, profile, name: safeName(name || "export"),
+    dir: fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-")),
+    wav: null, partPath: null, outPath: null,
+    stderr: "", done: null,
+    // ffmpeg's complaint is in the last lines; the rest is progress noise
+    err: () => sess.stderr.trim().split("\n").filter(Boolean).slice(-3)
+      .map((l) => l.trim()).join(" · "),
   };
   exportSessions.set(id, sess);
   return { id, profile: profile.id, label: profile.label, summary: profileSummary(profile) };
+}
+/* Encode into exports/ under a .part name and rename once ffmpeg exits cleanly,
+   so an aborted render never leaves something that looks like a finished file. */
+function startEncoder(sess) {
+  const ext = sess.profile.extension;
+  const base = sess.name.replace(/\.(mp4|mov|m4v|mkv|webm)$/i, "");
+  sess.outPath = uniquePath(EXPORTS_DIR, base + ext);
+  // ".part" goes BEFORE the extension — ffmpeg picks its muxer from the
+  // extension, so a trailing ".part" would leave it unable to choose a format
+  sess.partPath = sess.outPath.slice(0, -ext.length) + ".part" + ext;
+  const proc = spawn("ffmpeg", buildExportArgs(sess.profile, {
+    fps: sess.fps, wavPath: sess.wav, outPath: sess.partPath,
+  }), { stdio: ["pipe", "ignore", "pipe"] });
+  proc.stderr.on("data", (d) => { sess.stderr = (sess.stderr + d).slice(-2000); });
+  proc.stdin.on("error", () => { }); // EPIPE if ffmpeg dies mid-stream; surfaced via exit code
+  sess.proc = proc;
+  sess.done = new Promise((res) => proc.on("close", res));
+  return proc;
 }
 function cleanupExport(id) {
   const s = exportSessions.get(id);
   if (!s) return;
   exportSessions.delete(id);
-  try { s.proc.kill(); } catch {}
+  try { s.proc?.kill(); } catch {}
   try { fs.rmSync(s.dir, { recursive: true, force: true }); } catch {}
+  if (s.partPath) try { fs.rmSync(s.partPath, { force: true }); } catch {}
 }
 
 /* Static file with HTTP Range support (required for <video> seeking) */
@@ -326,9 +345,10 @@ const server = http.createServer(async (req, res) => {
     try {
       const opts = JSON.parse((await readBody(req)).toString("utf8") || "{}");
       if (opts.profile) resolveProfile(opts.profile); // 400, not 500, on a bad id
-      sendJSON(res, 200, beginExport(opts.fps || 30, opts.name, opts.profile));
+      sendJSON(res, 200, beginExport(opts.fps || 30, opts.name, opts.profile, opts.hasAudio !== false));
     } catch (e) {
-      const bad = /^Unknown encoding profile/.test(e.message || "");
+      // an unusable profile is the caller's problem, not a server fault
+      const bad = /^Unknown encoding profile|was rejected by ffmpeg/.test(e.message || "");
       sendJSON(res, bad ? 400 : 500, { error: String(e.message || e) });
     }
     return;
@@ -338,9 +358,10 @@ const server = http.createServer(async (req, res) => {
     if (!sess) { sendJSON(res, 404, { error: "no such export session" }); return; }
     try {
       const body = await readBody(req);
-      if (sess.proc.exitCode !== null) throw new Error("ffmpeg exited: " + sess.err());
-      if (!sess.proc.stdin.write(body))
-        await new Promise((r) => sess.proc.stdin.once("drain", r));
+      const proc = sess.proc || startEncoder(sess); // the WAV has landed by now
+      if (proc.exitCode !== null) throw new Error("ffmpeg exited: " + sess.err());
+      if (!proc.stdin.write(body))
+        await new Promise((r) => proc.stdin.once("drain", r));
       sendJSON(res, 200, { ok: true });
     } catch (e) { sendJSON(res, 500, { error: String(e) }); }
     return;
@@ -361,14 +382,13 @@ const server = http.createServer(async (req, res) => {
     if (!sess) { sendJSON(res, 404, { error: "no such export session" }); return; }
     try {
       if (url.searchParams.get("discard")) { cleanupExport(id); sendJSON(res, 200, { ok: true }); return; }
+      if (!sess.proc) throw new Error("no frames were uploaded");
       sess.proc.stdin.end();
       const code = await sess.done;
       if (code !== 0) throw new Error("ffmpeg encode failed: " + sess.err());
-      const profile = sess.profile || resolveProfile();
-      const ext = exportOutputExtension(profile);
-      const out = uniquePath(EXPORTS_DIR, sess.name.replace(/\.(mp4|mov|m4v|mkv)$/i, "") + ext);
-      const wav = sess.wav && fs.existsSync(sess.wav) ? sess.wav : null;
-      await run("ffmpeg", buildMuxArgs(profile, sess.videoPath, wav, out));
+      const out = sess.outPath;
+      fs.renameSync(sess.partPath, out);
+      sess.partPath = null; // renamed — cleanup must not delete the finished file
       cleanupExport(id);
       sendJSON(res, 200, { ok: true, src: "/exports/" + encodeURIComponent(path.basename(out)) });
     } catch (e) { cleanupExport(id); sendJSON(res, 500, { error: String(e) }); }

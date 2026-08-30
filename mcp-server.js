@@ -158,11 +158,11 @@ const TOOLS = [
   },
   {
     name: "fablecut_encode_profiles",
-    description: "List ffmpeg encoding profiles for Fast export (from encoding-profiles.json). Use to pick a profile id for project.encodeProfile or to inspect codec/CRF/JPEG settings. Edit encoding-profiles.json on disk to add custom profiles — the server hot-reloads it.",
+    description: "List ffmpeg encoding profiles for Fast export (from encoding-profiles.json). Each profile is a raw ffmpeg argument list plus jpegQuality (browser frame quality) and extension (output container). Use to pick a profile id for project.encodeProfile. Edit encoding-profiles.json on disk to add custom profiles — anything the local ffmpeg supports works, and the server hot-reloads the file. Profiles are dry-run against ffmpeg when an export starts, so a bad argument is rejected before rendering.",
     inputSchema: {
       type: "object",
       properties: {
-        detail: { type: "boolean", description: "Include full video/audio/jpeg settings per profile (default: summary only)" },
+        detail: { type: "boolean", description: "Include the full ffmpeg args array per profile (default: a truncated summary)" },
         profile: { type: "string", description: "Return one profile by id instead of the full list" },
       },
     },
@@ -488,12 +488,8 @@ async function callTool(name, args) {
           label: p.label,
           description: p.description,
           jpegQuality: p.jpegQuality,
-          video: p.video,
-          audio: p.audio,
-          mux: p.mux,
-          encode: p.encode,
-          warnings: p.warnings,
-          summary: profileSummary(p),
+          extension: p.extension,
+          args: p.args,
         }, null, 2);
       }
       return JSON.stringify(listProfilesPublic(!!args.detail), null, 2);

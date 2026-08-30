@@ -5304,25 +5304,27 @@ function loop(ts) {
    – realtime: the original MediaRecorder capture, kept as the fallback for
      local sessions / servers without ffmpeg. */
 
+/* Placeholder until /api/export/profiles answers — the real list (and the real
+   ffmpeg args) always comes from encoding-profiles.json on the server. */
 let encodeProfiles = {
   default: "delivery",
   profiles: {
     draft: {
       label: "Draft · H.264 fast",
       description: "Quick preview — smaller file, faster encode.",
-      summary: "libx264 preset=veryfast crf=23 · aac 128k · JPEG 85%",
+      summary: "-c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 128k",
       jpegQuality: 0.85,
     },
     delivery: {
       label: "Delivery · H.264 balanced",
       description: "Default export — good quality and compatibility.",
-      summary: "libx264 preset=fast crf=18 · aac 192k · JPEG 95%",
+      summary: "-c:v libx264 -preset fast -crf 18 -c:a aac -b:a 192k",
       jpegQuality: 0.95,
     },
     hq: {
       label: "High quality · H.264 slow",
       description: "Best H.264 quality — slower encode, larger file.",
-      summary: "libx264 preset=slow crf=16 · aac 256k · JPEG 98%",
+      summary: "-c:v libx264 -preset slow -crf 16 -c:a aac -b:a 256k",
       jpegQuality: 0.98,
     },
   },
@@ -5572,6 +5574,9 @@ async function fastExport() {
         fps,
         name: project.name.replace(/[^\w\- ]+/g, "") || "export",
         profile: profileId,
+        // lets the server dry-run the profile with the same input count we
+        // will actually feed it, so -map based profiles are checked correctly
+        hasAudio: !!wav,
       }),
     }).then((r) => r.json());
     if (!begin.id) throw new Error(begin.error || "export begin failed");
