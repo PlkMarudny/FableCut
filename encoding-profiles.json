@@ -1,0 +1,49 @@
+{
+  "default": "delivery",
+  "profiles": {
+    "draft": {
+      "label": "Draft · H.264 fast",
+      "description": "Quick preview — smaller file, faster encode.",
+      "jpegQuality": 0.85,
+      "video": { "codec": "libx264", "preset": "veryfast", "crf": 23, "pixFmt": "yuv420p" },
+      "audio": { "codec": "aac", "bitrate": "128k" },
+      "mux": { "movflags": "+faststart" }
+    },
+    "delivery": {
+      "label": "Delivery · H.264 balanced",
+      "description": "Default export — good quality and compatibility.",
+      "jpegQuality": 0.95,
+      "encode": { "hideBanner": true, "loglevel": "info", "stats": true },
+      "video": { "codec": "libx264", "preset": "fast", "crf": 18, "pixFmt": "yuv420p" },
+      "audio": { "codec": "aac", "bitrate": "192k" },
+      "mux": { "movflags": "+faststart" }
+    },
+    "hq": {
+      "label": "High quality · H.264 slow",
+      "description": "Best H.264 quality — slower encode, larger file.",
+      "jpegQuality": 0.98,
+      "video": { "codec": "libx264", "preset": "slow", "crf": 16, "pixFmt": "yuv420p" },
+      "audio": { "codec": "aac", "bitrate": "256k" },
+      "mux": { "movflags": "+faststart" }
+    },
+    "broadcast1080i50": {
+      "label": "Broadcast · 1080i50 MOV",
+      "description": "Interlaced H.264 for broadcast-style delivery. Set project to 1920×1080 @ 25fps (progressive); export applies 50i + x264 opts.",
+      "jpegQuality": 0.98,
+      "encode": { "hideBanner": true, "loglevel": "panic", "stats": true },
+      "video": {
+        "codec": "libx264",
+        "preset": "veryfast",
+        "crf": 18,
+        "pixFmt": "yuv420p",
+        "g": 10,
+        "maxrate": "60M",
+        "bufsize": "70M",
+        "x264opts": "open_gop=0:interlaced=1:me=hex:subme=2:cabac=1:no-deblock:analyse=all:8x8dct=1:bframes=2:weightp=0:sliced-threads:level=41",
+        "vf": "scale=1920:1080:interl=-1,fps=50,tinterlace=interleave_top:bypass_il"
+      },
+      "audio": { "codec": "aac", "bitrate": "384k", "sampleRate": 48000, "strict": "-2" },
+      "mux": { "format": "mov", "extension": ".mov" }
+    }
+  }
+}

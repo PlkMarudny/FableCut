@@ -19,6 +19,17 @@ const os = require("os");
 const { spawn, spawnSync, execFile } = require("child_process");
 
 const { analyze } = require("./analyze");
+const {
+  PROFILES_FILE,
+  loadEncodeProfiles,
+  invalidateEncodeProfiles,
+  resolveProfile,
+  listProfilesPublic,
+  profileSummary,
+  buildVideoEncodeArgs,
+  buildMuxArgs,
+  exportOutputExtension,
+} = require("./encode-profiles");
 
 const {
   APP_DIR, DATA_DIR, MEDIA_DIR, EXPORTS_DIR, ANALYSIS_DIR, LIBRARY_DIR,
@@ -93,6 +104,14 @@ function onFsChange() {
 /* watch the directory, not the file — atomic tmp+rename writes would detach a
    direct file watcher on Windows */
 try { fs.watch(DATA_DIR, (ev, f) => { if (f === "project.json") onFsChange(); }); } catch {}
+try {
+  fs.watch(ROOT, (ev, f) => {
+    if (f === path.basename(PROFILES_FILE)) {
+      invalidateEncodeProfiles();
+      onFsChange();
+    }
+  });
+} catch {}
 try { fs.watch(MEDIA_DIR, onFsChange); } catch {}
 for (const d of LIBRARY_SUBDIRS) {
   try { fs.watch(path.join(LIBRARY_DIR, d), onFsChange); } catch {}
@@ -146,32 +165,23 @@ async function faststart(file) {
    The browser renders frames with its own compositor and streams them here as
    JPEGs; ffmpeg encodes them (plus an optional WAV mix) into a real MP4. */
 const exportSessions = new Map();
-function beginExport(fps, name) {
+function beginExport(fps, name, profileId) {
+  const profile = resolveProfile(profileId);
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-"));
   const videoPath = path.join(dir, "video.mp4");
-  const proc = spawn("ffmpeg", [
-    "-y", "-f", "image2pipe", "-framerate", String(fps), "-i", "-",
-    // The browser's JPEG frames are full-range BT.601 (JFIF). Convert them to
-    // limited-range BT.709 and TAG the stream, otherwise x264 emits bt470bg/pc/
-    // unknown and players do the wrong YUV->RGB conversion — the render comes
-    // out darker than the preview.
-    "-vf", "scale=in_range=full:in_color_matrix=bt601:out_range=tv:out_color_matrix=bt709",
-    "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-    "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-    "-color_range", "tv",
-    videoPath,
-  ], { stdio: ["pipe", "ignore", "pipe"] });
+  const proc = spawn("ffmpeg", buildVideoEncodeArgs(profile, fps, videoPath),
+    { stdio: ["pipe", "ignore", "pipe"] });
   let stderr = "";
   proc.stderr.on("data", (d) => { stderr = (stderr + d).slice(-2000); });
   proc.stdin.on("error", () => {}); // EPIPE if ffmpeg dies mid-stream; surfaced via exit code
   const sess = {
-    proc, dir, videoPath, name: safeName(name || "export"),
+    proc, dir, videoPath, profile, name: safeName(name || "export"),
     wav: null, err: () => stderr,
     done: new Promise((res) => proc.on("close", res)),
   };
   exportSessions.set(id, sess);
-  return id;
+  return { id, profile: profile.id, label: profile.label, summary: profileSummary(profile) };
 }
 function cleanupExport(id) {
   const s = exportSessions.get(id);
@@ -304,12 +314,23 @@ const server = http.createServer(async (req, res) => {
     sendJSON(res, 200, { available: HAS_FFMPEG });
     return;
   }
+  if (p === "/api/export/profiles" && req.method === "GET") {
+    try {
+      const detail = url.searchParams.get("detail") === "1";
+      sendJSON(res, 200, listProfilesPublic(detail));
+    } catch (e) { sendJSON(res, 500, { error: String(e) }); }
+    return;
+  }
   if (p === "/api/export/begin" && req.method === "POST") {
     if (!HAS_FFMPEG) { sendJSON(res, 400, { error: "ffmpeg not found on PATH" }); return; }
     try {
       const opts = JSON.parse((await readBody(req)).toString("utf8") || "{}");
-      sendJSON(res, 200, { id: beginExport(opts.fps || 30, opts.name) });
-    } catch (e) { sendJSON(res, 500, { error: String(e) }); }
+      if (opts.profile) resolveProfile(opts.profile); // 400, not 500, on a bad id
+      sendJSON(res, 200, beginExport(opts.fps || 30, opts.name, opts.profile));
+    } catch (e) {
+      const bad = /^Unknown encoding profile/.test(e.message || "");
+      sendJSON(res, bad ? 400 : 500, { error: String(e.message || e) });
+    }
     return;
   }
   if (p === "/api/export/frame" && req.method === "POST") {
@@ -343,18 +364,11 @@ const server = http.createServer(async (req, res) => {
       sess.proc.stdin.end();
       const code = await sess.done;
       if (code !== 0) throw new Error("ffmpeg encode failed: " + sess.err());
-      const out = uniquePath(EXPORTS_DIR, sess.name.replace(/\.mp4$/i, "") + ".mp4");
-      // Re-assert the bt709 tags on the mux — a stream-copy pass can drop the
-      // container-level colr atom even though the SPS still carries them.
-      const TAGS = ["-colorspace", "bt709", "-color_primaries", "bt709",
-                    "-color_trc", "bt709", "-color_range", "tv"];
-      if (sess.wav && fs.existsSync(sess.wav))
-        await run("ffmpeg", ["-y", "-i", sess.videoPath, "-i", sess.wav,
-          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest",
-          ...TAGS, "-movflags", "+faststart", out]);
-      else
-        await run("ffmpeg", ["-y", "-i", sess.videoPath, "-c", "copy",
-          ...TAGS, "-movflags", "+faststart", out]);
+      const profile = sess.profile || resolveProfile();
+      const ext = exportOutputExtension(profile);
+      const out = uniquePath(EXPORTS_DIR, sess.name.replace(/\.(mp4|mov|m4v|mkv)$/i, "") + ext);
+      const wav = sess.wav && fs.existsSync(sess.wav) ? sess.wav : null;
+      await run("ffmpeg", buildMuxArgs(profile, sess.videoPath, wav, out));
       cleanupExport(id);
       sendJSON(res, 200, { ok: true, src: "/exports/" + encodeURIComponent(path.basename(out)) });
     } catch (e) { cleanupExport(id); sendJSON(res, 500, { error: String(e) }); }
@@ -441,5 +455,9 @@ server.listen(PORT, HOST, () => {
   console.log(`  media folder : ${MEDIA_DIR}`);
   console.log(`  library      : ${LIBRARY_DIR} (${LIBRARY_SUBDIRS.join(", ")})`);
   if (DATA_DIR !== APP_DIR) console.log(`  app files    : ${APP_DIR}`);
-  console.log(`  ffmpeg       : ${HAS_FFMPEG ? "found (fast export + faststart remux on)" : "not found (real-time export only)"}\n`);
+  console.log(`  ffmpeg       : ${HAS_FFMPEG ? "found (fast export + faststart remux on)" : "not found (real-time export only)"}`);
+  const enc = loadEncodeProfiles(true);
+  console.log(`  encode prof. : ${PROFILES_FILE} (${Object.keys(enc.profiles).join(", ")} · default ${enc.default})`);
+  for (const issue of enc.issues || []) console.log(`     ⚠ ${issue}`);
+  console.log("");
 });
