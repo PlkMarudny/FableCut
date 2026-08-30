@@ -205,6 +205,9 @@ function addLiveAudioTrackBuses(ids) {
 const SETTINGS_KEY = "fablecut-settings";
 const DEFAULT_SETTINGS = {
   linkSelect: false, // timeline ↔ project bin selection sync
+  // WebCodecs has no CRF — bitrate (Mbps) + constant|variable mode
+  webCodecsBitrateMbps: null, // null = auto from canvas size
+  webCodecsBitrateMode: "variable", // "variable" | "constant"
 };
 let settings = { ...DEFAULT_SETTINGS };
 function loadSettings() {
@@ -214,6 +217,15 @@ function loadSettings() {
     const next = { ...DEFAULT_SETTINGS };
     for (const k of Object.keys(DEFAULT_SETTINGS)) {
       if (Object.hasOwn(raw, k)) next[k] = raw[k];
+    }
+    // coerce WebCodecs bitrate settings
+    const mbps = next.webCodecsBitrateMbps;
+    if (mbps != null) {
+      const n = Number(mbps);
+      next.webCodecsBitrateMbps = (Number.isFinite(n) && n > 0) ? n : null;
+    }
+    if (next.webCodecsBitrateMode !== "constant" && next.webCodecsBitrateMode !== "variable") {
+      next.webCodecsBitrateMode = "variable";
     }
     settings = next;
   } catch {
@@ -235,7 +247,7 @@ function setSetting(key, value) {
 /* ── State ─────────────────────────────────────────────────────────────── */
 const project = {
   name: "Untitled Project",
-  width: 1280, height: 720, fps: 30,
+  width: 1280, height: 720, fps: 25,
   background: "#000000",
   revision: 0,
   folders: [], // {id, name, parentId:null|string, open:true} — Project-bin tree (virtual)
@@ -260,6 +272,7 @@ const state = {
   viewZoom: 1,           // program-monitor display zoom (1 = fit stage)
   audioHold: false,      // while paused, loop one frame of audio at the playhead
   ffmpeg: false,         // server reports ffmpeg available
+  webCodecs: false,      // VideoEncoder + Annex-B H.264 supported
   dirtyTimeline: true, gesture: false,
   workAreaPlay: false,   // when true, play + Home/End stay inside IN/OUT
   binTab: "project",     // project | elements | sfx | svg
@@ -458,11 +471,36 @@ async function connectServer() {
     listenSSE();
     fetch("/api/export/ffmpeg").then((r) => r.json())
       .then((j) => { state.ffmpeg = !!j.available; }).catch(() => { });
+    detectWebCodecs();
   } catch {
     state.connected = false;
     els.projectName.textContent = project.name + "  ·  ⚪ local session";
   }
   await probeMissingMeta();
+}
+/* Main-profile AVC level by canvas height; Annex-B is required so ffmpeg
+   can ingest the elementary stream with `-f h264` and no avcC converter. */
+function webCodecsAvcCodec() {
+  const h = project.height || 720;
+  if (h > 1080) return "avc1.4D0032"; // Main@L5.0
+  if (h > 720) return "avc1.4D0028";  // Main@L4.0
+  return "avc1.4D001F";               // Main@L3.1
+}
+async function detectWebCodecs() {
+  state.webCodecs = false;
+  try {
+    if (typeof VideoEncoder !== "function" || typeof VideoEncoder.isConfigSupported !== "function") return;
+    const cfg = {
+      codec: webCodecsAvcCodec(),
+      width: Math.max(2, project.width | 0 || 1280),
+      height: Math.max(2, project.height | 0 || 720),
+      bitrate: 8_000_000,
+      framerate: project.fps || 30,
+      avc: { format: "annexb" },
+    };
+    const { supported } = await VideoEncoder.isConfigSupported(cfg);
+    state.webCodecs = !!supported;
+  } catch { state.webCodecs = false; }
 }
 const TIMELINE_START_TIME = 0.000; // composition timeline start (seconds)
 function normalizeWorkArea(i, o, t0 = TIMELINE_START_TIME) {
@@ -5288,25 +5326,66 @@ function loop(ts) {
 }
 
 /* ═══════════════════════════ EXPORT ═══════════════════════════ */
-/* Two engines:
-   – fast: the browser renders every frame with the normal compositor
-     (frame-accurate, works unfocused) and streams JPEGs + an offline audio
-     mix to the server, where ffmpeg encodes a real CRF-18 MP4.
-   – realtime: the original MediaRecorder capture, kept as the fallback for
-     local sessions / servers without ffmpeg. */
+/* Two primary engines + offline fallback:
+   – fast: JPEG frames → server libx264 (quality / CRF path)
+   – webcodecs: VideoEncoder Annex-B H.264 → server stream-copy mux
+   – realtime MediaRecorder: only when WebCodecs or the server is unavailable */
 
-function openExportSetup() {
+function syncExportWcOpts() {
+  const opts = $("exportWcOpts");
+  if (!opts) return;
+  const show = !!(els.engineRealtime?.checked && state.webCodecs
+    && state.connected && state.ffmpeg && !els.engineRealtime.disabled);
+  opts.classList.toggle("hidden", !show);
+}
+function fillExportWcOpts() {
+  const br = $("exportWcBitrate");
+  const mode = $("exportWcMode");
+  if (br) {
+    const mbps = getSetting("webCodecsBitrateMbps");
+    const want = mbps == null ? "auto" : String(Math.round(Number(mbps)));
+    br.value = [...br.options].some((o) => o.value === want) ? want : "auto";
+  }
+  if (mode) {
+    const m = getSetting("webCodecsBitrateMode");
+    mode.value = m === "constant" ? "constant" : "variable";
+  }
+}
+function persistExportWcOpts() {
+  const br = $("exportWcBitrate");
+  const mode = $("exportWcMode");
+  if (br) {
+    setSetting("webCodecsBitrateMbps", br.value === "auto" ? null : Number(br.value));
+  }
+  if (mode) {
+    setSetting("webCodecsBitrateMode", mode.value === "constant" ? "constant" : "variable");
+  }
+}
+/** Bitrate for VideoEncoder.configure — no CRF in WebCodecs; only bitrate (+ CBR/VBR). */
+function webCodecsBitrate(w, h, fps) {
+  const mbps = getSetting("webCodecsBitrateMbps");
+  if (mbps != null && Number.isFinite(+mbps) && +mbps > 0) {
+    return Math.round(Math.min(100, Math.max(0.5, +mbps)) * 1_000_000);
+  }
+  // ~0.1 bit/pixel/frame, clamped — same heuristic as before
+  return Math.min(20_000_000, Math.max(2_000_000, Math.round(w * h * fps * 0.1)));
+}
+async function openExportSetup() {
   if (state.exporting) return;
   if (!project.clips.length) { alert("Timeline is empty — add some clips first."); return; }
+  await detectWebCodecs();
   const ef = getExportFrame();
   const fastOk = state.connected && state.ffmpeg;
-  const rtOk = !ef; // realtime cannot crop to the delivery frame
+  // WebCodecs and MediaRecorder encode the full canvas — only Fast crops.
+  const wcOk = fastOk && state.webCodecs && !ef;
+  const recOk = !ef && !!(window.MediaRecorder && pickMime());
   els.engineFast.disabled = !fastOk;
-  els.engineRealtime.disabled = !rtOk;
+  els.engineRealtime.disabled = !wcOk && !recOk;
+  // Prefer Fast, then WebCodecs, then MediaRecorder
   if (fastOk) {
     els.engineFast.checked = true;
     els.engineRealtime.checked = false;
-  } else if (rtOk) {
+  } else if (wcOk || recOk) {
     els.engineFast.checked = false;
     els.engineRealtime.checked = true;
   } else {
@@ -5316,16 +5395,24 @@ function openExportSetup() {
   }
   $("engineFastNote").textContent = fastOk
     ? (ef ? "Exports the " + ef.w + "×" + ef.h + " delivery frame (cropped). Keeps rendering if you switch tabs."
-      : "Frame-accurate ffmpeg encode. Keeps rendering if you switch tabs.")
+      : "Frame-accurate. Server encodes H.264 from JPEG frames. Keeps going if you switch tabs.")
     : (ef
       ? "Needs the server + ffmpeg on PATH to export a cropped delivery frame."
       : "Needs the server + ffmpeg on PATH.");
-  const rtNote = $("engineRealtime")?.closest(".engine-opt")?.querySelector(".dim");
-  if (rtNote) rtNote.textContent = ef
-    ? (fastOk
+  const wcNote = $("engineWebCodecsNote");
+  if (wcNote) {
+    if (wcOk) wcNote.textContent = "Frame-accurate. Browser HW-encodes H.264; server muxes with audio. Faster upload than Fast.";
+    else if (ef) wcNote.textContent = fastOk
       ? "Unavailable while an export frame is set — use Fast export."
-      : "Unavailable while an export frame is set. Install ffmpeg, or clear the export frame to use Realtime.")
-    : "Plays the timeline once and records it. Keep the tab focused.";
+      : "Unavailable while an export frame is set. Install ffmpeg, or clear the export frame to use Realtime.";
+    else if (!state.connected || !state.ffmpeg) wcNote.textContent = "Needs the server + ffmpeg. Falling back to in-browser MediaRecorder when selected.";
+    else wcNote.textContent = "This browser does not support VideoEncoder Annex-B H.264. Falling back to MediaRecorder when selected.";
+  }
+  // Relabel the radio when WebCodecs is unavailable but MediaRecorder still works
+  const label = els.engineRealtime?.closest("label")?.querySelector("b");
+  if (label) label.textContent = wcOk ? "WebCodecs (HW encode)" : "Realtime (in-browser)";
+  fillExportWcOpts();
+  syncExportWcOpts();
   const warn = $("exportTrackWarn");
   const disabled = TRACKS.filter((t) =>
     !isTrackEnabled(t.id) && project.clips.some((c) => c.track === t.id)
@@ -5343,9 +5430,10 @@ function openExportSetup() {
   els.exportSetup.classList.remove("hidden");
 }
 function startChosenExport() {
+  persistExportWcOpts();
   const useFast = els.engineFast.checked && !els.engineFast.disabled;
-  const useRt = els.engineRealtime.checked && !els.engineRealtime.disabled;
-  if (!useFast && !useRt) {
+  const useSecond = els.engineRealtime.checked && !els.engineRealtime.disabled;
+  if (!useFast && !useSecond) {
     const ef = getExportFrame();
     if (ef && !(state.connected && state.ffmpeg)) {
       alert("Export frame cropping needs Fast export (server + ffmpeg). Clear the export frame, or install ffmpeg and try again.");
@@ -5356,6 +5444,7 @@ function startChosenExport() {
   }
   els.exportSetup.classList.add("hidden");
   if (useFast) fastExport();
+  else if (useSecond && state.connected && state.ffmpeg && state.webCodecs && !getExportFrame()) webCodecsExport();
   else startExport();
 }
 
@@ -5491,6 +5580,7 @@ async function fastExport() {
       await prepareFrameAssets(t);       // exact SVG frames + AI masks
       drawFrame(t);
       const blob = await previewToExportBlob(0.95);
+      if (!blob) throw new Error("frame encode failed");
       const r = await fetch("/api/export/frame?id=" + sessId, { method: "POST", body: blob });
       if (!r.ok) throw new Error((await r.json()).error || "frame upload failed");
       const pct = ((f + 1) / frames) * 100;
@@ -5515,7 +5605,173 @@ async function fastExport() {
   }
 }
 
-/* ── Realtime export (MediaRecorder fallback) ── */
+/* ── WebCodecs export (browser H.264 → server mux) ── */
+/* Uploads MUST be strictly sequential — concurrent /frame POSTs race on the
+   same ffmpeg stdin and deadlock the pipe (progress freezes around a few %). */
+let webCodecsAbort = null;
+function waitEncodeQueue(encoder, max = 2) {
+  if (encoder.encodeQueueSize <= max) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const done = (err) => {
+      clearInterval(poll);
+      encoder.ondequeue = null;
+      err ? rej(err) : res();
+    };
+    const tick = () => {
+      if (renderCancelled) done(new Error("cancelled"));
+      else if (encoder.encodeQueueSize <= max) done(null);
+    };
+    encoder.ondequeue = tick;
+    // ondequeue alone won't notice Cancel — poll the flag
+    const poll = setInterval(tick, 50);
+    tick();
+  });
+}
+async function webCodecsExport() {
+  if (state.exporting) return;
+  if (!state.webCodecs) { startExport(); return; }
+  pause();
+  state.exporting = true; state.rendering = true; renderCancelled = false;
+  webCodecsAbort = new AbortController();
+  const signal = webCodecsAbort.signal;
+  els.exportOverlay.classList.remove("hidden");
+  els.exportProgress.style.width = "0%";
+  els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues.";
+  const fps = Number(project.fps) || 30, dur = Math.max(1 / fps, projDur());
+  const frames = Math.max(1, Math.round(dur * fps));
+  const keyEvery = Math.max(1, Math.round(fps * 2));
+  let sessId = null;
+  let encoder = null;
+  let uploadError = null;
+  // single-flight upload chain: each NAL waits for the previous POST to finish
+  let uploadTail = Promise.resolve();
+  let uploadsInFlight = 0;
+  const enqueueUpload = (buf) => {
+    uploadsInFlight++;
+    // recover from a prior rejection so one failed POST doesn't stall the chain
+    const p = uploadTail.catch(() => {}).then(async () => {
+      if (renderCancelled || signal.aborted) throw new Error("cancelled");
+      if (uploadError) throw uploadError;
+      const r = await fetch("/api/export/frame?id=" + sessId, {
+        method: "POST", body: buf, signal,
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "frame upload failed");
+    });
+    uploadTail = p.catch((err) => {
+      if (!uploadError) uploadError = err;
+    }).finally(() => { uploadsInFlight--; });
+    return p;
+  };
+  const waitUploadBackpressure = (max = 2) => new Promise((res, rej) => {
+    const tick = () => {
+      if (renderCancelled || signal.aborted) { clearInterval(poll); rej(new Error("cancelled")); }
+      else if (uploadError) { clearInterval(poll); rej(uploadError); }
+      else if (uploadsInFlight <= max) { clearInterval(poll); res(); }
+    };
+    const poll = setInterval(tick, 20);
+    tick();
+  });
+  try {
+    els.exportTitle.textContent = "Mixing audio…";
+    const wav = await renderAudioMix(dur);
+    if (renderCancelled) throw new Error("cancelled");
+
+    const begin = await fetch("/api/export/begin", {
+      method: "POST",
+      body: JSON.stringify({
+        fps,
+        name: project.name.replace(/[^\w\- ]+/g, "") || "export",
+        mode: "annexb",
+        hasAudio: !!wav,
+      }),
+      signal,
+    }).then((r) => r.json());
+    if (!begin.id) throw new Error(begin.error || "export begin failed");
+    sessId = begin.id;
+    if (wav) {
+      const r = await fetch("/api/export/audio?id=" + sessId, { method: "POST", body: wav, signal });
+      if (!r.ok) throw new Error("audio upload failed");
+    }
+
+    // Always encode at project/frame resolution (not display CSS size).
+    const w = Math.max(2, project.width | 0 || 1280);
+    const h = Math.max(2, project.height | 0 || 720);
+    if (els.preview.width !== w || els.preview.height !== h) {
+      els.preview.width = w;
+      els.preview.height = h;
+    }
+    const codec = webCodecsAvcCodec();
+    const bitrate = webCodecsBitrate(w, h, fps);
+    const bitrateMode = getSetting("webCodecsBitrateMode") === "constant" ? "constant" : "variable";
+    encoder = new VideoEncoder({
+      output: (chunk) => {
+        if (uploadError || renderCancelled || signal.aborted) return;
+        const buf = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(buf);
+        enqueueUpload(buf);
+      },
+      error: (e) => { uploadError = e; },
+    });
+    encoder.configure({
+      codec, width: w, height: h, bitrate, bitrateMode, framerate: fps,
+      avc: { format: "annexb" },
+      latencyMode: "quality",
+    });
+    try { await document.fonts.ready; } catch { }
+
+    for (let f = 0; f < frames; f++) {
+      if (renderCancelled || signal.aborted) throw new Error("cancelled");
+      if (uploadError) throw uploadError;
+      await waitUploadBackpressure(2);
+      await waitEncodeQueue(encoder, 2);
+      const t = f / fps;
+      state.time = t;
+      await seekVideosTo(t);
+      await prepareFrameAssets(t);
+      drawFrame(t);
+      // Absolute µs timestamps; duration = delta so average rate stays exact
+      // (constant Math.round(1e6/fps) drifts, e.g. 33333µs → avg 1000000/33333).
+      const ts = Math.round(f * 1e6 / fps);
+      const frame = new VideoFrame(els.preview, {
+        timestamp: ts,
+        duration: Math.round((f + 1) * 1e6 / fps) - ts,
+      });
+      try {
+        encoder.encode(frame, { keyFrame: f === 0 || f % keyEvery === 0 });
+      } finally {
+        frame.close();
+      }
+      const pct = ((f + 1) / frames) * 100;
+      els.exportProgress.style.width = pct.toFixed(1) + "%";
+      els.exportTitle.textContent = `Encoding… ${pct.toFixed(0)}%`;
+    }
+    els.exportTitle.textContent = "Finishing…";
+    await encoder.flush();
+    await uploadTail;
+    if (uploadError) throw uploadError;
+    encoder.close();
+    encoder = null;
+    const end = await fetch("/api/export/end?id=" + sessId, { method: "POST", signal }).then((r) => r.json());
+    if (!end.src) throw new Error(end.error || "mux failed");
+    const a = document.createElement("a");
+    a.href = end.src;
+    a.download = decodeURIComponent(end.src.split("/").pop());
+    a.click();
+  } catch (e) {
+    try { encoder?.close(); } catch { }
+    if (sessId) fetch("/api/export/end?id=" + sessId + "&discard=1", { method: "POST" }).catch(() => { });
+    const msg = e?.name === "AbortError" ? "cancelled" : String(e.message || e);
+    if (msg !== "cancelled") alert("Export failed: " + msg);
+  } finally {
+    webCodecsAbort = null;
+    state.exporting = false; state.rendering = false;
+    els.exportOverlay.classList.add("hidden");
+    els.exportNote.textContent = "Rendering your sequence in real time. Keep this tab focused.";
+    if (runtime.pendingSync) syncFromServer();
+  }
+}
+
+/* ── Realtime export (MediaRecorder offline / unsupported fallback) ── */
 let recorder = null, recChunks = [], recDiscard = false;
 function pickMime() {
   const cands = [
@@ -5590,9 +5846,15 @@ $("btnDelete").addEventListener("click", () => {
 $("btnExport").addEventListener("click", openExportSetup);
 $("btnStartExport").addEventListener("click", startChosenExport);
 $("btnCancelSetup").addEventListener("click", () => els.exportSetup.classList.add("hidden"));
+els.engineFast?.addEventListener("change", syncExportWcOpts);
+els.engineRealtime?.addEventListener("change", syncExportWcOpts);
+$("exportWcBitrate")?.addEventListener("change", persistExportWcOpts);
+$("exportWcMode")?.addEventListener("change", persistExportWcOpts);
 $("btnCancelExport").addEventListener("click", () => {
-  if (state.rendering) renderCancelled = true;
-  else finishExport(false);
+  if (state.rendering) {
+    renderCancelled = true;
+    try { webCodecsAbort?.abort(); } catch { }
+  } else finishExport(false);
 });
 $("btnPlay").addEventListener("click", () => state.playing ? pause() : play());
 els.btnSpeed.addEventListener("click", () => cyclePreviewRate(1));
