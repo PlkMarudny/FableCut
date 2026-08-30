@@ -762,6 +762,15 @@ function projectJSON() {
 }
 function listenSSE() {
   const es = new EventSource("/api/events");
+  // Named events: "change" = project/media/library; "profiles" = encoding-profiles.json only
+  es.addEventListener("change", () => syncFromServer());
+  es.addEventListener("profiles", () => {
+    fetchEncodeProfiles().then(() => {
+      if (els.exportSetup && !els.exportSetup.classList.contains("hidden"))
+        populateExportProfileSelect();
+    });
+  });
+  // Legacy default "message" events (old servers that emit bare `data:`)
   es.onmessage = () => syncFromServer();
 }
 /* Pull the server's project if it moved past our revision (an external tool —

@@ -5,8 +5,10 @@
    Adds to the browser editor:
      • persistent project      ./project.json      (GET/PUT /api/project)
      • media library folder    ./media/            (served at /media/*, POST /api/upload)
-     • live reload             GET /api/events     (SSE; fires when project.json
-                                                    or ./media changes on disk)
+     • live reload             GET /api/events     (SSE: event "change" for
+                                                    project/media/library;
+                                                    event "profiles" for
+                                                    encoding-profiles.json)
 
    Automation: any tool (e.g. Claude Code) can edit project.json or drop files
    into ./media — the browser UI reloads instantly. Schema: see CLAUDE.md.
@@ -92,23 +94,27 @@ if (!fs.existsSync(PROJECT_FILE)) {
 
 /* ── SSE clients + file watching ── */
 const sseClients = new Set();
-function broadcast() {
-  for (const res of sseClients) res.write(`data: change\n\n`);
+function broadcast(event = "change") {
+  const payload = `event: ${event}\ndata: ${event}\n\n`;
+  for (const res of sseClients) res.write(payload);
 }
 let debounce = null;
+let profilesDebounce = null;
 function onFsChange() {
   clearTimeout(debounce);
-  debounce = setTimeout(broadcast, 150);
+  debounce = setTimeout(() => broadcast("change"), 150);
+}
+function onProfilesChange() {
+  invalidateEncodeProfiles();
+  clearTimeout(profilesDebounce);
+  profilesDebounce = setTimeout(() => broadcast("profiles"), 150);
 }
 /* watch the directory, not the file — atomic tmp+rename writes would detach a
    direct file watcher on Windows */
 try { fs.watch(DATA_DIR, (ev, f) => { if (f === "project.json") onFsChange(); }); } catch {}
 try {
   fs.watch(ROOT, (ev, f) => {
-    if (f === path.basename(PROFILES_FILE)) {
-      invalidateEncodeProfiles();
-      onFsChange();
-    }
+    if (f === path.basename(PROFILES_FILE)) onProfilesChange();
   });
 } catch {}
 try { fs.watch(MEDIA_DIR, onFsChange); } catch {}
@@ -211,10 +217,45 @@ function startEncoder(sess) {
     fps: sess.fps, wavPath: sess.wav, outPath: sess.partPath,
   }), { stdio: ["pipe", "ignore", "pipe"] });
   proc.stderr.on("data", (d) => { sess.stderr = (sess.stderr + d).slice(-2000); });
-  proc.stdin.on("error", () => { }); // EPIPE if ffmpeg dies mid-stream; surfaced via exit code
+  // EPIPE on end()/late writes is normal once ffmpeg has exited; writeExportFrame
+  // attaches its own error listener while a backpressured write is in flight.
+  proc.stdin.on("error", () => { });
   sess.proc = proc;
   sess.done = new Promise((res) => proc.on("close", res));
   return proc;
+}
+/** Write one JPEG frame to ffmpeg stdin. If the pipe is full, wait for drain —
+ *  but also reject if ffmpeg exits or the stdin errors, so the HTTP request
+ *  cannot hang forever after a failed encode. */
+function writeExportFrame(sess, body) {
+  const proc = sess.proc;
+  return new Promise((resolve, reject) => {
+    if (!proc || proc.exitCode !== null || proc.killed)
+      return reject(new Error("ffmpeg exited: " + sess.err()));
+
+    let settled = false;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      proc.off("close", onClose);
+      proc.stdin.off("error", onErr);
+      proc.stdin.off("drain", onDrain);
+      fn(arg);
+    };
+    const onClose = () => finish(reject, new Error("ffmpeg exited: " + (sess.err() || "closed")));
+    const onErr = (e) => finish(reject, new Error(e?.message || "ffmpeg stdin error"));
+    const onDrain = () => finish(resolve);
+
+    proc.once("close", onClose);
+    proc.stdin.once("error", onErr);
+    let ok;
+    try { ok = proc.stdin.write(body); }
+    catch (e) { return finish(reject, e); }
+    if (proc.exitCode !== null)
+      return finish(reject, new Error("ffmpeg exited: " + sess.err()));
+    if (ok) finish(resolve);
+    else proc.stdin.once("drain", onDrain);
+  });
 }
 function cleanupExport(id) {
   const s = exportSessions.get(id);
@@ -369,16 +410,18 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (p === "/api/export/frame" && req.method === "POST") {
-    const sess = exportSessions.get(url.searchParams.get("id"));
+    const id = url.searchParams.get("id");
+    const sess = exportSessions.get(id);
     if (!sess) { sendJSON(res, 404, { error: "no such export session" }); return; }
     try {
       const body = await readBody(req);
-      const proc = sess.proc || startEncoder(sess); // the WAV has landed by now
-      if (proc.exitCode !== null) throw new Error("ffmpeg exited: " + sess.err());
-      if (!proc.stdin.write(body))
-        await new Promise((r) => proc.stdin.once("drain", r));
+      if (!sess.proc) startEncoder(sess); // the WAV has landed by now
+      await writeExportFrame(sess, body);
       sendJSON(res, 200, { ok: true });
-    } catch (e) { sendJSON(res, 500, { error: String(e) }); }
+    } catch (e) {
+      cleanupExport(id);
+      sendJSON(res, 500, { error: String(e.message || e) });
+    }
     return;
   }
   if (p === "/api/export/audio" && req.method === "POST") {

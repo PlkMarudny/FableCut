@@ -430,7 +430,9 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 - `POST /api/analyze` — body `{src:"/media/ref.mp4", threshold?, music?}`: analyze a
   reference video into an edit blueprint (see "Remake a reference video"); extracts
   its music into ./media. `GET /api/analyze?src=…` returns the cached blueprint.
-- `GET  /api/events`  — SSE, emits `change` when project.json, ./media or ./library changes
+- `GET  /api/events`  — SSE: named event `change` when project.json, ./media or
+  ./library changes; named event `profiles` when `encoding-profiles.json` changes
+  (UI refreshes the export-profile list only — no project reload)
 - Fast export (used by the UI; browser renders frames, ffmpeg encodes):
   `GET /api/export/ffmpeg` → `{available}` · `GET /api/export/profiles[?detail=1]` →
   `{default, profiles, issues}` · `POST /api/export/begin` `{fps,name,profile?,hasAudio?}` →
@@ -573,7 +575,8 @@ ffmpeg directly from `media/` sources if a file is needed.
 User-editable at the repo root. A profile is a **raw ffmpeg argument list** plus the
 two things that are not ffmpeg arguments: `jpegQuality` (the browser's frame quality)
 and `extension` (which names the file and therefore picks the muxer). Edit the file
-while the server runs — the UI hot-reloads the profile list via SSE.
+while the server runs — the UI hot-reloads the profile list via an SSE `profiles`
+event (no full project reload).
 
 ```jsonc
 {
