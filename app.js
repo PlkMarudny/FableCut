@@ -247,7 +247,7 @@ function setSetting(key, value) {
 /* ── State ─────────────────────────────────────────────────────────────── */
 const project = {
   name: "Untitled Project",
-  width: 1280, height: 720, fps: 25,
+  width: 1280, height: 720, fps: 30, // overwritten by project.json / applyProject
   background: "#000000",
   revision: 0,
   folders: [], // {id, name, parentId:null|string, open:true} — Project-bin tree (virtual)
@@ -259,6 +259,11 @@ const project = {
   disabledTracks: [], // track ids (V4…A3) hidden from preview/export when listed
   exportFrame: null, // optional {x,y,w,h} delivery crop inside width×height canvas
 };
+/** Sole runtime FPS source — always the loaded project’s `fps`. */
+function projectFps() {
+  const n = Number(project.fps);
+  return (Number.isFinite(n) && n > 0) ? n : 1;
+}
 const state = {
   time: 0, playing: false, pps: 60, snap: true,
   previewRate: 1,        // playback speed for PREVIEW only — never affects export
@@ -370,7 +375,7 @@ function escapeHtml(s) {
 function fmt(t) {
   t = Math.max(0, t);
   const m = Math.floor(t / 60), s = Math.floor(t % 60),
-    f = Math.floor((t % 1) * project.fps);
+    f = Math.floor((t % 1) * projectFps());
   const p = (n) => String(n).padStart(2, "0");
   return `${p(m)}:${p(s)}:${p(f)}`;
 }
@@ -495,7 +500,7 @@ async function detectWebCodecs() {
       width: Math.max(2, project.width | 0 || 1280),
       height: Math.max(2, project.height | 0 || 720),
       bitrate: 8_000_000,
-      framerate: project.fps || 30,
+      framerate: projectFps(),
       avc: { format: "annexb" },
     };
     const { supported } = await VideoEncoder.isConfigSupported(cfg);
@@ -696,7 +701,8 @@ function applyProject(data) {
   const disabledTracks = normalizeDisabledTracks(data.disabledTracks);
   Object.assign(project, {
     name: data.name || "Untitled Project",
-    width: data.width || 1280, height: data.height || 720, fps: data.fps || 30,
+    width: data.width || 1280, height: data.height || 720,
+    fps: (Number(data.fps) > 0 ? Number(data.fps) : project.fps),
     background: data.background || "#000000",
     revision: data.revision || 0,
     folders: normalizeFolders(data.folders),
@@ -2343,7 +2349,7 @@ function drawRuler() {
       type: "draw", w, h, dpr,
       sl: els.timelineScroll.scrollLeft, pps: state.pps,
       markers: project.markers, inPoint: project.inPoint, outPoint: project.outPoint,
-      time: state.time, fps: project.fps,
+      time: state.time, fps: projectFps(),
     });
     return;
   }
@@ -2754,7 +2760,7 @@ function goToKeyframe(dir) {
   }
   const times = keyframeTimelineTimes(clips);
   if (!times.length) { toast("No keyframes"); return; }
-  const eps = 0.5 / Math.max(1, project.fps || 30);
+  const eps = 0.5 / projectFps();
   if (dir > 0) {
     const next = times.find((t) => t > state.time + eps);
     if (next == null) { toast("No next keyframe"); return; }
@@ -3925,7 +3931,7 @@ function refreshAudioHold() {
   const audio = ensureAudio();
   try { audio.ctx.resume(); } catch { }
   const t = state.time;
-  const frameDur = 1 / Math.max(1, project.fps || 30);
+  const frameDur = 1 / projectFps();
   const gen = ++audioHoldGen;
   // Stop previous voices before starting the new slice
   for (const n of audioHoldNodes) disposeAudioHoldNode(n);
@@ -5544,7 +5550,7 @@ function playAdvanceVideo(el, mt, eps, rate) {
   });
 }
 async function seekVideosTo(t) {
-  const fps = Math.max(1, Number(project.fps) || 30);
+  const fps = projectFps();
   const waits = [];
   const restoreGain = [];
   for (const c of project.clips) {
@@ -5662,7 +5668,7 @@ async function fastExport() {
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
   els.exportNote.textContent = "Rendering frames → ffmpeg. You can switch tabs; export continues.";
-  const fps = project.fps, dur = Math.max(1 / fps, projDur());
+  const fps = projectFps(), dur = Math.max(1 / fps, projDur());
   const frames = Math.max(1, Math.round(dur * fps));
   let sessId = null;
   try {
@@ -5755,7 +5761,7 @@ async function webCodecsExport() {
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
   els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues.";
-  const fps = Number(project.fps) || 30, dur = Math.max(1 / fps, projDur());
+  const fps = projectFps(), dur = Math.max(1 / fps, projDur());
   const frames = Math.max(1, Math.round(dur * fps));
   const keyEvery = Math.max(1, Math.round(fps * 2));
   let sessId = null;

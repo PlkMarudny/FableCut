@@ -167,7 +167,7 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
 ```jsonc
 {
   "name": "My Edit",
-  "width": 1280, "height": 720, "fps": 30,   // composition canvas + timeline/export rate (UI: FPS select)
+  "width": 1280, "height": 720, "fps": 30,   // composition canvas + timeline/export rate — sole FPS source (UI: FPS select)
   "exportFrame": { "x": 438, "y": 0, "w": 404, "h": 720 },  // optional delivery crop (even w/h for H.264)
   // ^ omit = export the full canvas. Preview dims outside this rect; Fast export crops
   // JPEGs to w×h. Clip x/y/scale stay relative to the composition center, not the frame.
@@ -430,7 +430,8 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 - `GET  /api/events`  — SSE, emits `change` when project.json, ./media or ./library changes
 - Fast / WebCodecs export (browser compositor → server ffmpeg):
   `GET /api/export/ffmpeg` → `{available}` · `POST /api/export/begin`
-  `{fps,name,mode?}` → `{id,mode}` where `mode` is `"jpeg"` (default,
+  `{fps,name,mode?}` → `{id,mode}` where `fps` is required (pass
+  `project.fps` — no server-side default) and `mode` is `"jpeg"` (default,
   Fast) or `"annexb"` (WebCodecs H.264 elementary stream)
   · `POST /api/export/frame?id=` (JPEG body for jpeg mode, Annex-B NAL bytes for
   annexb — must be after audio; ffmpeg is spawned on the first frame in both modes)

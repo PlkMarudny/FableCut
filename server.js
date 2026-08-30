@@ -173,8 +173,12 @@ function beginExport(fps, name, mode) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-"));
   const m = mode === "annexb" ? "annexb" : "jpeg";
+  const rate = Number(fps);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new Error("export fps required (pass project.fps)");
+  }
   const sess = {
-    mode: m, fps: Number(fps) || 30, proc: null, dir,
+    mode: m, fps: rate, proc: null, dir,
     name: safeName(name || "export"),
     videoPath: m === "jpeg" ? path.join(dir, "video.mp4") : null,
     partPath: null, outPath: null,
@@ -377,7 +381,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const opts = JSON.parse((await readBody(req)).toString("utf8") || "{}");
       const mode = opts.mode === "annexb" ? "annexb" : "jpeg";
-      sendJSON(res, 200, { id: beginExport(opts.fps || 30, opts.name, mode), mode });
+      sendJSON(res, 200, { id: beginExport(opts.fps, opts.name, mode), mode });
     } catch (e) { sendJSON(res, 500, { error: String(e) }); }
     return;
   }
