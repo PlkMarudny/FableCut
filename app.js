@@ -495,16 +495,22 @@ async function detectWebCodecs() {
   state.webCodecs = false;
   try {
     if (typeof VideoEncoder !== "function" || typeof VideoEncoder.isConfigSupported !== "function") return;
-    const cfg = {
+    const base = {
       codec: webCodecsAvcCodec(),
       width: Math.max(2, project.width | 0 || 1280),
       height: Math.max(2, project.height | 0 || 720),
       bitrate: 8_000_000,
       framerate: projectFps(),
       avc: { format: "annexb" },
+      latencyMode: "quality",
     };
-    const { supported } = await VideoEncoder.isConfigSupported(cfg);
-    state.webCodecs = !!supported;
+    const requested = getSetting("webCodecsBitrateMode") === "constant" ? "constant" : "variable";
+    const [variable, constant] = await Promise.all([
+      VideoEncoder.isConfigSupported({ ...base, bitrateMode: "variable" }),
+      VideoEncoder.isConfigSupported({ ...base, bitrateMode: "constant" }),
+    ]);
+    const match = requested === "constant" ? constant : variable;
+    state.webCodecs = !!match.supported;
   } catch { state.webCodecs = false; }
 }
 const TIMELINE_START_TIME = 0.000; // composition timeline start (seconds)
