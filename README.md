@@ -50,7 +50,7 @@ same time.
 
 **Editing**
 
-- 3 video tracks + 4 audio tracks, drag/trim/split/snap, undo/redo
+- 3 video tracks + 4 audio tracks, drag/trim/split/slip/snap, undo/redo
 - **Settings** (cog in the top bar) — optional prefs stored in this browser via
   `localStorage`. Enable **Link timeline and Project bin selection** so picking a
   timeline clip highlights its media in Project, and clicking a Project item

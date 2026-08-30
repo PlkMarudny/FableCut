@@ -39,6 +39,10 @@ installs as a Claude Code plugin.
 - Project FPS select in the Program Monitor header (next to aspect presets) —
   pick 24 / 25 / 30 / 50 / 60 fps; writes `project.fps` and persists like canvas
   size. Non-preset rates appear as Custom.
+- **Slip** (timeline toolbar) — with a video/audio clip selected and the
+  playhead over it, slips the source `in`/`out` window so the frame under the
+  playhead becomes the new in-point; timeline start and duration stay fixed.
+  Linked AV partners stay in sync. Toasts when there isn’t enough media tail.
 - Preview playback speed — a monitor toolbar toggle plus **J**/**K**/**L** shortcuts cycle the preview player through 1×, 1.5×, 2×, and 4× (L faster, J slower, K play/pause and reset to 1×). It rides on top of each clip's own speed and is forced back to 1× during export, so renders always come out at real time.
   (thanks @ur5fot, #18)
 - **Separate audio and video tracks.** Imported video now shows its audio as

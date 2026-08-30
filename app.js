@@ -1959,6 +1959,40 @@ function trimToPlayhead(side) {
   syncLinkedTiming(c);
   scheduleSave(); renderInspector();
 }
+/* Slip the selected clip’s source window: keep timeline start/duration,
+   set `in` to the media time under the playhead (source out moves by the
+   same delta). Needs enough media after the current out (“tail”). */
+function slideClipAtPlayhead() {
+  const c = getClip(state.selId);
+  if (!c) { toast("Select a clip first"); return; }
+  if (c.kind !== "video" && c.kind !== "audio") {
+    toast("Slide works on video or audio clips");
+    return;
+  }
+  const t = state.time;
+  if (t < c.start || t >= clipEnd(c)) { toast("Move playhead over the selected clip"); return; }
+  const media = getMedia(c.mediaId);
+  if (!media || !(Number(media.duration) > 0)) {
+    toast("Media duration unknown — wait for probe");
+    return;
+  }
+  // mediaTimeAt already honors static speed and speed-ramp integrals
+  const srcIn = mediaTimeAt(c, t);
+  const srcUsed = mediaTimeAt(c, clipEnd(c)) - c.in;
+  if (!(srcIn - c.in > 1e-4)) {
+    toast("Playhead is already at the clip in-point");
+    return;
+  }
+  if (srcIn + srcUsed > media.duration + 1e-4) {
+    toast("Not enough media tail to slide");
+    return;
+  }
+  pushUndo();
+  c.in = srcIn;
+  syncLinkedTiming(c);
+  scheduleSave(); renderInspector();
+  seekMediaWhilePaused();
+}
 /* Split at IN/OUT and discard clip heads before IN and tails after OUT.
    Skips disabled tracks when track enable/disable is available. */
 function trimToWorkArea() {
@@ -5577,6 +5611,7 @@ els.fileInput.addEventListener("change", () => { importFiles(els.fileInput.files
 $("btnTitle").addEventListener("click", addTitle);
 $("btnAdjust").addEventListener("click", addAdjust);
 $("btnSplit").addEventListener("click", splitAtPlayhead);
+$("btnSlide").addEventListener("click", slideClipAtPlayhead);
 $("btnCloseGap").addEventListener("click", closeGapAtPlayhead);
 $("btnNextGap").addEventListener("click", goToNextGap);
 $("btnTrimIO").addEventListener("click", trimToWorkArea);

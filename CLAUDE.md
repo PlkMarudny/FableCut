@@ -362,6 +362,10 @@ glitch (RGB split + jitter) · pop (overshoot scale — stickers/captions).
   `transitionIn: {type:"fade"}`.
 - A cut/split is just two clips: first with `duration: t`, second with
   `start: +t, in: +t×speed, duration: rest`.
+- A **slide** (UI toolbar) keeps `start`/`duration` and sets `in` to the media
+  time under the playhead (source out moves by the same delta). Requires
+  `in + sourceWindow ≤ media.duration` afterward; linked AV partners share the
+  new `in` via the usual timing sync.
 - `bgRemove` and `chromaKey` can combine with all filters; heavy pixel work is
   automatic (only runs when those props are set).
 
@@ -441,6 +445,11 @@ of previous durations.
 **Title card**: `{kind:"text", mediaId:null, track:"V2", props:{text,fontSize,color}}`.
 
 **Music bed**: audio file on A1, `props.volume: 0.3`, trim with `in`/`duration`.
+
+**Slide (slip) source**: with the playhead over a video/audio clip, raise `in`
+so the frame under the playhead becomes the clip in-point; leave `start` and
+`duration` unchanged. The UI **Slide** button does this and toasts if the
+source has no unused tail (`in + duration×speed` would exceed `media.duration`).
 
 **Cinematic grade**: `props.filterPreset: "teal-orange"` (tweak with
 `temperature`/`vignette` on top).
