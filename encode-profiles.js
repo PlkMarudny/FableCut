@@ -19,7 +19,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { spawnSync } = require("child_process");
+const { spawn } = require("child_process");
 
 const PROFILES_FILE = path.join(__dirname, "encoding-profiles.json");
 
@@ -164,7 +164,8 @@ function buildExportArgs(profile, { fps, wavPath, outPath }) {
 
 /* Run the profile's args once against a synthetic input before the browser
    renders anything. Without this a typo (or an encoder this ffmpeg build lacks)
-   would only surface when ffmpeg exits — i.e. after every frame was rendered. */
+   would only surface when ffmpeg exits — i.e. after every frame was rendered.
+   Async spawn so /api/export/begin does not block the event loop. */
 function dryRunProfile(profile, { fps = 30, hasAudio = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-dry-"));
   const out = path.join(dir, `probe${profile.extension}`);
@@ -172,16 +173,30 @@ function dryRunProfile(profile, { fps = 30, hasAudio = true } = {}) {
     "-i", `color=c=black:s=64x64:r=${fps}:d=0.1`];
   if (hasAudio) args.push("-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo");
   args.push("-t", "0.1", ...withJpegColor(profile.args), out);
-  try {
-    const r = spawnSync("ffmpeg", args, { encoding: "utf8" });
-    if (r.error) return { ok: false, error: r.error.message };
-    if (r.status === 0) return { ok: true };
-    // ffmpeg puts the actual complaint in the last lines of stderr
-    const lines = String(r.stderr || "").trim().split("\n").filter(Boolean);
-    return { ok: false, error: lines.slice(-3).join(" · ") || `ffmpeg exited ${r.status}` };
-  } finally {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { }
-  }
+  return new Promise((resolve) => {
+    let stderr = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { }
+      resolve(result);
+    };
+    let proc;
+    try {
+      proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    } catch (e) {
+      finish({ ok: false, error: e.message || String(e) });
+      return;
+    }
+    proc.on("error", (e) => finish({ ok: false, error: e.message || String(e) }));
+    proc.stderr.on("data", (d) => { stderr = (stderr + d).slice(-4000); });
+    proc.on("close", (code) => {
+      if (code === 0) { finish({ ok: true }); return; }
+      const lines = stderr.trim().split("\n").filter(Boolean);
+      finish({ ok: false, error: lines.slice(-3).join(" · ") || `ffmpeg exited ${code}` });
+    });
+  });
 }
 
 module.exports = {

@@ -166,9 +166,9 @@ async function faststart(file) {
    ffmpeg is spawned on the FIRST frame, not here: the audio mix is uploaded
    between /begin and the first frame, and a one-pass encode needs it on disk. */
 const exportSessions = new Map();
-function beginExport(fps, name, profileId, hasAudio) {
+async function beginExport(fps, name, profileId, hasAudio) {
   const profile = resolveProfile(profileId);
-  const dry = dryRunProfile(profile, { fps, hasAudio });
+  const dry = await dryRunProfile(profile, { fps, hasAudio });
   if (!dry.ok) throw new Error(`profile "${profile.id}" was rejected by ffmpeg: ${dry.error}`);
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const sess = {
@@ -345,7 +345,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const opts = JSON.parse((await readBody(req)).toString("utf8") || "{}");
       if (opts.profile) resolveProfile(opts.profile); // 400, not 500, on a bad id
-      sendJSON(res, 200, beginExport(opts.fps || 30, opts.name, opts.profile, opts.hasAudio !== false));
+      sendJSON(res, 200, await beginExport(opts.fps || 30, opts.name, opts.profile, opts.hasAudio !== false));
     } catch (e) {
       // an unusable profile is the caller's problem, not a server fault
       const bad = /^Unknown encoding profile|was rejected by ffmpeg/.test(e.message || "");
