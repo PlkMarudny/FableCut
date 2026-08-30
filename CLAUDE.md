@@ -573,10 +573,10 @@ ffmpeg directly from `media/` sources if a file is needed.
 ### Encoding profiles (`encoding-profiles.json`)
 
 User-editable at the repo root. A profile is a **raw ffmpeg argument list** plus the
-two things that are not ffmpeg arguments: `jpegQuality` (the browser's frame quality)
-and `extension` (which names the file and therefore picks the muxer). Edit the file
-while the server runs — the UI hot-reloads the profile list via an SSE `profiles`
-event (no full project reload).
+things that are not ffmpeg arguments: `jpegQuality` (browser frame quality),
+`extension` (output container), and optional `color` (output matrix / range tags).
+Edit the file while the server runs — the UI hot-reloads the profile list via an SSE
+`profiles` event (no full project reload).
 
 ```jsonc
 {
@@ -587,6 +587,9 @@ event (no full project reload).
       "description": "Quick preview — smaller file, faster encode.",
       "jpegQuality": 0.85,         // browser JPEG frame quality (0.1–1)
       "extension": ".mp4",
+      // Output color (optional — defaults to BT.709 limited/tv). Independent of
+      // -pix_fmt: yuv420p and yuv422p10le both typically use bt709 for HD SDR.
+      "color": { "matrix": "bt709", "primaries": "bt709", "trc": "bt709", "range": "tv" },
       "args": ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
                "-movflags", "+faststart", "-shortest"]
@@ -596,10 +599,10 @@ event (no full project reload).
 ```
 
 Export is **one ffmpeg pass**. The server owns the input side and the output path;
-`args` is everything in between, verbatim:
+`args` is everything in between (plus JPEG color conversion derived from `color`):
 
 ```
-ffmpeg -y -f image2pipe -framerate <fps> -i -  [-i audio.wav]  <args…>  exports/<name><extension>
+ffmpeg -y -f image2pipe -framerate <fps> -i -  [-i audio.wav]  <jpeg-color> <args…>  exports/<name><extension>
 ```
 
 - **There is no allow-list.** Any codec, filter, container or flag your local ffmpeg
@@ -612,8 +615,13 @@ ffmpeg -y -f image2pipe -framerate <fps> -i -  [-i audio.wav]  <args…>  export
 - Use the **array form** — each element is passed to `spawn` untouched, so no quoting
   is needed (`["-vf", "drawtext=text='hi there'"]` just works). A plain string is
   accepted and split on whitespace.
-- Nothing is injected for you: `+faststart`, `-shortest`, `-strict -2` for Opus in MP4
-  and pixel-format choices are all yours to write.
+- **`color`** controls JPEG→YUV conversion and stream tags (`-colorspace` /
+  `-color_primaries` / `-color_trc` / `-color_range`). Default is BT.709 limited
+  (`range: "tv"`). Use `"range": "pc"` for full-range masters. Do **not** put those
+  flags in `args` — the engine strips them and applies `color` so vf and tags stay
+  aligned. `-pix_fmt` stays in `args` (sampling / bit depth only).
+- Nothing else is injected for you: `+faststart`, `-shortest`, `-strict -2` for Opus
+  in MP4 and pixel-format choices are all yours to write.
 - Frames arrive as **JPEG (4:2:0)**, so `yuv422p`/`yuv444p` cannot recover chroma the
   source never had; raise `jpegQuality` before reaching for a wider pixel format.
 - The audio mix is only present when the timeline has audio; with no audio there is a

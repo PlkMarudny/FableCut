@@ -158,7 +158,7 @@ const TOOLS = [
   },
   {
     name: "fablecut_encode_profiles",
-    description: "List ffmpeg encoding profiles for Fast export (from encoding-profiles.json). Each profile is a raw ffmpeg argument list plus jpegQuality (browser frame quality) and extension (output container). Use to pick a profile id for project.encodeProfile. Edit encoding-profiles.json on disk to add custom profiles — anything the local ffmpeg supports works, and the server hot-reloads the file. Profiles are dry-run against ffmpeg when an export starts, so a bad argument is rejected before rendering.",
+    description: "List ffmpeg encoding profiles for Fast export (from encoding-profiles.json). Each profile is a raw ffmpeg argument list plus jpegQuality, extension, and optional color (output matrix/range — default BT.709 tv). Use to pick a profile id for project.encodeProfile. Edit encoding-profiles.json on disk to add custom profiles — anything the local ffmpeg supports works, and the server hot-reloads the file. Profiles are dry-run against ffmpeg when an export starts, so a bad argument is rejected before rendering.",
     inputSchema: {
       type: "object",
       properties: {
@@ -489,6 +489,7 @@ async function callTool(name, args) {
           description: p.description,
           jpegQuality: p.jpegQuality,
           extension: p.extension,
+          color: p.color,
           args: p.args,
         }, null, 2);
       }

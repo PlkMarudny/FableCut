@@ -1,19 +1,20 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    Encoding profiles — user-editable ffmpeg settings for Fast export.
 
-   A profile is a raw ffmpeg argument list plus the two things that are NOT
-   ffmpeg arguments: the browser's JPEG frame quality and the output extension.
+   A profile is a raw ffmpeg argument list plus the things that are NOT ffmpeg
+   arguments: jpegQuality, extension, and optional `color` (output matrix/range).
    There is deliberately no allow-list — encoding-profiles.json is a local file
    the user owns, the browser only ever sends a profile *id*, and args are
    passed to spawn() as an array (no shell), so validating codec names would buy
    nothing but a smaller set of usable formats. Typos are caught by dryRunProfile
    against the real ffmpeg build instead, which also knows which encoders it has.
 
-   Export is ONE ffmpeg pass; this module owns the input side and the output
-   path, the profile owns everything in between:
+   Export is ONE ffmpeg pass; this module owns the input side (JPEG color
+   conversion + tags from profile.color) and the output path; the profile owns
+   everything in between:
 
      ffmpeg -y -f image2pipe -framerate <fps> -i - [-i audio.wav]
-            <profile args…> <out><extension>
+            <jpeg-color vf+tags> <profile args…> <out><extension>
    ═══════════════════════════════════════════════════════════════════════════ */
 "use strict";
 const fs = require("fs");
@@ -26,17 +27,58 @@ const PROFILES_FILE = path.join(__dirname, "encoding-profiles.json");
 /* Used when encoding-profiles.json is missing or unparseable, so export still
    works out of the box. Not a merge base: profiles are taken as written. */
 const BUILTIN_ID = "delivery";
+const DEFAULT_COLOR = {
+  matrix: "bt709",
+  primaries: "bt709",
+  trc: "bt709",
+  range: "tv", // tv = limited, pc = full
+};
 const BUILTIN = {
   label: "Delivery · H.264 balanced",
   description: "Built-in fallback — good quality and compatibility.",
   jpegQuality: 0.95,
   extension: ".mp4",
+  color: { ...DEFAULT_COLOR },
   args: ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest"],
 };
 
+/* Flags the engine injects from profile.color — strip from user args so the
+   JPEG vf out_* and the stream tags cannot disagree. */
+const COLOR_ARG_FLAGS = new Set([
+  "-colorspace", "-color_primaries", "-color_trc", "-color_range",
+]);
+
 let cache = null;
 let cacheMtime = -1;
+
+function normalizeColor(raw) {
+  const c = raw && typeof raw === "object" ? raw : {};
+  const token = (v, fallback) => {
+    const s = String(v == null ? "" : v).trim().toLowerCase();
+    return /^[a-z0-9._-]+$/.test(s) ? s : fallback;
+  };
+  let range = token(c.range, DEFAULT_COLOR.range);
+  if (range === "full") range = "pc";
+  if (range === "limited") range = "tv";
+  if (range !== "tv" && range !== "pc") range = DEFAULT_COLOR.range;
+  const matrix = token(c.matrix ?? c.colorspace, DEFAULT_COLOR.matrix);
+  return {
+    matrix,
+    primaries: token(c.primaries, matrix),
+    trc: token(c.trc ?? c.transfer, matrix),
+    range,
+  };
+}
+
+function stripColorArgs(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (COLOR_ARG_FLAGS.has(args[i])) { i++; continue; } // skip flag + value
+    out.push(args[i]);
+  }
+  return out;
+}
 
 function normalizeProfile(id, raw) {
   const p = raw && typeof raw === "object" ? raw : {};
@@ -53,6 +95,7 @@ function normalizeProfile(id, raw) {
     description: String(p.description || p.desc || ""),
     jpegQuality: q >= 0.1 && q <= 1 ? q : BUILTIN.jpegQuality,
     extension: ext.startsWith(".") ? ext : `.${ext}`,
+    color: normalizeColor(p.color),
     args,
   };
 }
@@ -122,12 +165,13 @@ function listProfilesPublic(detail) {
     issues: cfg.issues || [],
   };
   for (const [id, p] of Object.entries(cfg.profiles)) {
-    // jpegQuality is needed by the browser to encode frames — always included
+    // jpegQuality + color are needed by the UI / agents — always included
     const base = {
       label: p.label,
       description: p.description,
       jpegQuality: p.jpegQuality,
       extension: p.extension,
+      color: p.color,
       summary: profileSummary(p),
     };
     out.profiles[id] = detail ? { ...base, args: p.args } : base;
@@ -136,19 +180,31 @@ function listProfilesPublic(detail) {
 }
 
 /* JPEG frames from the browser are full-range BT.601 (JFIF). Convert them to
-   limited-range BT.709 and tag the stream, otherwise x264 emits bt470bg/pc/
-   unknown and players do the wrong YUV→RGB conversion — darker than preview.
-   This is an input-side concern (the JPEG pipe), so it is prepended to the
-   profile's own -vf rather than left for every profile to remember. */
-const JPEG_COLOR_VF = "scale=in_range=full:in_color_matrix=bt601:out_range=tv:out_color_matrix=bt709";
-const JPEG_COLOR_TAGS = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"];
+   the profile's output matrix/range and tag the stream, otherwise x264 emits
+   bt470bg/pc/unknown and players do the wrong YUV→RGB conversion — darker than
+   preview. Independent of -pix_fmt (420 vs 422/10-bit). */
+function jpegColorVf(color) {
+  const c = color || DEFAULT_COLOR;
+  return `scale=in_range=full:in_color_matrix=bt601:out_range=${c.range}:out_color_matrix=${c.matrix}`;
+}
+function jpegColorTags(color) {
+  const c = color || DEFAULT_COLOR;
+  return [
+    "-colorspace", c.matrix,
+    "-color_primaries", c.primaries,
+    "-color_trc", c.trc,
+    "-color_range", c.range,
+  ];
+}
 
-function withJpegColor(profileArgs) {
-  const args = profileArgs.slice();
+function withJpegColor(profile) {
+  const color = profile.color || DEFAULT_COLOR;
+  const vf = jpegColorVf(color);
+  const args = stripColorArgs((profile.args || []).slice());
   const vfAt = args.indexOf("-vf");
-  if (vfAt >= 0 && args[vfAt + 1] != null) args[vfAt + 1] = `${JPEG_COLOR_VF},${args[vfAt + 1]}`;
-  else args.unshift("-vf", JPEG_COLOR_VF);
-  if (!args.includes("-colorspace")) args.push(...JPEG_COLOR_TAGS);
+  if (vfAt >= 0 && args[vfAt + 1] != null) args[vfAt + 1] = `${vf},${args[vfAt + 1]}`;
+  else args.unshift("-vf", vf);
+  args.push(...jpegColorTags(color));
   return args;
 }
 
@@ -158,7 +214,7 @@ function buildExportArgs(profile, { fps, wavPath, outPath }) {
   // -hide_banner so a failure's stderr tail is the actual error, not the build config
   const args = ["-y", "-hide_banner", "-f", "image2pipe", "-framerate", String(fps), "-i", "-"];
   if (wavPath) args.push("-i", wavPath);
-  args.push(...withJpegColor(profile.args), outPath);
+  args.push(...withJpegColor(profile), outPath);
   return args;
 }
 
@@ -172,7 +228,7 @@ function dryRunProfile(profile, { fps = 30, hasAudio = true } = {}) {
   const args = ["-y", "-hide_banner", "-f", "lavfi",
     "-i", `color=c=black:s=64x64:r=${fps}:d=0.1`];
   if (hasAudio) args.push("-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo");
-  args.push("-t", "0.1", ...withJpegColor(profile.args), out);
+  args.push("-t", "0.1", ...withJpegColor(profile), out);
   return new Promise((resolve) => {
     let stderr = "";
     let settled = false;
@@ -201,6 +257,7 @@ function dryRunProfile(profile, { fps = 30, hasAudio = true } = {}) {
 
 module.exports = {
   PROFILES_FILE,
+  DEFAULT_COLOR,
   loadEncodeProfiles,
   invalidateEncodeProfiles,
   resolveProfile,
