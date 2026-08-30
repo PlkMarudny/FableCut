@@ -5716,7 +5716,14 @@ async function fastExport() {
 /* Uploads MUST be strictly sequential — concurrent /frame POSTs race on the
    same ffmpeg stdin and deadlock the pipe (progress freezes around a few %). */
 let webCodecsAbort = null;
-function waitEncodeQueue(encoder, max = 2) {
+function waitEncodeQueue(encoder, max = 2, { signal, getError } = {}) {
+  const cancelled = () => renderCancelled || !!(signal && signal.aborted);
+  const failed = () => (getError ? getError() : null);
+  if (cancelled()) return Promise.reject(new Error("cancelled"));
+  {
+    const err = failed();
+    if (err) return Promise.reject(err);
+  }
   if (encoder.encodeQueueSize <= max) return Promise.resolve();
   return new Promise((res, rej) => {
     const done = (err) => {
@@ -5725,11 +5732,15 @@ function waitEncodeQueue(encoder, max = 2) {
       err ? rej(err) : res();
     };
     const tick = () => {
-      if (renderCancelled) done(new Error("cancelled"));
-      else if (encoder.encodeQueueSize <= max) done(null);
+      if (cancelled()) done(new Error("cancelled"));
+      else {
+        const err = failed();
+        if (err) done(err);
+        else if (encoder.encodeQueueSize <= max) done(null);
+      }
     };
     encoder.ondequeue = tick;
-    // ondequeue alone won't notice Cancel — poll the flag
+    // ondequeue alone won't notice Cancel / encoder·upload failure — poll
     const poll = setInterval(tick, 50);
     tick();
   });
@@ -5830,7 +5841,7 @@ async function webCodecsExport() {
       if (renderCancelled || signal.aborted) throw new Error("cancelled");
       if (uploadError) throw uploadError;
       await waitUploadBackpressure(2);
-      await waitEncodeQueue(encoder, 2);
+      await waitEncodeQueue(encoder, 2, { signal, getError: () => uploadError });
       const t = f / fps;
       state.time = t;
       await seekVideosTo(t);
