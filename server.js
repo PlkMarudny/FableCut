@@ -371,12 +371,39 @@ const server = http.createServer(async (req, res) => {
         const proc = sess.proc || (sess.mode === "annexb" ? startAnnexbEncoder(sess) : startJpegEncoder(sess));
         if (!proc) throw new Error("export encoder not started");
         if (proc.exitCode !== null) throw new Error("ffmpeg exited: " + sess.err());
-        if (!proc.stdin.write(body))
-          await new Promise((r) => proc.stdin.once("drain", r));
+        if (!proc.stdin.write(body)) {
+          // Race drain against process death / stdin errors so writeLock cannot stall forever
+          await new Promise((resolve, reject) => {
+            let settled = false;
+            const fail = (err) => {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              reject(err instanceof Error ? err : new Error("ffmpeg stdin error"));
+            };
+            const onDrain = () => {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              resolve();
+            };
+            const onClose = () => fail(new Error("ffmpeg exited: " + sess.err()));
+            const onError = (e) => fail(e);
+            const cleanup = () => {
+              proc.stdin.off("drain", onDrain);
+              proc.stdin.off("error", onError);
+              proc.off("close", onClose);
+            };
+            proc.stdin.once("drain", onDrain);
+            proc.stdin.once("error", onError);
+            proc.once("close", onClose);
+            if (proc.exitCode !== null) onClose();
+          });
+        }
       };
-      const p = sess.writeLock.then(run, run);
-      sess.writeLock = p.catch(() => {}); // keep the chain alive after a failed write
-      await p;
+      const writeJob = sess.writeLock.then(run, run);
+      sess.writeLock = writeJob.catch(() => {}); // keep the chain alive after a failed write
+      await writeJob;
       sendJSON(res, 200, { ok: true });
     } catch (e) { sendJSON(res, 500, { error: String(e) }); }
     return;
