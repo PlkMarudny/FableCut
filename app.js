@@ -5461,7 +5461,85 @@ function previewToExportBlob(quality = 0.95) {
     els.preview, ef.x, ef.y, ef.w, ef.h, 0, 0, ef.w, ef.h);
   return new Promise((res) => exportCropCanvas.toBlob(res, "image/jpeg", quality));
 }
+/* ── Fast / WebCodecs frame sync ──
+   HTMLVideoElement has no “step one frame” API — assigning currentTime always
+   seeks. On the export hot path a seek-per-frame is the dominant cost, so:
+     • already within ½ media-frame → no-op
+     • small forward step + buffered → brief play + requestVideoFrameCallback
+       (sequential decode from the current position, then pause)
+     • reverse / large jump / unbuffered → hard seek (same as before) */
+function hardSeekVideo(el, mt) {
+  return new Promise((res) => {
+    if (Math.abs(el.currentTime - mt) < 1e-4 && el.readyState >= 2) { res(); return; }
+    const done = () => {
+      clearTimeout(tm);
+      el.removeEventListener("seeked", done);
+      res();
+    };
+    const tm = setTimeout(done, 1500);
+    el.addEventListener("seeked", done);
+    try {
+      if (!el.paused) el.pause();
+      el.currentTime = mt;
+    } catch { done(); }
+  });
+}
+/** Play forward until mediaTime reaches mt, then pause. (Must pause: the export
+    loop does async work between frames, so a free-running element would overrun.) */
+function playAdvanceVideo(el, mt, eps, rate) {
+  return new Promise((res) => {
+    let settled = false;
+    let rvfcId = null;
+    let poll = null;
+    const cleanup = () => {
+      clearTimeout(tm);
+      if (poll) { clearInterval(poll); poll = null; }
+      if (rvfcId != null && typeof el.cancelVideoFrameCallback === "function") {
+        try { el.cancelVideoFrameCallback(rvfcId); } catch { }
+        rvfcId = null;
+      }
+      try { el.pause(); } catch { }
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      // Play can land a hair early/late — snap only when meaningfully off
+      if (Math.abs(el.currentTime - mt) > eps * 2)
+        hardSeekVideo(el, mt).then(res);
+      else res();
+    };
+    const remain = Math.max(0, mt - el.currentTime);
+    const tm = setTimeout(finish, Math.min(3000, 400 + (remain * 1000) / Math.max(0.1, rate) * 2.5));
+    const check = (mediaTime) => {
+      if ((mediaTime != null ? mediaTime : el.currentTime) >= mt - eps) finish();
+    };
+    try { el.playbackRate = clamp(rate, 0.1, 8); } catch { }
+    // muted → autoplay-friendly after async export setup (user-gesture may be gone)
+    el.muted = true;
+    if (typeof el.requestVideoFrameCallback === "function") {
+      const onFrame = (_now, meta) => {
+        if (settled) return;
+        check(meta?.mediaTime);
+        if (!settled) rvfcId = el.requestVideoFrameCallback(onFrame);
+      };
+      rvfcId = el.requestVideoFrameCallback(onFrame);
+    } else {
+      poll = setInterval(() => check(el.currentTime), 4);
+    }
+    const p = el.play();
+    if (p && typeof p.catch === "function") {
+      p.catch(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        hardSeekVideo(el, mt).then(res);
+      });
+    }
+  });
+}
 function seekVideosTo(t) {
+  const fps = Math.max(1, Number(project.fps) || 30);
   const waits = [];
   for (const c of project.clips) {
     if (c.kind !== "video") continue;
@@ -5469,13 +5547,24 @@ function seekVideosTo(t) {
     const el = getClipEl(c); if (!el) continue;
     if (!activeAt(c, t)) { if (!el.paused) el.pause(); continue; }
     const mt = mediaTimeAt(c, t);
-    if (Math.abs(el.currentTime - mt) < 1e-4 && el.readyState >= 2) continue;
-    waits.push(new Promise((res) => {
-      const done = () => { clearTimeout(tm); el.removeEventListener("seeked", done); res(); };
-      const tm = setTimeout(done, 1500);
-      el.addEventListener("seeked", done);
-      try { el.currentTime = mt; } catch { done(); }
-    }));
+    const local = clamp(t - c.start, 0, c.duration);
+    const sp = clamp(kfChannel(c, "speed", local, clipSpeed(c)), 0.1, 8);
+    // One timeline frame in media-time; half-frame = “already on the right frame”
+    const mediaFrame = sp / fps;
+    const eps = 0.5 * mediaFrame;
+    if (el.readyState >= 2 && Math.abs(el.currentTime - mt) <= eps) continue;
+
+    const g = runtime.clipGain.get(c.id);
+    if (g) g.gain.value = 0;
+
+    const delta = mt - el.currentTime;
+    // ~4 timeline frames forward + data in buffer → sequential play instead of seek storm
+    const maxPlay = mediaFrame * 4;
+    if (delta > eps && delta <= maxPlay && el.readyState >= 2) {
+      waits.push(playAdvanceVideo(el, mt, eps, sp));
+    } else {
+      waits.push(hardSeekVideo(el, mt));
+    }
   }
   return Promise.all(waits);
 }
