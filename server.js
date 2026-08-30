@@ -181,7 +181,7 @@ function beginExport(fps, name, mode) {
     mode: m, fps: rate, proc: null, dir,
     name: safeName(name || "export"),
     videoPath: m === "jpeg" ? path.join(dir, "video.mp4") : null,
-    partPath: null, outPath: null,
+    partPath: null,
     wav: null, stderr: "", done: null, lastTouch: Date.now(),
     err: () => sess.stderr.trim().split("\n").filter(Boolean).slice(-3)
       .map((l) => l.trim()).join(" · "),
@@ -212,9 +212,9 @@ function startJpegEncoder(sess) {
    1000000/33333. `-r` forces CFR PTS so the MP4 matches project.fps exactly. */
 function startAnnexbEncoder(sess) {
   const base = sess.name.replace(/\.mp4$/i, "");
-  sess.outPath = uniquePath(EXPORTS_DIR, base + ".mp4");
-  // ".part" before the extension so ffmpeg can still pick the mp4 muxer
-  sess.partPath = sess.outPath.slice(0, -4) + ".part.mp4";
+  // Partial stays in the unique session temp dir so concurrent exports cannot
+  // share a .part.mp4. ".part" before the extension so ffmpeg picks mp4 muxer.
+  sess.partPath = path.join(sess.dir, base + ".part.mp4");
   const fps = sess.fps;
   const args = [
     "-y", "-hide_banner",
@@ -460,7 +460,7 @@ const server = http.createServer(async (req, res) => {
       let out;
       if (sess.mode === "annexb") {
         // one-pass already wrote the final mux into .part.mp4
-        out = sess.outPath;
+        out = uniquePath(EXPORTS_DIR, sess.name.replace(/\.mp4$/i, "") + ".mp4");
         fs.renameSync(sess.partPath, out);
         sess.partPath = null;
       } else {
