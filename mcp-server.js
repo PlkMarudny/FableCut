@@ -188,11 +188,19 @@ async function callTool(name, args) {
       let encLine = "";
       try {
         const cfg = loadEncodeProfiles();
-        const eff = proj.encodeProfile || cfg.default;
-        const p = cfg.profiles[eff];
-        encLine = p
-          ? `Export profile: ${eff} (${p.label}) — ${profileSummary(p)}`
-          : `Export profile: server default "${cfg.default}"`;
+        const describe = (id) => {
+          const p = cfg.profiles[id];
+          return p ? `${id} (${p.label}) — ${profileSummary(p)}` : null;
+        };
+        const pinned = proj.encodeProfile;
+        if (pinned && !cfg.profiles[pinned]) {
+          /* a project pinning a since-deleted profile must not read as "nothing
+             configured" — the bad id and the fallback are two separate facts */
+          encLine = `Export profile: project encodeProfile "${pinned}" is NOT DEFINED in encoding-profiles.json` +
+            ` — falling back to default ${describe(cfg.default) || `"${cfg.default}"`}`;
+        } else {
+          encLine = `Export profile: ${describe(pinned || cfg.default) || `server default "${cfg.default}"`}`;
+        }
       } catch { encLine = "Export profile: (encoding-profiles.json unavailable)"; }
       return [
         `Editor server: ${up ? "RUNNING — open " + BASE + " in a browser to watch edits live" : "FAILED TO START (check node / port " + PORT + ")"}`,
