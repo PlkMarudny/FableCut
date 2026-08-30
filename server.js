@@ -156,6 +156,12 @@ const COLOR_TAGS = [
   "-color_trc", "bt709", "-color_range", "tv",
 ];
 const COLOR_BSF = "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0";
+const EXPORT_IDLE_MS = 10 * 60 * 1000; // abandon sessions with no successful activity
+const EXPORT_SWEEP_MS = 60 * 1000;
+let exportSweepTimer = null;
+function touchExport(sess) {
+  if (sess) sess.lastTouch = Date.now();
+}
 function attachProc(sess, proc) {
   sess.proc = proc;
   sess.stderr = "";
@@ -172,7 +178,7 @@ function beginExport(fps, name, mode) {
     name: safeName(name || "export"),
     videoPath: m === "jpeg" ? path.join(dir, "video.mp4") : null,
     partPath: null, outPath: null,
-    wav: null, stderr: "", done: null,
+    wav: null, stderr: "", done: null, lastTouch: Date.now(),
     err: () => sess.stderr.trim().split("\n").filter(Boolean).slice(-3)
       .map((l) => l.trim()).join(" · "),
   };
@@ -226,6 +232,21 @@ function cleanupExport(id) {
   try { s.proc?.kill(); } catch {}
   try { fs.rmSync(s.dir, { recursive: true, force: true }); } catch {}
   if (s.partPath) try { fs.rmSync(s.partPath, { force: true }); } catch {}
+}
+function sweepIdleExports() {
+  const now = Date.now();
+  for (const [id, s] of [...exportSessions]) {
+    if (now - (s.lastTouch || 0) > EXPORT_IDLE_MS) cleanupExport(id);
+  }
+}
+function startExportSweep() {
+  if (exportSweepTimer) return;
+  exportSweepTimer = setInterval(sweepIdleExports, EXPORT_SWEEP_MS);
+}
+function stopExportSweep() {
+  if (!exportSweepTimer) return;
+  clearInterval(exportSweepTimer);
+  exportSweepTimer = null;
 }
 
 /* Static file with HTTP Range support (required for <video> seeking) */
@@ -404,6 +425,7 @@ const server = http.createServer(async (req, res) => {
       const writeJob = sess.writeLock.then(run, run);
       sess.writeLock = writeJob.catch(() => {}); // keep the chain alive after a failed write
       await writeJob;
+      touchExport(sess);
       sendJSON(res, 200, { ok: true });
     } catch (e) { sendJSON(res, 500, { error: String(e) }); }
     return;
@@ -414,6 +436,7 @@ const server = http.createServer(async (req, res) => {
     try {
       sess.wav = path.join(sess.dir, "audio.wav");
       fs.writeFileSync(sess.wav, await readBody(req));
+      touchExport(sess);
       sendJSON(res, 200, { ok: true });
     } catch (e) { sendJSON(res, 500, { error: String(e) }); }
     return;
@@ -424,6 +447,7 @@ const server = http.createServer(async (req, res) => {
     if (!sess) { sendJSON(res, 404, { error: "no such export session" }); return; }
     try {
       if (url.searchParams.get("discard")) { cleanupExport(id); sendJSON(res, 200, { ok: true }); return; }
+      touchExport(sess); // keep alive through final mux
       if (!sess.proc) throw new Error("no frames were uploaded");
       sess.proc.stdin.end();
       const code = await sess.done;
@@ -532,4 +556,17 @@ server.listen(PORT, HOST, () => {
   console.log(`  library      : ${LIBRARY_DIR} (${LIBRARY_SUBDIRS.join(", ")})`);
   if (DATA_DIR !== APP_DIR) console.log(`  app files    : ${APP_DIR}`);
   console.log(`  ffmpeg       : ${HAS_FFMPEG ? "found (fast export + faststart remux on)" : "not found (real-time export only)"}\n`);
+  startExportSweep();
 });
+
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopExportSweep();
+  for (const id of [...exportSessions.keys()]) cleanupExport(id);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref?.();
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
