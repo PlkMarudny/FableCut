@@ -133,12 +133,29 @@ function readBody(req) {
     req.on("error", reject);
   });
 }
-function uniquePath(dir, name) {
-  let target = path.join(dir, name);
-  const ext = path.extname(name), base = path.basename(name, ext);
-  let i = 1;
-  while (fs.existsSync(target)) target = path.join(dir, `${base}_${i++}${ext}`);
-  return target;
+/** Claim final + sibling `.part` paths with exclusive create (`wx`) so concurrent
+ *  exports cannot pick the same free name before either file exists. */
+function reserveExportPaths(dir, baseName, ext) {
+  const base = baseName.replace(/\.(mp4|mov|m4v|mkv|webm)$/i, "");
+  let i = 0;
+  for (;;) {
+    const stem = i === 0 ? base : `${base}_${i}`;
+    i++;
+    const outPath = path.join(dir, stem + ext);
+    const partPath = path.join(dir, stem + ".part" + ext);
+    if (fs.existsSync(outPath)) continue;
+    try {
+      fs.closeSync(fs.openSync(partPath, "wx")); // exclusive create — claim the name
+    } catch (e) {
+      if (e.code === "EEXIST") continue;
+      throw e;
+    }
+    if (fs.existsSync(outPath)) {
+      try { fs.rmSync(partPath, { force: true }); } catch { }
+      continue;
+    }
+    return { outPath, partPath };
+  }
 }
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
@@ -171,10 +188,14 @@ async function beginExport(fps, name, profileId, hasAudio) {
   const dry = await dryRunProfile(profile, { fps, hasAudio });
   if (!dry.ok) throw new Error(`profile "${profile.id}" was rejected by ffmpeg: ${dry.error}`);
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const safe = safeName(name || "export");
+  // Reserve the output name now (not at first frame) so concurrent exports
+  // cannot both see the same free path. The empty .part file is overwritten by ffmpeg (-y).
+  const { outPath, partPath } = reserveExportPaths(EXPORTS_DIR, safe, profile.extension);
   const sess = {
-    proc: null, fps, profile, name: safeName(name || "export"),
+    proc: null, fps, profile, name: safe,
     dir: fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-")),
-    wav: null, partPath: null, outPath: null,
+    wav: null, partPath, outPath,
     stderr: "", done: null,
     // ffmpeg's complaint is in the last lines; the rest is progress noise
     err: () => sess.stderr.trim().split("\n").filter(Boolean).slice(-3)
@@ -183,15 +204,9 @@ async function beginExport(fps, name, profileId, hasAudio) {
   exportSessions.set(id, sess);
   return { id, profile: profile.id, label: profile.label, summary: profileSummary(profile) };
 }
-/* Encode into exports/ under a .part name and rename once ffmpeg exits cleanly,
+/* Encode into the paths reserved at /begin; rename .part → final on clean exit
    so an aborted render never leaves something that looks like a finished file. */
 function startEncoder(sess) {
-  const ext = sess.profile.extension;
-  const base = sess.name.replace(/\.(mp4|mov|m4v|mkv|webm)$/i, "");
-  sess.outPath = uniquePath(EXPORTS_DIR, base + ext);
-  // ".part" goes BEFORE the extension — ffmpeg picks its muxer from the
-  // extension, so a trailing ".part" would leave it unable to choose a format
-  sess.partPath = sess.outPath.slice(0, -ext.length) + ".part" + ext;
   const proc = spawn("ffmpeg", buildExportArgs(sess.profile, {
     fps: sess.fps, wavPath: sess.wav, outPath: sess.partPath,
   }), { stdio: ["pipe", "ignore", "pipe"] });
