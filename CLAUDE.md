@@ -610,7 +610,10 @@ Notes on how these are handled:
   inherited value.
 - `mux.format` accepts `mp4` · `mov` · `matroska` (`mkv` is normalized to `matroska`,
   since `-f mkv` is not a valid muxer name). The output extension follows the container
-  unless `mux.extension` overrides it.
+  unless `mux.extension` overrides it with one that matches (`.m4v` for `mp4` is fine).
+  A conflicting pair is **reconciled, not just flagged**: `format` picks the muxer, so the
+  extension is corrected to match it (`mov` + `.mp4` → `.mov`) and the change is reported.
+  Giving only `mux.extension` infers the container from it.
 - `libopus` is switched to `aac` for MOV (no mapping exists) and gets `-strict -2`
   automatically in MP4 — otherwise the mux pass would fail *after* every frame is rendered.
 - A `loglevel` of `quiet`/`panic`/`fatal` is raised to `error` for the encode passes: that

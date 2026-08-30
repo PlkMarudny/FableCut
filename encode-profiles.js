@@ -140,7 +140,8 @@ function validateMux(m, fallback, warn) {
   if (out.format) {
     const fmt = MUX_FORMAT_ALIAS[String(out.format).toLowerCase()];
     if (fmt) out.format = fmt;
-    else { delete out.format; warn(`mux.format "${given.format}" unknown — using mp4`); }
+    // what replaces it is resolved below (from the extension, else mp4)
+    else { delete out.format; warn(`mux.format "${given.format}" unknown — ignored (allowed: mp4, mov, matroska)`); }
   }
   if (out.extension) {
     const raw = String(out.extension).toLowerCase();
@@ -150,8 +151,15 @@ function validateMux(m, fallback, warn) {
   }
   // a bare extension implies the container; keeps -f and the filename in step
   if (!out.format && out.extension) out.format = EXT_FORMAT[out.extension];
-  if (out.format && out.extension && EXT_FORMAT[out.extension] !== out.format)
-    warn(`mux.extension ${out.extension} does not match mux.format ${out.format}`);
+  /* A mismatch is reconciled, not just flagged, so exportContainer() and
+     exportOutputExtension() can never disagree. `format` selects the muxer and
+     therefore the bytes written, so it wins and the file is renamed to match —
+     the alternative would quietly write a different container than requested. */
+  if (out.format && out.extension && EXT_FORMAT[out.extension] !== out.format) {
+    const corrected = FORMAT_EXT[out.format];
+    warn(`mux.extension ${out.extension} does not match mux.format ${out.format} — using ${corrected}`);
+    out.extension = corrected;
+  }
   return out;
 }
 
@@ -173,7 +181,7 @@ function normalizeProfile(id, raw, fallback) {
   const warn = (msg) => warnings.push(msg);
   const mux = validateMux(p.mux, base.mux, warn);
   const audio = validateAudio(p.audio, base.audio, warn);
-  const container = mux.format || "mp4";
+  const container = exportContainer({ mux });
   /* Opus has no MOV mapping at all, and MP4 needs the experimental flag —
      without this the mux pass dies only after every frame has been rendered. */
   if (audio.codec === "libopus") {
