@@ -4,7 +4,8 @@
 
    Adds to the browser editor:
      • persistent project      ./project.json      (GET/PUT /api/project)
-     • media library folder    ./media/            (served at /media/*, POST /api/upload)
+     • media library folder    ./media/            (served at /media/*, POST /api/upload,
+                                                    POST /api/import-url)
      • live reload             GET /api/events     (SSE; fires when project.json
                                                     or ./media changes on disk)
 
@@ -19,6 +20,7 @@ const os = require("os");
 const { spawn, spawnSync, execFile } = require("child_process");
 
 const { analyze } = require("./analyze");
+const { downloadImportUrl, maybeFaststart } = require("./import-url");
 
 const {
   APP_DIR, DATA_DIR, MEDIA_DIR, EXPORTS_DIR, ANALYSIS_DIR, LIBRARY_DIR,
@@ -131,16 +133,7 @@ function run(cmd, args) {
 
 /* Remux MP4-family uploads with `+faststart` so the moov atom leads the file —
    without it <video> stalls for seconds probing over Range requests. */
-const FASTSTART_EXT = new Set([".mp4", ".mov", ".m4v"]);
-async function faststart(file) {
-  if (!HAS_FFMPEG || !FASTSTART_EXT.has(path.extname(file).toLowerCase())) return;
-  const tmp = file + ".fs" + path.extname(file);
-  try {
-    await run("ffmpeg", ["-y", "-i", file, "-c", "copy", "-movflags", "+faststart", tmp]);
-    fs.rmSync(file);
-    fs.renameSync(tmp, file);
-  } catch { try { fs.rmSync(tmp); } catch {} }
-}
+function faststart(file) { return maybeFaststart(file); }
 
 /* ── Fast export sessions ──
    The browser renders frames with its own compositor and streams them here as
@@ -296,6 +289,26 @@ const server = http.createServer(async (req, res) => {
       await faststart(target);
       sendJSON(res, 200, { ok: true, src: "/media/" + encodeURIComponent(path.basename(target)) });
     } catch (e) { sendJSON(res, 500, { error: String(e) }); }
+    return;
+  }
+
+  /* API: download an HTTPS URL into ./media (same-origin src after import).
+     Body {url}. Rejects http/file/local/private targets. Does not register
+     project media — the client / MCP tool does that, matching /api/upload. */
+  if (p === "/api/import-url" && req.method === "POST") {
+    try {
+      const opts = JSON.parse((await readBody(req)).toString("utf8") || "{}");
+      const ac = new AbortController();
+      req.on("close", () => { if (!res.writableEnded) ac.abort(); });
+      const { target, name } = await downloadImportUrl(opts.url, MEDIA_DIR, { signal: ac.signal });
+      await faststart(target);
+      sendJSON(res, 200, { ok: true, src: "/media/" + encodeURIComponent(name), name });
+    } catch (e) {
+      if (e && e.code === "ABORT_ERR") { try { res.end(); } catch {} return; }
+      const msg = e && e.message ? e.message : String(e);
+      const code = /must be https|invalid URL|blocked:|credentials|unsupported|too large|did not return/i.test(msg) ? 400 : 502;
+      sendJSON(res, code, { error: msg });
+    }
     return;
   }
 

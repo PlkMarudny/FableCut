@@ -89,6 +89,26 @@ test("GET /api/library lists assets and validates the dir argument", async (t) =
   }
 });
 
+test("POST /api/import-url rejects non-https and private targets", async (t) => {
+  const { dir, base } = await boot(t);
+  const reject = async (url, expect) => {
+    const res = await fetch(base + "/api/import-url", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    assert.equal(res.status, 400, url);
+    const body = await res.json();
+    assert.match(body.error, expect, url);
+  };
+  await reject("http://example.com/a.mp4", /https/i);
+  await reject("file:///etc/passwd", /https|invalid/i);
+  await reject("https://127.0.0.1/a.mp4", /blocked/i);
+  await reject("https://localhost/a.mp4", /blocked/i);
+  await reject("https://192.168.1.9/a.mp4", /blocked/i);
+  await reject("https://169.254.169.254/latest/meta-data", /blocked/i);
+  assert.equal(fs.readdirSync(path.join(dir, "media")).length, 0);
+});
+
 test("GET /api/media lists the media folder", async (t) => {
   const { base } = await boot(t);
   const res = await fetch(base + "/api/media");
