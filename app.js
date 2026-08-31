@@ -5477,9 +5477,39 @@ function previewToExportBlob(quality = 0.95) {
    HTMLVideoElement has no “step one frame” API — assigning currentTime always
    seeks. On the export hot path a seek-per-frame is the dominant cost, so:
      • already within ½ media-frame → no-op
-     • small forward step + buffered → brief play + requestVideoFrameCallback
-       (sequential decode from the current position, then pause)
-     • reverse / large jump / unbuffered → hard seek (same as before) */
+     • forward through a shot, buffered → play + requestVideoFrameCallback.
+       If the last compositor tick was faster than a timeline frame, leave the
+       element playing (no play/pause per frame). If it was slower (typical Fast
+       JPEG upload), pause after the hit so the file cannot overrun.
+     • reverse / large jump / unbuffered / overshoot → hard seek
+   Incoming clips are seek-prefetched ~1 s before they become active. */
+let exportSeekClock = 0;
+function restoreExportVideoState() {
+  exportSeekClock = 0;
+  for (const el of runtime.clipEls.values()) {
+    try { if (!el.paused) el.pause(); } catch { }
+    if (el._fcPrevMuted != null) {
+      try { el.muted = el._fcPrevMuted; } catch { }
+      el._fcPrevMuted = null;
+    }
+  }
+}
+function videoRangeBuffered(el, from, to) {
+  try {
+    const b = el.buffered;
+    const a = Math.min(from, to), z = Math.max(from, to);
+    for (let i = 0; i < b.length; i++) {
+      if (b.start(i) <= a + 0.05 && b.end(i) >= z - 0.05) return true;
+    }
+  } catch { }
+  return el.readyState >= 3;
+}
+function assignVideoTime(el, mt) {
+  if (typeof el.fastSeek === "function") {
+    try { el.fastSeek(mt); return; } catch { }
+  }
+  el.currentTime = mt;
+}
 function hardSeekVideo(el, mt) {
   return new Promise((res) => {
     if (Math.abs(el.currentTime - mt) < 1e-4 && el.readyState >= 2) { res(); return; }
@@ -5492,20 +5522,19 @@ function hardSeekVideo(el, mt) {
     el.addEventListener("seeked", done);
     try {
       if (!el.paused) el.pause();
-      el.currentTime = mt;
+      assignVideoTime(el, mt);
     } catch { done(); }
   });
 }
-/** Play forward until mediaTime reaches mt, then pause. (Must pause: the export
-    loop does async work between frames, so a free-running element would overrun.) */
-function playAdvanceVideo(el, mt, eps, rate) {
+/** Play forward until mediaTime reaches mt. Pause afterwards unless keepPlaying
+    — a free-running element overruns while the compositor does SVG/encode/HTTP. */
+function playAdvanceVideo(el, mt, eps, rate, { keepPlaying } = {}) {
   return new Promise((res) => {
     let settled = false;
     let rvfcId = null;
     let poll = null;
-    const prevMuted = el.muted;
-    let prevRate = 1;
-    try { prevRate = el.playbackRate; } catch { }
+    if (el._fcPrevMuted == null) el._fcPrevMuted = el.muted;
+    const wasPlaying = !el.paused;
     const cleanup = () => {
       clearTimeout(tm);
       if (poll) { clearInterval(poll); poll = null; }
@@ -5513,9 +5542,9 @@ function playAdvanceVideo(el, mt, eps, rate) {
         try { el.cancelVideoFrameCallback(rvfcId); } catch { }
         rvfcId = null;
       }
-      try { el.pause(); } catch { }
-      try { el.muted = prevMuted; } catch { }
-      try { el.playbackRate = prevRate; } catch { }
+      if (!keepPlaying) {
+        try { el.pause(); } catch { }
+      }
     };
     const finish = () => {
       if (settled) return;
@@ -5544,6 +5573,8 @@ function playAdvanceVideo(el, mt, eps, rate) {
     } else {
       poll = setInterval(() => check(el.currentTime), 4);
     }
+    check(el.currentTime);
+    if (wasPlaying) return;
     const p = el.play();
     if (p && typeof p.catch === "function") {
       p.catch(() => {
@@ -5555,8 +5586,31 @@ function playAdvanceVideo(el, mt, eps, rate) {
     }
   });
 }
+const EXPORT_PREFETCH_S = 1.25;
+function prefetchExportVideos(t) {
+  for (const c of project.clips) {
+    if (c.kind !== "video" || !isTrackEnabled(c.track)) continue;
+    if (activeAt(c, t)) continue;
+    if (c.start > t + EXPORT_PREFETCH_S || clipEnd(c) <= t) continue;
+    const el = getClipEl(c);
+    if (!el) continue;
+    const mt = mediaTimeAt(c, Math.max(t, c.start));
+    if (Math.abs(el.currentTime - mt) < 0.08) continue;
+    try {
+      if (!el.paused) el.pause();
+      assignVideoTime(el, mt);
+    } catch { }
+  }
+}
 async function seekVideosTo(t) {
   const fps = projectFps();
+  const now = performance.now();
+  const frameMs = 1000 / fps;
+  // Last compositor+upload tick faster than a timeline frame → decoder can
+  // stay in play() through the shot. Slower (Fast JPEG) → pause so we don't
+  // overshoot and seek backwards every frame.
+  const keepPlaying = exportSeekClock > 0 && (now - exportSeekClock) < frameMs * 1.4;
+  exportSeekClock = now;
   const waits = [];
   const restoreGain = [];
   for (const c of project.clips) {
@@ -5565,6 +5619,10 @@ async function seekVideosTo(t) {
     const el = getClipEl(c); if (!el) continue;
     if (!activeAt(c, t)) {
       if (!el.paused) el.pause();
+      if (el._fcPrevMuted != null) {
+        try { el.muted = el._fcPrevMuted; } catch { }
+        el._fcPrevMuted = null;
+      }
       const g = runtime.clipGain.get(c.id);
       if (g) g.gain.value = clamp(evalProps(c, t).volume, 0, 4);
       continue;
@@ -5575,7 +5633,15 @@ async function seekVideosTo(t) {
     // One timeline frame in media-time; half-frame = “already on the right frame”
     const mediaFrame = sp / fps;
     const eps = 0.5 * mediaFrame;
-    if (el.readyState >= 2 && Math.abs(el.currentTime - mt) <= eps) continue;
+    const err = el.currentTime - mt;
+    if (el.readyState >= 2 && Math.abs(err) <= eps) {
+      if (keepPlaying && !el.paused) {
+        try { el.playbackRate = sp; } catch { }
+      }
+      continue;
+    }
+    // Keep-playing path: a slightly late displayed frame is cheaper than a seek
+    if (keepPlaying && !el.paused && err > 0 && err <= eps * 2) continue;
 
     const g = runtime.clipGain.get(c.id);
     if (g) {
@@ -5584,10 +5650,14 @@ async function seekVideosTo(t) {
     }
 
     const delta = mt - el.currentTime;
-    // ~4 timeline frames forward + data in buffer → sequential play instead of seek storm
-    const maxPlay = mediaFrame * 4;
-    if (delta > eps && delta <= maxPlay && el.readyState >= 2) {
-      waits.push(playAdvanceVideo(el, mt, eps, sp));
+    const alreadyPlaying = !el.paused;
+    const maxPlay = alreadyPlaying || keepPlaying
+      ? Math.min(3, Math.max(2, mediaFrame * 60))
+      : Math.min(1, Math.max(0.5, mediaFrame * 16));
+    const canPlayFwd = delta > eps && delta <= maxPlay
+      && (alreadyPlaying || (el.readyState >= 2 && videoRangeBuffered(el, el.currentTime, mt)));
+    if (canPlayFwd) {
+      waits.push(playAdvanceVideo(el, mt, eps, sp, { keepPlaying }));
     } else {
       waits.push(hardSeekVideo(el, mt));
     }
@@ -5597,6 +5667,7 @@ async function seekVideosTo(t) {
     const g = runtime.clipGain.get(c.id);
     if (g) g.gain.value = clamp(evalProps(c, t).volume, 0, 4);
   }
+  prefetchExportVideos(t);
 }
 function encodeWAV(buf) {
   const ch = buf.numberOfChannels, len = buf.length, sr = buf.sampleRate;
@@ -5674,6 +5745,7 @@ async function fastExport() {
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
   els.exportNote.textContent = "Rendering frames → ffmpeg. You can switch tabs; export continues.";
+  restoreExportVideoState();
   const fps = projectFps(), dur = Math.max(1 / fps, projDur());
   const frames = Math.max(1, Math.round(dur * fps));
   let sessId = null;
@@ -5717,6 +5789,7 @@ async function fastExport() {
     if (sessId) fetch("/api/export/end?id=" + sessId + "&discard=1", { method: "POST" }).catch(() => { });
     if (String(e.message) !== "cancelled") alert("Export failed: " + e.message);
   } finally {
+    restoreExportVideoState();
     state.exporting = false; state.rendering = false;
     els.exportOverlay.classList.add("hidden");
     els.exportNote.textContent = "Rendering your sequence in real time. Keep this tab focused.";
@@ -5726,7 +5799,9 @@ async function fastExport() {
 
 /* ── WebCodecs export (browser H.264 → server mux) ── */
 /* Uploads MUST be strictly sequential — concurrent /frame POSTs race on the
-   same ffmpeg stdin and deadlock the pipe (progress freezes around a few %). */
+   same ffmpeg stdin and deadlock the pipe. Annex-B AUs concatenate (start
+   codes), so we batch them: first AU starts ffmpeg, later POSTs carry ~12 AUs
+   or ~128 KiB so HTTP headers stop dominating the payload. */
 let webCodecsAbort = null;
 function waitEncodeQueue(encoder, max = 2, { signal, getError } = {}) {
   const cancelled = () => renderCancelled || !!(signal && signal.aborted);
@@ -5767,15 +5842,28 @@ async function webCodecsExport() {
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
   els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues.";
+  restoreExportVideoState();
   const fps = projectFps(), dur = Math.max(1 / fps, projDur());
   const frames = Math.max(1, Math.round(dur * fps));
   const keyEvery = Math.max(1, Math.round(fps * 2));
   let sessId = null;
   let encoder = null;
   let uploadError = null;
-  // single-flight upload chain: each NAL waits for the previous POST to finish
+  // single-flight POST chain; each body may be several concatenated Annex-B AUs
+  const BATCH_AUS = 12;
+  const BATCH_BYTES = 128 * 1024;
+  let batch = [];
+  let batchBytes = 0;
+  let sentFirstAu = false;
   let uploadTail = Promise.resolve();
   let uploadsInFlight = 0;
+  const concatAus = (parts, n) => {
+    if (parts.length === 1) return parts[0];
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  };
   const enqueueUpload = (buf) => {
     uploadsInFlight++;
     // recover from a prior rejection so one failed POST doesn't stall the chain
@@ -5791,6 +5879,21 @@ async function webCodecsExport() {
       if (!uploadError) uploadError = err;
     }).finally(() => { uploadsInFlight--; });
     return p;
+  };
+  const flushBatch = (force) => {
+    if (!batch.length) return;
+    const first = !sentFirstAu;
+    if (!force && !first && batchBytes < BATCH_BYTES && batch.length < BATCH_AUS) return;
+    sentFirstAu = true;
+    const parts = batch, n = batchBytes;
+    batch = [];
+    batchBytes = 0;
+    enqueueUpload(concatAus(parts, n));
+  };
+  const enqueueAu = (buf) => {
+    batch.push(buf);
+    batchBytes += buf.length;
+    flushBatch(false);
   };
   const waitUploadBackpressure = (max = 2) => new Promise((res, rej) => {
     const tick = () => {
@@ -5837,7 +5940,7 @@ async function webCodecsExport() {
         if (uploadError || renderCancelled || signal.aborted) return;
         const buf = new Uint8Array(chunk.byteLength);
         chunk.copyTo(buf);
-        enqueueUpload(buf);
+        enqueueAu(buf);
       },
       error: (e) => { uploadError = e; },
     });
@@ -5876,6 +5979,7 @@ async function webCodecsExport() {
     }
     els.exportTitle.textContent = "Finishing…";
     await encoder.flush();
+    flushBatch(true);
     await uploadTail;
     if (uploadError) throw uploadError;
     encoder.close();
@@ -5893,6 +5997,7 @@ async function webCodecsExport() {
     if (msg !== "cancelled") alert("Export failed: " + msg);
   } finally {
     webCodecsAbort = null;
+    restoreExportVideoState();
     state.exporting = false; state.rendering = false;
     els.exportOverlay.classList.add("hidden");
     els.exportNote.textContent = "Rendering your sequence in real time. Keep this tab focused.";

@@ -145,7 +145,8 @@ async function faststart(file) {
 /* ── Export sessions ──
    Two modes share the same HTTP session API:
      jpeg   — browser streams JPEGs; ffmpeg encodes H.264 (Fast path)
-     annexb — browser streams Annex-B H.264 NALs; ffmpeg stream-copies (WebCodecs)
+     annexb — browser streams Annex-B H.264 (one POST may concatenate several AUs);
+              ffmpeg stream-copies (WebCodecs)
    Both encoders spawn on the first /frame so audio mix + WAV upload (which can
    take longer than ffmpeg's ~5s probe window) cannot starve image2pipe. */
 const exportSessions = new Map();
