@@ -3310,7 +3310,7 @@ function renderInspector(lite) {
       if (!c.keyframes) c.keyframes = {};
       const arr = (c.keyframes[k] = c.keyframes[k] || []);
       const lt = +clamp(state.time - c.start, 0, c.duration).toFixed(3);
-      const near = arr.find((kf) => Math.abs(kf.t - lt) < 0.5 / project.fps);
+      const near = arr.find((kf) => Math.abs(kf.t - lt) < 0.5 / projectFps());
       if (near) near.v = v; else arr.push({ t: lt, v });
       arr.sort((a, b) => a.t - b.t);
       state.dirtyTimeline = true;
@@ -4226,7 +4226,7 @@ function getSvgImage(c, t) {
   if (!aux || !aux.svgText) return null;
   if (!aux.svgAnimated) return aux.img || null;
   const local = Math.max(0, mediaTimeAt(c, t));
-  const q = Math.round(local * project.fps) / project.fps;
+  const q = Math.round(local * projectFps()) / projectFps();
   const hit = aux.svgFrames.get(q);
   if (hit) return hit;
   if (!aux.svgPending) {
@@ -4244,7 +4244,7 @@ async function prepareSvgFrame(c, t) {
   if (!aux.svgText) { try { await loadSvgMedia(getMedia(c.mediaId)); } catch { return; } }
   if (!aux.svgAnimated) return;
   const local = Math.max(0, mediaTimeAt(c, t));
-  const q = Math.round(local * project.fps) / project.fps;
+  const q = Math.round(local * projectFps()) / projectFps();
   if (aux.svgFrames.get(q)) return;
   try {
     const img = await renderSvgFrame(aux, q);
@@ -4331,7 +4331,7 @@ function getGrainTile() {
    Phase jumps per frame so grain "boils" like film. */
 function drawGrain(amount, x, y, w, h, t) {
   const keepA = ctx2d.globalAlpha, keepC = ctx2d.globalCompositeOperation;
-  const off = (Math.floor(t * project.fps) * 7919) % 256;
+  const off = (Math.floor(t * projectFps()) * 7919) % 256;
   ctx2d.globalCompositeOperation = "overlay";
   ctx2d.globalAlpha = keepA * clamp(amount / 100, 0, 1) * 0.55;
   ctx2d.save();
@@ -6025,7 +6025,7 @@ async function startExport() {
   state.time = 0;
   seekMediaWhilePaused();
   await new Promise((r) => setTimeout(r, 350)); // let first frames decode
-  const stream = els.preview.captureStream(project.fps);
+  const stream = els.preview.captureStream(projectFps());
   for (const tr of runtime.audio.recDest.stream.getAudioTracks()) stream.addTrack(tr);
   recChunks = []; recDiscard = false;
   recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 10_000_000 });
@@ -6094,8 +6094,8 @@ $("btnPlay").addEventListener("click", () => state.playing ? pause() : play());
 els.btnSpeed.addEventListener("click", () => cyclePreviewRate(1));
 $("btnHome").addEventListener("click", gotoHome);
 $("btnEnd").addEventListener("click", gotoEnd);
-$("btnBack").addEventListener("click", () => setTime(state.time - 1 / project.fps));
-$("btnFwd").addEventListener("click", () => setTime(state.time + 1 / project.fps));
+$("btnBack").addEventListener("click", () => setTime(state.time - 1 / projectFps()));
+$("btnFwd").addEventListener("click", () => setTime(state.time + 1 / projectFps()));
 $("btnHelp").addEventListener("click", () => $("helpOverlay").classList.remove("hidden"));
 $("btnCloseHelp").addEventListener("click", () => $("helpOverlay").classList.add("hidden"));
 function settingsFocusables() {
@@ -6613,8 +6613,8 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     goToKeyframe(k === "ArrowRight" ? 1 : -1);
   }
-  else if (k === "ArrowLeft") setTime(state.time - (e.shiftKey ? 1 : 1 / project.fps));
-  else if (k === "ArrowRight") setTime(state.time + (e.shiftKey ? 1 : 1 / project.fps));
+  else if (k === "ArrowLeft") setTime(state.time - (e.shiftKey ? 1 : 1 / projectFps()));
+  else if (k === "ArrowRight") setTime(state.time + (e.shiftKey ? 1 : 1 / projectFps()));
   else if (k === "Home") gotoHome();
   else if (k === "End") gotoEnd();
   else if (k === "[") trimToPlayhead("in");
