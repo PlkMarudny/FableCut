@@ -94,10 +94,12 @@ function onFsChange() {
 }
 /* watch the directory, not the file — atomic tmp+rename writes would detach a
    direct file watcher on Windows */
-try { fs.watch(DATA_DIR, (ev, f) => { if (f === "project.json") onFsChange(); }); } catch {}
-try { fs.watch(MEDIA_DIR, onFsChange); } catch {}
-for (const d of LIBRARY_SUBDIRS) {
-  try { fs.watch(path.join(LIBRARY_DIR, d), onFsChange); } catch {}
+if (process.env.FABLECUT_NO_FS_WATCH !== "1") {
+  try { fs.watch(DATA_DIR, (ev, f) => { if (f === "project.json") onFsChange(); }); } catch {}
+  try { fs.watch(MEDIA_DIR, onFsChange); } catch {}
+  for (const d of LIBRARY_SUBDIRS) {
+    try { fs.watch(path.join(LIBRARY_DIR, d), onFsChange); } catch {}
+  }
 }
 
 /* ── Helpers ── */
@@ -299,8 +301,15 @@ const server = http.createServer(async (req, res) => {
     try {
       const opts = JSON.parse((await readBody(req)).toString("utf8") || "{}");
       const ac = new AbortController();
-      req.on("close", () => { if (!res.writableEnded) ac.abort(); });
-      const { target, name } = await downloadImportUrl(opts.url, MEDIA_DIR, { signal: ac.signal });
+      // IncomingMessage "close" also fires when the request body finishes, which
+      // would abort a successful download. ServerResponse "close" with
+      // writableEnded still false means the client dropped the connection.
+      res.on("close", () => { if (!res.writableEnded) ac.abort(); });
+      const { target, name } = await downloadImportUrl(opts.url, MEDIA_DIR, {
+        signal: ac.signal,
+        // test/rest-api.test.js sets this so a loopback fixture can pin success
+        allowPrivate: process.env.FABLECUT_TEST_IMPORT_ALLOW_PRIVATE === "1",
+      });
       await faststart(target);
       sendJSON(res, 200, { ok: true, src: "/media/" + encodeURIComponent(name), name });
     } catch (e) {
