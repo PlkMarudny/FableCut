@@ -180,7 +180,13 @@ function cleanupExport(id) {
 function serveFile(req, res, filePath) {
   fs.stat(filePath, (err, st) => {
     if (err || !st.isFile()) { res.writeHead(404); res.end("Not found"); return; }
-    const type = MIME[path.extname(filePath).toLowerCase()] || "application/octet-stream";
+    const ext = path.extname(filePath).toLowerCase();
+    const type = MIME[ext] || "application/octet-stream";
+    const extra = {};
+    if (ext === ".svg") {
+      extra["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'unsafe-inline'";
+      extra["X-Content-Type-Options"] = "nosniff";
+    }
     const range = req.headers.range;
     if (range) {
       const m = /bytes=(\d*)-(\d*)/.exec(range);
@@ -190,13 +196,13 @@ function serveFile(req, res, filePath) {
       res.writeHead(206, {
         "Content-Type": type, "Accept-Ranges": "bytes",
         "Content-Range": `bytes ${start}-${end}/${st.size}`,
-        "Content-Length": end - start + 1,
+        "Content-Length": end - start + 1, ...extra,
       });
       fs.createReadStream(filePath, { start, end }).pipe(res);
     } else {
       res.writeHead(200, {
         "Content-Type": type, "Content-Length": st.size,
-        "Accept-Ranges": "bytes", "Cache-Control": "no-cache",
+        "Accept-Ranges": "bytes", "Cache-Control": "no-cache", ...extra,
       });
       fs.createReadStream(filePath).pipe(res);
     }

@@ -67,9 +67,9 @@ same time.
 - Real decoded audio waveforms on clips
 - **Project bin folders** — tree view with expand/collapse; drag media or folders to nest; right-click the **Project** tab → New folder; drop files onto a folder to import into it
 - **Import from URL** — **+ URL** downloads an HTTPS video/audio/image into
-  `./media/` (same-origin after import). Agents use `fablecut_import_media`
-  with an `https://` path. The URL is not kept as `media.src` — that would
-  taint the canvas and break export.
+  `./media/` (same-origin after import). Remote SVG is refused. Agents use
+  `fablecut_import_media` with an `https://` path. The URL is not kept as
+  `media.src` — that would taint the canvas and break export.
 - **Audio Hold** — timeline toolbar toggle: while paused, loops **one frame** of
   audio at the playhead (useful when stepping frame-by-frame). Scrubbing or
   frame-step retargets the held slice; meters stay live. **Play** / **Pause**

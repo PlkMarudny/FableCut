@@ -1,6 +1,7 @@
 /* Download a remote HTTPS file into ./media with SSRF guards.
    Used by POST /api/import-url and fablecut_import_media. The stored src is
-   always a local /media/… path — the URL is not kept as the playback source. */
+   always a local /media/… path — the URL is not kept as the playback source.
+   Remote SVG is refused (same-origin image/svg+xml would be a script sink). */
 "use strict";
 const http = require("http");
 const https = require("https");
@@ -167,9 +168,16 @@ function saveResponse(res, u, destDir, { signal, maxBytes }) {
     return Promise.reject(new Error("URL did not return a media file"));
   }
   const name = filenameFrom(u, res.headers);
-  if (!kindFromName(name)) {
+  const kind = kindFromName(name);
+  // /media/*.svg is served same-origin as image/svg+xml. A remote file with
+  // <script> opened as a document would run on the editor origin.
+  if (kind === "svg" || mime === "image/svg+xml" || mime === "image/svg") {
     res.resume();
-    return Promise.reject(new Error("unsupported media type (need a video, audio, image, or SVG URL)"));
+    return Promise.reject(new Error("unsupported media type (remote SVG is not imported)"));
+  }
+  if (!kind) {
+    res.resume();
+    return Promise.reject(new Error("unsupported media type (need a video, audio, or image URL)"));
   }
   const declared = parseInt(res.headers["content-length"], 10);
   if (declared > maxBytes) {

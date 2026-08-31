@@ -149,7 +149,7 @@ const TOOLS = [
   },
   {
     name: "fablecut_import_media",
-    description: "Import a media file into FableCut's media library and register it in the project. Pass a local absolute path (copied) or an https:// URL (downloaded into ./media/, never kept as the playback src — CORS would break export). Returns the created media entry (use its id in clips).",
+    description: "Import a media file into FableCut's media library and register it in the project. Pass a local absolute path (copied, including .svg) or an https:// URL (downloaded into ./media/; video/audio/image only — remote SVG is refused). The URL is never kept as the playback src — CORS would break export. Returns the created media entry (use its id in clips).",
     inputSchema: {
       type: "object",
       properties: { path: { type: "string", description: "Absolute path to a local file, or an https:// URL to download" } },

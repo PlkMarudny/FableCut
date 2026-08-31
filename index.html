@@ -166,7 +166,7 @@
 <div class="overlay hidden" id="importUrlOverlay">
   <div class="dialog" id="importUrlDialog" role="dialog" aria-modal="true" aria-labelledby="importUrlTitle">
     <h2 id="importUrlTitle">Import from URL</h2>
-    <p class="dim">Downloads an HTTPS video, audio, image or SVG into the project media folder. The file is stored locally — the URL is not used as the playback source.</p>
+    <p class="dim">Downloads an HTTPS video, audio or image into the project media folder. The file is stored locally — the URL is not used as the playback source. Remote SVGs are not imported (they can run script if opened as a document).</p>
     <label class="import-url-field">
       <span class="sr-only">Media URL</span>
       <input type="url" id="importUrlInput" placeholder="https://…" autocomplete="off" spellcheck="false">

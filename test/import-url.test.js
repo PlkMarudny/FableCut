@@ -118,6 +118,11 @@ test("downloadImportUrl enforces maxBytes and rejects HTML", async (t) => {
       res.end("<html>nope</html>");
       return;
     }
+    if (req.url === "/sticker.svg") {
+      res.writeHead(200, { "Content-Type": "image/svg+xml" });
+      res.end('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+      return;
+    }
     res.writeHead(404); res.end();
   });
   t.after(() => server.close());
@@ -128,6 +133,9 @@ test("downloadImportUrl enforces maxBytes and rejects HTML", async (t) => {
   await assert.rejects(
     downloadImportUrl(url + "/page.mp4", dir, { allowPrivate: true }),
     /did not return a media file/);
+  await assert.rejects(
+    downloadImportUrl(url + "/sticker.svg", dir, { allowPrivate: true }),
+    /remote SVG/i);
   assert.equal(fs.readdirSync(dir).length, 0, "failed downloads must not leave a file");
 });
 

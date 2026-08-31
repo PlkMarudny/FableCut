@@ -429,7 +429,9 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 - `POST /api/import-url` — body `{url:"https://…"}` downloads the file into
   `./media/` and returns `{src,name}` (same-origin `/media/…`, like upload).
   HTTPS only; rejects localhost, private/link-local/CGNAT addresses, and
-  redirects to those. Does not write `project.json` — register the media
+  redirects to those. Remote SVG is refused (`/media/*.svg` is served
+  same-origin as `image/svg+xml` — a scripted SVG opened as a document would
+  run on the editor origin). Does not write `project.json` — register the media
   afterwards (UI and `fablecut_import_media` do this). Do **not** put the
   HTTPS URL in `media.src`: canvas CORS would break thumbs, FX and export.
 - `POST /api/analyze` — body `{src:"/media/ref.mp4", threshold?, music?}`: analyze a
