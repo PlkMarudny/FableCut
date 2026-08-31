@@ -6037,7 +6037,12 @@ function updateExportFrameOverlay() {
   if (!hole) return;
   const left = ef.x * sx, top = ef.y * sy, w = ef.w * sx, h = ef.h * sy;
   layoutExportFrameOverlayPart(hole, left, top, w, h);
-  if (handle) layoutExportFrameOverlayPart(handle, left + 6, top + 6, Math.min(w - 12, 120), 22);
+  if (handle) {
+    handle.style.left = (left + 6) + "px";
+    handle.style.top = (top + 6) + "px";
+    handle.style.width = "auto";
+    handle.style.maxWidth = Math.max(0, w - 12) + "px";
+  }
   if (edgeT) layoutExportFrameOverlayPart(edgeT, left, top, w, EF_EDGE);
   if (edgeB) layoutExportFrameOverlayPart(edgeB, left, top + h - EF_EDGE, w, EF_EDGE);
   if (edgeL) layoutExportFrameOverlayPart(edgeL, left, top + EF_EDGE, EF_EDGE, Math.max(0, h - EF_EDGE * 2));
