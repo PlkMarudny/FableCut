@@ -3805,10 +3805,9 @@ function updateMeterUI(dt) {
     const holdN = clamp(
       ((meterState.peakHold[id] ?? METER_DB_MIN) - METER_DB_MIN) / (METER_DB_MAX - METER_DB_MIN), 0, 1
     );
-    // Floor / empty bar → no hold tick. Exponential decay never quite hits
-    // MIN, so round(ε) kept segment 0 lit after falloff.
+    // Empty bar → no hold tick (including a leftover positive hold index).
     let hold = holdN <= 0 ? -1 : Math.round(holdN * (METER_SEGS - 1));
-    if (lit === 0 && hold <= 0) hold = -1;
+    if (lit === 0) hold = -1;
     // The ballistics above still run every frame (needed for smooth decay),
     // but the canvas only needs repainting when the result actually differs —
     // skips a redraw for most tracks most frames.
