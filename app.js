@@ -256,7 +256,8 @@ const state = {
   connected: false, exporting: false,
   rendering: false,      // fast (server/ffmpeg) export in progress
   guides: false,         // safe-area overlay on the monitor
-  exportFrameView: true, // dimmed overscan + export frame overlay
+  exportFrameView: true, // export frame overlay (border + overscan dim)
+  exportFrameCrop: false, // clip preview to the export frame (hide overscan)
   viewZoom: 1,           // program-monitor display zoom (1 = fit stage)
   audioHold: false,      // while paused, loop one frame of audio at the playhead
   ffmpeg: false,         // server reports ffmpeg available
@@ -334,6 +335,7 @@ const els = {
   projectName: $("projectName"), monitorRes: $("monitorRes"),
   aspectSel: $("aspectSel"), fpsSel: $("fpsSel"),
   btnGuides: $("btnGuides"), btnExportFrame: $("btnExportFrame"),
+  btnExportFrameDim: $("btnExportFrameDim"),
   exportFrameSel: $("exportFrameSel"), exportFrameOverlay: $("exportFrameOverlay"),
   btnZoom100: $("btnZoom100"),
   safeOverlay: $("safeOverlay"), btnSpeed: $("btnSpeed"),
@@ -5779,6 +5781,10 @@ els.btnExportFrame?.addEventListener("click", () => {
   els.btnExportFrame.classList.toggle("on", state.exportFrameView && !!getExportFrame());
   updateExportFrameOverlay();
 });
+els.btnExportFrameDim?.addEventListener("click", () => {
+  state.exportFrameCrop = !state.exportFrameCrop;
+  updateExportFrameOverlay();
+});
 els.btnGuides.addEventListener("click", () => {
   state.guides = !state.guides;
   els.btnGuides.classList.toggle("on", state.guides);
@@ -5978,12 +5984,41 @@ function layoutExportFrameOverlayPart(el, left, top, w, h) {
   el.style.width = w + "px";
   el.style.height = h + "px";
 }
+function applyExportFrameClip(ef, show) {
+  const inner = els.monitorZoomInner;
+  if (!inner) return;
+  if (!(show && state.exportFrameCrop && ef && els.preview)) {
+    inner.style.clipPath = "";
+    return;
+  }
+  const cv = els.preview;
+  const ir = inner.getBoundingClientRect();
+  const cr = cv.getBoundingClientRect();
+  if (!ir.width || !cr.width) { inner.style.clipPath = ""; return; }
+  const sx = cr.width / project.width, sy = cr.height / project.height;
+  const left = cr.left - ir.left + ef.x * sx;
+  const top = cr.top - ir.top + ef.y * sy;
+  const right = ir.right - (cr.left + (ef.x + ef.w) * sx);
+  const bottom = ir.bottom - (cr.top + (ef.y + ef.h) * sy);
+  inner.style.clipPath = `inset(${Math.max(0, top)}px ${Math.max(0, right)}px ${Math.max(0, bottom)}px ${Math.max(0, left)}px)`;
+}
 function updateExportFrameOverlay() {
   const ov = els.exportFrameOverlay;
   if (!ov) return;
   const ef = getExportFrame();
   const show = state.exportFrameView && ef;
   ov.classList.toggle("hidden", !show);
+  ov.classList.toggle("is-crop", !!(show && state.exportFrameCrop));
+  const dimBtn = els.btnExportFrameDim;
+  if (dimBtn) {
+    dimBtn.classList.toggle("hidden", !show);
+    dimBtn.classList.toggle("on", !!(show && !state.exportFrameCrop));
+    dimBtn.setAttribute("aria-pressed", show && !state.exportFrameCrop ? "true" : "false");
+    dimBtn.title = state.exportFrameCrop
+      ? "Lights on — show canvas outside the export frame"
+      : "Lights off — crop to the export frame";
+  }
+  applyExportFrameClip(ef, show);
   if (!show) return;
   const cv = els.preview;
   const root = ov.style;
