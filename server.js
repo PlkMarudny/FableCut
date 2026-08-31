@@ -397,10 +397,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (p === "/api/export/begin" && req.method === "POST") {
-    if (!HAS_FFMPEG) { sendJSON(res, 400, { error: "ffmpeg not found on PATH" }); return; }
     try {
       const opts = JSON.parse((await readBody(req)).toString("utf8") || "{}");
-      if (opts.profile) resolveProfile(opts.profile); // 400, not 500, on a bad id
+      if (opts.profile) resolveProfile(opts.profile); // 400, not 500, on a bad id — even without ffmpeg
+      if (!HAS_FFMPEG) { sendJSON(res, 400, { error: "ffmpeg not found on PATH" }); return; }
       sendJSON(res, 200, await beginExport(opts.fps || 30, opts.name, opts.profile, opts.hasAudio !== false));
     } catch (e) {
       // an unusable profile is the caller's problem, not a server fault
