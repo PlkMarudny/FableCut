@@ -19,10 +19,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negotiation and framing, MCP tool semantics including the conflict rules, the
   REST API with its Host/Origin and path-traversal guards, and the shipped SVG
   library. CI runs it on Node 18, 20 and 22 for every pull request.
+- Dynamic video + audio tracks (default 3+4; **+V** / **+A**, right-click
+  **Remove track**, header **S** solo; up to 16 per kind). The live lane list is
+  stored on `project.json` as `tracks`.
+- Per-clip **stereo pan** (`props.pan`, −1…+1) on video/audio clips — inspector
+  slider + keyframes; preview, audio-hold, and Fast export all honor it. Linked
+  stems default to L `−1` / R `+1` / center for other channels. Compact MCP
+  keeps `pan` on linked stems.
+- Stereo **master meter** (L/R) on the monitor — post-pan program sum in the
+  same RMS / LUFS / Peak modes as the per-track bars; A-tracks + video spill
+  route through one summed path when the meter worklet is active. Per-track
+  bars collapse via **◂** / **▸** beside the master strip (master L/R stay visible).
+
+### Changed
+- `project.json` gains two forward-compatible keys (`tracks`, `panSchema`).
+  Older builds ignore them. **Opening** a project saved before pan writes the
+  file back once: it stamps `panSchema: 1`, hard-pans linked stems that had no
+  `pan`, and every save from then on also emits `tracks`. Hand-edited documents
+  that omit `panSchema: 1` will be migrated again on the next open.
 
 ### Fixed
 - MCP `initialize` no longer echoes an unsupported `protocolVersion`. Missing or unknown versions now negotiate to `2025-11-25` instead of claiming a revision the server does not speak (#58).
 - `CLAUDE.md` pointed agents at `fablecut_docs {section:"props"}`, which matches no `## ` heading and returns nothing useful; it now names a real section.
+- Audio graph teardown on project reload — clip chains
+  (`MediaElementSource → splitter → gain → panner → bus`) are now fully
+  disconnected via `releaseClipEl` instead of only clearing the maps (which
+  left nodes wired to live track buses). Panner attach degrades gracefully if
+  `StereoPannerNode` is unavailable; inspector volume/pan changes refresh
+  audio-hold voices.
 
 ## [1.7.0] - 2026-08-25
 
