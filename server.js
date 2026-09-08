@@ -213,6 +213,10 @@ function attachProc(sess, proc) {
 }
 async function beginExport(fps, name, profileId, hasAudio, mode) {
   const m = mode === "annexb" ? "annexb" : "jpeg";
+  const rate = Number(fps);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new Error("export fps required (pass project.fps)");
+  }
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const safe = safeName(name || "export");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-"));
@@ -220,7 +224,7 @@ async function beginExport(fps, name, profileId, hasAudio, mode) {
   if (m === "annexb") {
     const { outPath, partPath } = reserveExportPaths(EXPORTS_DIR, safe, ".mp4");
     const sess = {
-      mode: m, fps: Number(fps) || 30, proc: null, dir,
+      mode: m, fps: rate, proc: null, dir,
       name: safe, hasAudio: !!hasAudio,
       wav: null, partPath, outPath,
       stderr: "", done: null, lastTouch: Date.now(),
@@ -233,13 +237,13 @@ async function beginExport(fps, name, profileId, hasAudio, mode) {
   }
 
   const profile = resolveProfile(profileId);
-  const dry = await dryRunProfile(profile, { fps, hasAudio });
+  const dry = await dryRunProfile(profile, { fps: rate, hasAudio });
   if (!dry.ok) throw new Error(`profile "${profile.id}" was rejected by ffmpeg: ${dry.error}`);
   // Reserve the output name now (not at first frame) so concurrent exports
   // cannot both see the same free path. The empty .part file is overwritten by ffmpeg (-y).
   const { outPath, partPath } = reserveExportPaths(EXPORTS_DIR, safe, profile.extension);
   const sess = {
-    mode: m, proc: null, fps, profile, name: safe, hasAudio: !!hasAudio,
+    mode: m, proc: null, fps: rate, profile, name: safe, hasAudio: !!hasAudio,
     dir, wav: null, partPath, outPath,
     stderr: "", done: null, lastTouch: Date.now(),
     err: () => sess.stderr.trim().split("\n").filter(Boolean).slice(-3)
@@ -475,10 +479,10 @@ const server = http.createServer(async (req, res) => {
       const mode = opts.mode === "annexb" ? "annexb" : "jpeg";
       if (mode !== "annexb" && opts.profile) resolveProfile(opts.profile); // 400, not 500, on a bad id — even without ffmpeg
       if (!HAS_FFMPEG) { sendJSON(res, 400, { error: "ffmpeg not found on PATH" }); return; }
-      sendJSON(res, 200, await beginExport(opts.fps || 30, opts.name, opts.profile, opts.hasAudio !== false, mode));
+      sendJSON(res, 200, await beginExport(opts.fps, opts.name, opts.profile, opts.hasAudio !== false, mode));
     } catch (e) {
       // an unusable profile is the caller's problem, not a server fault
-      const bad = /^Unknown encoding profile|was rejected by ffmpeg/.test(e.message || "");
+      const bad = /^Unknown encoding profile|was rejected by ffmpeg|export fps required/.test(e.message || "");
       sendJSON(res, bad ? 400 : 500, { error: String(e.message || e) });
     }
     return;

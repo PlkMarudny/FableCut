@@ -169,7 +169,7 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
 ```jsonc
 {
   "name": "My Edit",
-  "width": 1280, "height": 720, "fps": 30,   // composition canvas + timeline/export rate (UI: FPS select)
+  "width": 1280, "height": 720, "fps": 30,   // composition canvas + timeline/export rate — sole FPS source (UI: FPS select)
   "exportFrame": { "x": 438, "y": 0, "w": 404, "h": 720 },  // optional delivery crop (even w/h for H.264)
   // ^ omit = export the full canvas. Preview dims outside this rect; Fast export crops
   // JPEGs to w×h. Clip x/y/scale stay relative to the composition center, not the frame.
@@ -437,7 +437,8 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
   `GET /api/export/ffmpeg` → `{available}` · `GET /api/export/profiles[?detail=1]` →
   `{default, profiles, issues}` · `POST /api/export/begin`
   `{fps,name,mode?,profile?,hasAudio?}` → `{id,mode,profile?,label,summary}`
-  (`mode` is `"jpeg"` (default, Fast) or `"annexb"` (WebCodecs H.264 elementary stream);
+  (`fps` is required — pass `project.fps`, no server-side default;
+  `mode` is `"jpeg"` (default, Fast) or `"annexb"` (WebCodecs H.264 elementary stream);
   jpeg **400** if `profile` is not a defined id, or if ffmpeg rejects its args in the dry run)
   · `POST /api/export/frame?id=` (JPEG body for jpeg mode, Annex-B NAL bytes for
   annexb — must be after audio; ffmpeg is spawned on the first frame in both modes)
