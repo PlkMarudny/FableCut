@@ -57,8 +57,9 @@ async function startServer(t, dataDir, extraEnv = {}) {
     const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
       cwd: ROOT,
       env: {
-        ...process.env, PORT: String(port), HOST: "127.0.0.1",
-        FABLECUT_DATA_DIR: dataDir, ...extraEnv,
+        ...process.env, ...extraEnv,
+        PORT: String(port), HOST: "127.0.0.1",
+        FABLECUT_DATA_DIR: dataDir,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
