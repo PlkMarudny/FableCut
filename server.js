@@ -17,7 +17,6 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const os = require("os");
 const { spawn, spawnSync, execFile } = require("child_process");
 
 const { analyze } = require("./analyze");
@@ -220,7 +219,8 @@ async function beginExport(fps, name, profileId, hasAudio, mode) {
   }
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const safe = safeName(name || "export");
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-"));
+  // Same filesystem as the finished file so renameSync(partPath, out) cannot EXDEV.
+  const dir = fs.mkdtempSync(path.join(EXPORTS_DIR, "fablecut-"));
 
   if (m === "annexb") {
     const { outPath, partPath } = reserveExportPaths(EXPORTS_DIR, safe, ".mp4");
