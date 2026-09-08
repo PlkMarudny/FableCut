@@ -120,6 +120,10 @@ test("downloadImportUrl streams a file when allowLoopback is set (test hook)", a
   assert.equal(a.name, "clip.mp4");
   assert.equal(fs.readFileSync(a.target, "utf8"), "fake-mp4-bytes");
 
+  const a2 = await downloadImportUrl(url + "/clip.mp4", dir, { allowLoopback: true });
+  assert.equal(a2.name, "clip_1.mp4");
+  assert.equal(fs.readFileSync(a2.target, "utf8"), "fake-mp4-bytes");
+
   const b = await downloadImportUrl(url + "/go", dir, { allowLoopback: true });
   assert.equal(b.name, "from-header.webm");
   assert.equal(fs.readFileSync(b.target, "utf8"), "webm-bytes");

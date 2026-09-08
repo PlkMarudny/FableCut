@@ -37,12 +37,18 @@ function safeName(name) {
 function kindFromName(name) {
   return KIND_BY_EXT[path.extname(name).toLowerCase()] || null;
 }
-function uniquePath(dir, name) {
-  let target = path.join(dir, name);
+/** Create `name` under dir with exclusive `wx`. On EEXIST, try name_1, name_2, …
+ *  so two concurrent imports cannot both pick the same free path. */
+function openUniqueFile(dir, name) {
   const ext = path.extname(name), base = path.basename(name, ext);
-  let i = 1;
-  while (fs.existsSync(target)) target = path.join(dir, `${base}_${i++}${ext}`);
-  return target;
+  let i = 0;
+  for (;;) {
+    const file = i === 0 ? name : `${base}_${i}${ext}`;
+    i++;
+    const target = path.join(dir, file);
+    try { return { target, fd: fs.openSync(target, "wx") }; }
+    catch (e) { if (e.code === "EEXIST") continue; throw e; }
+  }
 }
 
 function isBlockedIp(ip) {
@@ -193,14 +199,25 @@ function saveResponse(res, u, destDir, { signal, maxBytes }) {
     return Promise.reject(new Error("file too large"));
   }
   fs.mkdirSync(destDir, { recursive: true });
-  const target = uniquePath(destDir, name);
-  const out = fs.createWriteStream(target);
+  let target, owned = false, out, fd;
+  try {
+    const opened = openUniqueFile(destDir, name);
+    target = opened.target;
+    fd = opened.fd;
+    owned = true;
+    out = fs.createWriteStream(target, { fd });
+  } catch (e) {
+    res.resume();
+    if (fd != null && !out) try { fs.closeSync(fd); } catch {}
+    if (owned) try { fs.rmSync(target, { force: true }); } catch {}
+    return Promise.reject(e);
+  }
   return new Promise((resolve, reject) => {
     let bytes = 0;
     const cleanup = (err) => {
       try { res.destroy(); } catch {}
       try { out.destroy(); } catch {}
-      try { fs.rmSync(target, { force: true }); } catch {}
+      if (owned) try { fs.rmSync(target, { force: true }); } catch {}
       reject(err);
     };
     if (signal) {
@@ -214,7 +231,10 @@ function saveResponse(res, u, destDir, { signal, maxBytes }) {
     res.on("error", cleanup);
     out.on("error", cleanup);
     res.pipe(out);
-    out.on("finish", () => resolve({ target, name: path.basename(target) }));
+    out.on("finish", () => {
+      owned = false; // complete file belongs to the caller now
+      resolve({ target, name: path.basename(target) });
+    });
   });
 }
 

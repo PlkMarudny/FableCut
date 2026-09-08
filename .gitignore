@@ -22,6 +22,9 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+# Nub
+.nub-cache/
+
 project-kesarix-backup-rev197.json
 
 projects_desktops/
