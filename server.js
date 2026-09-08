@@ -478,9 +478,9 @@ const server = http.createServer(async (req, res) => {
         if (!sess.proc) sess.mode === "annexb" ? startAnnexbEncoder(sess) : startEncoder(sess);
         await writeExportFrame(sess, body);
       };
-      const p = sess.writeLock.then(run, run);
-      sess.writeLock = p.catch(() => {}); // keep the chain alive after a failed write
-      await p;
+      const writeJob = sess.writeLock.then(run, run);
+      sess.writeLock = writeJob.catch(() => {}); // keep the chain alive after a failed write
+      await writeJob;
       sendJSON(res, 200, { ok: true });
     } catch (e) {
       cleanupExport(id);
