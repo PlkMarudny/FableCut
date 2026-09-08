@@ -398,8 +398,9 @@ const server = http.createServer(async (req, res) => {
       res.on("close", () => { if (!res.writableEnded) ac.abort(); });
       const { target, name } = await downloadImportUrl(opts.url, MEDIA_DIR, {
         signal: ac.signal,
-        // test/rest-api.test.js sets this so a loopback fixture can pin success
-        allowPrivate: process.env.FABLECUT_TEST_IMPORT_ALLOW_PRIVATE === "1",
+        // test/rest-api.test.js: HTTP to 127.0.0.1 only (loopback fixture).
+        // Does not disable SSRF for LAN / metadata / other private ranges.
+        allowLoopback: process.env.FABLECUT_TEST_IMPORT_ALLOW_PRIVATE === "1",
       });
       await faststart(target);
       sendJSON(res, 200, { ok: true, src: "/media/" + encodeURIComponent(name), name });

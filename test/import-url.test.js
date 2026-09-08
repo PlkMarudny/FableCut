@@ -1,6 +1,7 @@
 /* import-url.js: SSRF guards and the download-to-disk path used by
    /api/import-url and fablecut_import_media. Happy-path download uses a local
-   HTTP server with allowPrivate — production callers never pass that flag. */
+   HTTP server with allowLoopback (127.0.0.1 only) — production callers never
+   pass that flag. */
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -69,7 +70,22 @@ function listen(handler) {
   });
 }
 
-test("downloadImportUrl streams a file when allowPrivate is set (test hook)", async (t) => {
+test("allowLoopback is 127.0.0.1 only, not a private-range bypass", () => {
+  const u = parseImportUrl("http://127.0.0.1/clip.mp4", { allowLoopback: true });
+  assert.equal(u.hostname, "127.0.0.1");
+  parseImportUrl("https://127.0.0.1/clip.mp4", { allowLoopback: true });
+
+  for (const raw of [
+    "http://10.0.0.5/x.mp4", "https://10.0.0.5/x.mp4",
+    "https://192.168.1.9/x.mp4", "https://169.254.169.254/latest/meta-data",
+    "http://localhost/x.mp4", "https://localhost/x.mp4",
+    "https://127.0.0.2/x.mp4", "https://[::1]/x.mp4",
+  ]) {
+    assert.throws(() => parseImportUrl(raw, { allowLoopback: true }), /https|blocked/i, raw);
+  }
+});
+
+test("downloadImportUrl streams a file when allowLoopback is set (test hook)", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-import-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const { server, url } = await listen((req, res) => {
@@ -91,17 +107,26 @@ test("downloadImportUrl streams a file when allowPrivate is set (test hook)", as
       res.end("webm-bytes");
       return;
     }
+    if (req.url === "/away") {
+      res.writeHead(302, { Location: "https://192.168.1.9/secret.mp4" });
+      res.end();
+      return;
+    }
     res.writeHead(404); res.end();
   });
   t.after(() => server.close());
 
-  const a = await downloadImportUrl(url + "/clip.mp4", dir, { allowPrivate: true });
+  const a = await downloadImportUrl(url + "/clip.mp4", dir, { allowLoopback: true });
   assert.equal(a.name, "clip.mp4");
   assert.equal(fs.readFileSync(a.target, "utf8"), "fake-mp4-bytes");
 
-  const b = await downloadImportUrl(url + "/go", dir, { allowPrivate: true });
+  const b = await downloadImportUrl(url + "/go", dir, { allowLoopback: true });
   assert.equal(b.name, "from-header.webm");
   assert.equal(fs.readFileSync(b.target, "utf8"), "webm-bytes");
+
+  await assert.rejects(
+    downloadImportUrl(url + "/away", dir, { allowLoopback: true }),
+    /blocked/i);
 });
 
 test("downloadImportUrl enforces maxBytes and rejects HTML", async (t) => {
@@ -128,18 +153,18 @@ test("downloadImportUrl enforces maxBytes and rejects HTML", async (t) => {
   t.after(() => server.close());
 
   await assert.rejects(
-    downloadImportUrl(url + "/big.mp4", dir, { allowPrivate: true, maxBytes: 4 }),
+    downloadImportUrl(url + "/big.mp4", dir, { allowLoopback: true, maxBytes: 4 }),
     /too large/);
   await assert.rejects(
-    downloadImportUrl(url + "/page.mp4", dir, { allowPrivate: true }),
+    downloadImportUrl(url + "/page.mp4", dir, { allowLoopback: true }),
     /did not return a media file/);
   await assert.rejects(
-    downloadImportUrl(url + "/sticker.svg", dir, { allowPrivate: true }),
+    downloadImportUrl(url + "/sticker.svg", dir, { allowLoopback: true }),
     /remote SVG/i);
   assert.equal(fs.readdirSync(dir).length, 0, "failed downloads must not leave a file");
 });
 
-test("downloadImportUrl without allowPrivate still refuses http and loopback", async () => {
+test("downloadImportUrl without allowLoopback still refuses http and loopback", async () => {
   await assert.rejects(downloadImportUrl("http://example.com/a.mp4", os.tmpdir()), /https/i);
   await assert.rejects(downloadImportUrl("https://127.0.0.1/a.mp4", os.tmpdir()), /blocked/i);
   await assert.rejects(downloadImportUrl("https://localhost/a.mp4", os.tmpdir()), /blocked/i);

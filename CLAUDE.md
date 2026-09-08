@@ -78,6 +78,10 @@ directory without touching anyone's timeline or footage. **Don't assume
 `project.json` is beside `mcp-server.js`** — call `fablecut_status`, which
 reports the real paths.
 
+Tests (and nothing else) may set **`FABLECUT_NO_FS_WATCH=1`** to skip `fs.watch`.
+On Windows, libuv can abort the process when a file is created under a temp
+data dir. Production leaves watching on so the UI live-reloads.
+
 ## Run
 
 ```

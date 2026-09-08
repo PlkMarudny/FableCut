@@ -129,6 +129,7 @@ test("POST /api/import-url downloads into media and returns a same-origin src", 
   });
   t.after(() => fixture.server.close());
   const { base } = await startServer(t, dir, {
+    // HTTP to 127.0.0.1 only — LAN / metadata stay blocked (see SECURITY.md).
     FABLECUT_TEST_IMPORT_ALLOW_PRIVATE: "1",
     // libuv fs.watch on Windows aborts the process when a file is created under
     // a Temp data dir (uv assertion in fs-event.c). This test only needs the
@@ -145,6 +146,13 @@ test("POST /api/import-url downloads into media and returns a same-origin src", 
   assert.equal(body.name, "clip.mp4");
   assert.equal(body.src, "/media/clip.mp4");
   assert.equal(fs.readFileSync(path.join(dir, "media", "clip.mp4"), "utf8"), "fake-mp4-bytes");
+
+  const lan = await fetch(base + "/api/import-url", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: "https://192.168.1.9/a.mp4" }),
+  });
+  assert.equal(lan.status, 400);
+  assert.match((await lan.json()).error, /blocked/i);
 });
 
 test("GET /api/media lists the media folder", async (t) => {

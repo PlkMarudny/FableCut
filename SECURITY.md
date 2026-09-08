@@ -49,6 +49,10 @@ HTTP server intended for a single trusted user on their own machine. Since
   same-origin as `image/svg+xml`, and a scripted SVG opened as a document
   would run on the editor origin. The stored `src` is always a local
   `/media/…` path. Local `.svg` files (drop / library) are unchanged.
+  **`FABLECUT_TEST_IMPORT_ALLOW_PRIVATE=1`** is a test-only switch: it additionally
+  allows **HTTP(S) to `127.0.0.1`** so the suite can pin a loopback fixture. It
+  does not open LAN, CGNAT, link-local, metadata, `localhost`, `::1`, or other
+  `127.0.0.0/8` addresses. Unset in production.
 
 It remains **not** hardened for untrusted networks or multi-tenant use:
 

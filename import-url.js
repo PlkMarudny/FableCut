@@ -1,7 +1,8 @@
 /* Download a remote HTTPS file into ./media with SSRF guards.
    Used by POST /api/import-url and fablecut_import_media. The stored src is
    always a local /media/… path — the URL is not kept as the playback source.
-   Remote SVG is refused (same-origin image/svg+xml would be a script sink). */
+   Remote SVG is refused (same-origin image/svg+xml would be a script sink).
+   allowLoopback is a test-only carve-out for HTTP(S) to 127.0.0.1. */
 "use strict";
 const http = require("http");
 const https = require("https");
@@ -79,10 +80,17 @@ function isBlockedHostname(host) {
   return false;
 }
 
-function parseImportUrl(raw, { allowPrivate = false } = {}) {
+/* Test hook: HTTP(S) to 127.0.0.1 only. Does not open LAN, CGNAT, metadata, or
+   other loopback addresses (127.0.0.2, ::1, localhost). */
+function isTestLoopback(host) {
+  return String(host || "").replace(/^\[|\]$/g, "").toLowerCase() === "127.0.0.1";
+}
+
+function parseImportUrl(raw, { allowLoopback = false } = {}) {
   let u;
   try { u = new URL(String(raw || "").trim()); } catch { throw new Error("invalid URL"); }
-  if (allowPrivate) {
+  const loopback = allowLoopback && isTestLoopback(u.hostname);
+  if (loopback) {
     if (u.protocol !== "https:" && u.protocol !== "http:")
       throw new Error("URL must be http(s)");
   } else if (u.protocol !== "https:") {
@@ -90,15 +98,15 @@ function parseImportUrl(raw, { allowPrivate = false } = {}) {
   }
   if (u.username || u.password) throw new Error("URL must not include credentials");
   if (!u.hostname) throw new Error("invalid URL");
-  if (!allowPrivate && isBlockedHostname(u.hostname))
+  if (!loopback && isBlockedHostname(u.hostname))
     throw new Error("blocked: local or private host");
   return u;
 }
 
-async function assertPublicTarget(u, { allowPrivate = false } = {}) {
-  if (allowPrivate) return;
-  if (isBlockedHostname(u.hostname)) throw new Error("blocked: local or private host");
+async function assertPublicTarget(u, { allowLoopback = false } = {}) {
   const host = u.hostname.replace(/^\[|\]$/g, "");
+  if (allowLoopback && isTestLoopback(host)) return;
+  if (isBlockedHostname(u.hostname)) throw new Error("blocked: local or private host");
   if (net.isIP(host)) {
     if (isBlockedIp(host)) throw new Error("blocked: local or private address");
     return;
@@ -134,7 +142,7 @@ function filenameFrom(u, headers) {
   return safeName(base);
 }
 
-function requestOnce(u, { signal, allowPrivate, timeoutMs }) {
+function requestOnce(u, { signal, timeoutMs }) {
   const lib = u.protocol === "https:" ? https : http;
   const host = u.hostname.replace(/^\[|\]$/g, "");
   const opts = {
@@ -211,21 +219,21 @@ function saveResponse(res, u, destDir, { signal, maxBytes }) {
 }
 
 async function downloadImportUrl(raw, destDir, opts = {}) {
-  const allowPrivate = !!opts.allowPrivate;
+  const allowLoopback = !!opts.allowLoopback;
   const maxBytes = opts.maxBytes || MAX_BYTES;
   const timeoutMs = opts.timeoutMs || TIMEOUT_MS;
   const signal = opts.signal;
-  let current = parseImportUrl(raw, { allowPrivate });
+  let current = parseImportUrl(raw, { allowLoopback });
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     if (signal?.aborted) throw Object.assign(new Error("aborted"), { code: "ABORT_ERR" });
-    await assertPublicTarget(current, { allowPrivate });
-    const res = await requestOnce(current, { signal, allowPrivate, timeoutMs });
+    await assertPublicTarget(current, { allowLoopback });
+    const res = await requestOnce(current, { signal, timeoutMs });
     if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
       res.resume();
       let next;
       try { next = new URL(res.headers.location, current); }
       catch { throw new Error("invalid redirect"); }
-      current = parseImportUrl(next.href, { allowPrivate });
+      current = parseImportUrl(next.href, { allowLoopback });
       continue;
     }
     if (res.statusCode !== 200) {
