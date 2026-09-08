@@ -216,6 +216,19 @@ h3 { font-family: var(--sans); font-size: 1.08rem; font-weight: 650; letter-spac
 .cell-wide { grid-column: span 2; }
 .faq-grid .cell p { max-width: 68ch; }
 .faq-grid .cell-wide p { max-width: none; }
+
+/* ── agent setup cards: one verified line per MCP client ── */
+.agent-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; align-items: start; }
+.agent-card { padding: 20px 20px 22px; border-radius: var(--r); background: var(--surface); border: 1px solid var(--line); transition: border-color 0.24s; }
+.agent-card:hover { border-color: var(--line-2); }
+.agent-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.agent-name { display: flex; align-items: center; gap: 9px; }
+.agent-ico { flex: none; color: var(--text-dim); }
+.agent-head .copy { position: static; flex: none; }
+.agent-card .cmd { margin: 0; }
+.agent-card .cmd pre { padding: 16px 18px; overflow-x: visible; }
+.agent-card .cmd code { white-space: pre-wrap; word-break: break-word; }
+@media (max-width: 860px) { .agent-grid { grid-template-columns: 1fr; } }
 .faq-grid .cell code { font-size: 0.92em; }
 .cell-tall { grid-row: span 2; }
 .cell.accent { background: radial-gradient(130% 130% at 100% 0%, rgba(79, 140, 255, 0.13), transparent 56%), var(--surface); border-color: rgba(123, 108, 255, 0.26); }
