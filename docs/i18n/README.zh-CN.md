@@ -20,7 +20,7 @@
 [![Glama score](https://glama.ai/mcp/servers/ronak-create/FableCut/badges/score.svg)](https://glama.ai/mcp/servers/ronak-create/FableCut)
 [![Glama — #18 Best Browser Automation MCP Servers](https://img.shields.io/badge/Glama-%2318%20Best%20Browser%20Automation-0e1618)](https://glama.ai/mcp/best/browser-automation)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ronak-create/FableCut)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/WBKScy52F)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/EFMQH7d6Tv)
 
 [English](../../README.md) · **简体中文** · [日本語](README.ja.md) · [Español](README.es.md) · [Português (BR)](README.pt-BR.md)
 
@@ -278,7 +278,7 @@ SVG 用普通的 CSS `@keyframes` 做动画。只有一条约定：**绝不要�
 ## 社区
 
 有问题、想法，想展示你的作品，或者想参与决定接下来做什么？欢迎加入
-**[FableCut Discord](https://discord.gg/WBKScy52F)**。Bug 和功能需求仍然建议提到
+**[FableCut Discord](https://discord.gg/EFMQH7d6Tv)**。Bug 和功能需求仍然建议提到
 [GitHub issues](https://github.com/ronak-create/FableCut/issues)。
 
 ## 许可证

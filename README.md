@@ -20,7 +20,7 @@
 [![Glama score](https://glama.ai/mcp/servers/ronak-create/FableCut/badges/score.svg)](https://glama.ai/mcp/servers/ronak-create/FableCut)
 [![Glama — #18 Best Browser Automation MCP Servers](https://img.shields.io/badge/Glama-%2318%20Best%20Browser%20Automation-0e1618)](https://glama.ai/mcp/best/browser-automation)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ronak-create/FableCut)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/WBKScy52F)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/EFMQH7d6Tv)
 
 **English** · [简体中文](docs/i18n/README.zh-CN.md) · [日本語](docs/i18n/README.ja.md) · [Español](docs/i18n/README.es.md) · [Português (BR)](docs/i18n/README.pt-BR.md)
 
@@ -369,7 +369,7 @@ examples in [`library/svg/`](library/svg/).
 ## Community
 
 Questions, ideas, showing off an edit, or want to help shape what's next? Join
-the **[FableCut Discord](https://discord.gg/WBKScy52F)**. Bugs and feature
+the **[FableCut Discord](https://discord.gg/EFMQH7d6Tv)**. Bugs and feature
 requests are still best filed as [GitHub issues](https://github.com/ronak-create/FableCut/issues).
 
 ## License

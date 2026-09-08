@@ -20,7 +20,7 @@
 [![Glama score](https://glama.ai/mcp/servers/ronak-create/FableCut/badges/score.svg)](https://glama.ai/mcp/servers/ronak-create/FableCut)
 [![Glama — #18 Best Browser Automation MCP Servers](https://img.shields.io/badge/Glama-%2318%20Best%20Browser%20Automation-0e1618)](https://glama.ai/mcp/best/browser-automation)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ronak-create/FableCut)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/WBKScy52F)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/EFMQH7d6Tv)
 
 [English](../../README.md) · [简体中文](README.zh-CN.md) · **日本語** · [Español](README.es.md) · [Português (BR)](README.pt-BR.md)
 
@@ -319,7 +319,7 @@ SVG のアニメーションは素の CSS `@keyframes` です。約束事は 1 �
 ## コミュニティ
 
 質問、アイデア、作った編集の共有、あるいは次の機能を一緒に考えたい方は
-**[FableCut Discord](https://discord.gg/WBKScy52F)** へどうぞ。バグ報告と機能要望は
+**[FableCut Discord](https://discord.gg/EFMQH7d6Tv)** へどうぞ。バグ報告と機能要望は
 [GitHub issues](https://github.com/ronak-create/FableCut/issues) が最適です。
 
 ## ライセンス

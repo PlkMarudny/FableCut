@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   private / link-local / CGNAT, including after DNS and redirects). Remote SVG
   is refused so a scripted file cannot run on the editor origin. A raw HTTPS
   `media.src` is still unsupported — canvas CORS would break export.
+- **WebCodecs export** — a second export engine beside Fast. The browser
+  HW-encodes H.264 with `VideoEncoder` and streams the Annex-B elementary
+  stream to the server, which stream-copies it into MP4 (`-c:v copy`) and muxes
+  the offline audio mix in one pass. Bitrate and rate control (VBR / CBR) are
+  chosen in the Export dialog; support is probed before every run and the
+  engine is hidden when unavailable or when an export frame is set (use Fast).
+  `-r` on the input forces CFR PTS so the file matches `project.fps` exactly,
+  and BT.709 tags are written into both the bitstream and the container.
+  Abandoned sessions are reclaimed by an idle sweeper, and SIGINT / SIGTERM
+  clean up in-flight ffmpeg processes and temp dirs.
 - A real test suite (`npm test`, zero dependencies, `node:test`): MCP protocol
   negotiation and framing, MCP tool semantics including the conflict rules, the
   REST API with its Host/Origin and path-traversal guards, and the shipped SVG
@@ -23,15 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Remove track**, header **S** solo; up to 16 per kind). The live lane list is
   stored on `project.json` as `tracks`.
 - Per-clip **stereo pan** (`props.pan`, −1…+1) on video/audio clips — inspector
-  slider + keyframes; preview, audio-hold, and Fast export all honor it. Linked
-  stems default to L `−1` / R `+1` / center for other channels. Compact MCP
-  keeps `pan` on linked stems.
+  slider + keyframes; preview, audio-hold, and both export engines honor it.
+  Linked stems default to L `−1` / R `+1` / center for other channels. Compact
+  MCP keeps `pan` on linked stems.
 - Stereo **master meter** (L/R) on the monitor — post-pan program sum in the
   same RMS / LUFS / Peak modes as the per-track bars; A-tracks + video spill
   route through one summed path when the meter worklet is active. Per-track
   bars collapse via **◂** / **▸** beside the master strip (master L/R stay visible).
 
 ### Changed
+- `POST /api/export/begin` now **requires** `fps` (pass `project.fps`) instead
+  of defaulting to 30, and takes `mode: "jpeg" | "annexb"`. Callers that relied
+  on the old default must send the value; a missing or non-numeric `fps` is a
+  400, not a silently wrong frame rate.
 - `project.json` gains two forward-compatible keys (`tracks`, `panSchema`).
   Older builds ignore them. **Opening** a project saved before pan writes the
   file back once: it stamps `panSchema: 1`, hard-pans linked stems that had no
