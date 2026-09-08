@@ -25,3 +25,5 @@ Thumbs.db
 project-kesarix-backup-rev197.json
 
 projects_desktops/
+pnpm-lock.yaml
+.cursor/mcp.json
