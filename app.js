@@ -5954,6 +5954,7 @@ function waitEncodeQueue(encoder, max = 2, { signal, getError } = {}) {
 }
 async function webCodecsExport() {
   if (state.exporting) return;
+  await detectWebCodecs();
   if (!state.webCodecs) { startExport(); return; }
   pause();
   state.exporting = true; state.rendering = true; renderCancelled = false;
@@ -6217,7 +6218,12 @@ $("btnCancelSetup").addEventListener("click", () => els.exportSetup.classList.ad
 els.engineFast?.addEventListener("change", syncExportWcOpts);
 els.engineRealtime?.addEventListener("change", syncExportWcOpts);
 $("exportWcBitrate")?.addEventListener("change", persistExportWcOpts);
-$("exportWcMode")?.addEventListener("change", persistExportWcOpts);
+$("exportWcMode")?.addEventListener("change", async () => {
+  persistExportWcOpts();
+  await detectWebCodecs();
+  syncExportWcOpts();
+  if (!els.exportSetup.classList.contains("hidden")) openExportSetup();
+});
 $("btnCancelExport").addEventListener("click", () => {
   if (state.rendering) {
     renderCancelled = true;
