@@ -41,11 +41,24 @@ HTTP server intended for a single trusted user on their own machine. Since
   DNS-rebinding) and an **Origin allowlist** (anti cross-origin writes from
   malicious web pages).
 - The static server refuses dot-files/dot-directories (`.git/` etc.).
+- `POST /api/import-url` (and `fablecut_import_media` with an `https://` path)
+  fetches a remote file into `./media/`. The fetch is **HTTPS-only** and
+  refuses localhost, private, link-local and CGNAT destinations (including
+  after DNS lookup and on redirects), so a crafted URL cannot turn the editor
+  into an SSRF proxy. Remote SVG is refused: `/media/*.svg` is served
+  same-origin as `image/svg+xml`, and a scripted SVG opened as a document
+  would run on the editor origin. The stored `src` is always a local
+  `/media/…` path. Local `.svg` files (drop / library) are unchanged.
+  **`FABLECUT_TEST_IMPORT_ALLOW_PRIVATE=1`** is a test-only switch: it additionally
+  allows **HTTP(S) to `127.0.0.1`** so the suite can pin a loopback fixture. It
+  does not open LAN, CGNAT, link-local, metadata, `localhost`, `::1`, or other
+  `127.0.0.0/8` addresses. Unset in production.
 
 It remains **not** hardened for untrusted networks or multi-tenant use:
 
 - The REST API (`/api/*`) has no authentication — anyone who can reach the port
-  can read and overwrite `project.json` and upload files into `media/`.
+  can read and overwrite `project.json`, upload files, and ask the server to
+  fetch an HTTPS URL into `media/`.
 - The server reads and writes files under the project directory and spawns
   `ffmpeg` for export/remux. Fast-export profiles in `encoding-profiles.json`
   (hot-reloaded) are raw ffmpeg argument lists: the browser sends only a
