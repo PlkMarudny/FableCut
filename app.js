@@ -5366,7 +5366,7 @@ function loop(ts) {
      (frame-accurate, works unfocused) and streams JPEGs + an offline audio
      mix to the server, where ffmpeg encodes via an encoding profile.
    – webcodecs: VideoEncoder Annex-B H.264 → server stream-copy mux
-   – realtime: MediaRecorder, kept as the fallback when WebCodecs or the
+   – realtime: MediaRecorder HW-encode H.264 → server stream-copy mux
      server/ffmpeg is unavailable. */
 
 /* Placeholder until /api/export/profiles answers — the real list (and the real
