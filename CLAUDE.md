@@ -440,8 +440,9 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
   (`fps` is required — pass `project.fps`, no server-side default;
   `mode` is `"jpeg"` (default, Fast) or `"annexb"` (WebCodecs H.264 elementary stream);
   jpeg **400** if `profile` is not a defined id, or if ffmpeg rejects its args in the dry run)
-  · `POST /api/export/frame?id=` (JPEG body for jpeg mode, Annex-B NAL bytes for
-  annexb — must be after audio; ffmpeg is spawned on the first frame in both modes)
+  · `POST /api/export/frame?id=` (JPEG body for jpeg mode; Annex-B bytes for
+  annexb — one POST may carry several concatenated AUs. Must be after audio;
+  ffmpeg is spawned on the first frame in both modes)
   · `POST /api/export/audio?id=` (WAV body — must be sent before the first frame)
   · `POST /api/export/end?id=[&discard=1]` → `{src}` under `/exports/`
 

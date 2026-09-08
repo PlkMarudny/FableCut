@@ -186,7 +186,8 @@ async function faststart(file) {
 /* ── Export sessions ──
    Two modes share the same HTTP session API:
      jpeg   — browser streams JPEGs; ffmpeg encodes via an encoding profile (Fast)
-     annexb — browser streams Annex-B H.264 NALs; ffmpeg stream-copies (WebCodecs)
+     annexb — browser streams Annex-B H.264 (one POST may concatenate several AUs);
+              ffmpeg stream-copies (WebCodecs)
    Both spawn on the FIRST frame, not here: the audio mix is uploaded between
    /begin and the first frame, and a one-pass encode needs it on disk. */
 const exportSessions = new Map();
