@@ -18,7 +18,6 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const os = require("os");
 const { spawn, spawnSync, execFile } = require("child_process");
 
 const { analyze } = require("./analyze");
@@ -178,32 +177,77 @@ function run(cmd, args) {
    without it <video> stalls for seconds probing over Range requests. */
 function faststart(file) { return maybeFaststart(file); }
 
-/* ── Fast export sessions ──
-   The browser renders frames with its own compositor and streams them here as
-   JPEGs; a single ffmpeg pass encodes them plus the WAV mix into the final file.
-   ffmpeg is spawned on the FIRST frame, not here: the audio mix is uploaded
-   between /begin and the first frame, and a one-pass encode needs it on disk. */
+/* ── Export sessions ──
+   Two modes share the same HTTP session API:
+     jpeg   — browser streams JPEGs; ffmpeg encodes via an encoding profile (Fast)
+     annexb — browser streams Annex-B H.264 (one POST may concatenate several AUs);
+              ffmpeg stream-copies (WebCodecs)
+   Both spawn on the FIRST frame, not here: the audio mix is uploaded between
+   /begin and the first frame, and a one-pass encode needs it on disk. */
 const exportSessions = new Map();
-async function beginExport(fps, name, profileId, hasAudio) {
-  const profile = resolveProfile(profileId);
-  const dry = await dryRunProfile(profile, { fps, hasAudio });
-  if (!dry.ok) throw new Error(`profile "${profile.id}" was rejected by ffmpeg: ${dry.error}`);
+/* Container + bitstream BT.709/tv for the WebCodecs (annexb) path.
+   `-c copy` alone drops the colr atom; the bsf writes VUI so players see
+   primaries/transfer, not "unknown". JPEG Fast export uses profile.color instead. */
+const COLOR_TAGS = [
+  "-colorspace", "bt709", "-color_primaries", "bt709",
+  "-color_trc", "bt709", "-color_range", "tv",
+];
+const COLOR_BSF = "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0";
+const EXPORT_IDLE_MS = 10 * 60 * 1000; // abandon sessions with no successful activity
+const EXPORT_SWEEP_MS = 60 * 1000;
+let exportSweepTimer = null;
+function touchExport(sess) {
+  if (sess) sess.lastTouch = Date.now();
+}
+function attachProc(sess, proc) {
+  sess.proc = proc;
+  sess.stderr = "";
+  proc.stderr.on("data", (d) => { sess.stderr = (sess.stderr + d).slice(-2000); });
+  proc.stdin.on("error", () => {}); // EPIPE if ffmpeg dies mid-stream
+  sess.done = new Promise((res) => proc.on("close", res));
+}
+async function beginExport(fps, name, profileId, hasAudio, mode) {
+  const m = mode === "annexb" ? "annexb" : "jpeg";
+  const rate = Number(fps);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new Error("export fps required (pass project.fps)");
+  }
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const safe = safeName(name || "export");
+  // Same filesystem as the finished file so renameSync(partPath, out) cannot EXDEV.
+  const dir = fs.mkdtempSync(path.join(EXPORTS_DIR, "fablecut-"));
+
+  if (m === "annexb") {
+    const { outPath, partPath } = reserveExportPaths(EXPORTS_DIR, safe, ".mp4");
+    const sess = {
+      mode: m, fps: rate, proc: null, dir,
+      name: safe, hasAudio: !!hasAudio,
+      wav: null, partPath, outPath,
+      stderr: "", done: null, lastTouch: Date.now(),
+      err: () => sess.stderr.trim().split("\n").filter(Boolean).slice(-3)
+        .map((l) => l.trim()).join(" · "),
+    };
+    sess.writeLock = Promise.resolve();
+    exportSessions.set(id, sess);
+    return { id, mode: m };
+  }
+
+  const profile = resolveProfile(profileId);
+  const dry = await dryRunProfile(profile, { fps: rate, hasAudio });
+  if (!dry.ok) throw new Error(`profile "${profile.id}" was rejected by ffmpeg: ${dry.error}`);
   // Reserve the output name now (not at first frame) so concurrent exports
   // cannot both see the same free path. The empty .part file is overwritten by ffmpeg (-y).
   const { outPath, partPath } = reserveExportPaths(EXPORTS_DIR, safe, profile.extension);
   const sess = {
-    proc: null, fps, profile, name: safe, hasAudio: !!hasAudio,
-    dir: fs.mkdtempSync(path.join(os.tmpdir(), "fablecut-")),
-    wav: null, partPath, outPath,
-    stderr: "", done: null,
-    // ffmpeg's complaint is in the last lines; the rest is progress noise
+    mode: m, proc: null, fps: rate, profile, name: safe, hasAudio: !!hasAudio,
+    dir, wav: null, partPath, outPath,
+    stderr: "", done: null, lastTouch: Date.now(),
     err: () => sess.stderr.trim().split("\n").filter(Boolean).slice(-3)
       .map((l) => l.trim()).join(" · "),
   };
+  sess.writeLock = Promise.resolve();
   exportSessions.set(id, sess);
-  return { id, profile: profile.id, label: profile.label, summary: profileSummary(profile) };
+  return { id, mode: m, profile: profile.id, label: profile.label, summary: profileSummary(profile) };
 }
 /* Encode into the paths reserved at /begin; rename .part → final on clean exit
    so an aborted render never leaves something that looks like a finished file. */
@@ -219,9 +263,9 @@ function startEncoder(sess) {
   sess.done = new Promise((res) => proc.on("close", res));
   return proc;
 }
-/** Write one JPEG frame to ffmpeg stdin. If the pipe is full, wait for drain —
- *  but also reject if ffmpeg exits or the stdin errors, so the HTTP request
- *  cannot hang forever after a failed encode. */
+/** Write one frame (JPEG or Annex-B NAL) to ffmpeg stdin. If the pipe is full,
+ *  wait for drain — but also reject if ffmpeg exits or the stdin errors, so the
+ *  HTTP request cannot hang forever after a failed encode. */
 function writeExportFrame(sess, body) {
   const proc = sess.proc;
   return new Promise((resolve, reject) => {
@@ -252,6 +296,25 @@ function writeExportFrame(sess, body) {
     else proc.stdin.once("drain", onDrain);
   });
 }
+/* One-pass mux for WebCodecs: H.264 elementary stream on stdin + optional WAV.
+   Use input `-r` (not only `-framerate`): HW encoders stamp AUs with µs-rounded
+   durations (e.g. 33333µs ≈ 1/30), which otherwise become avg_frame_rate
+   1000000/33333. `-r` forces CFR PTS so the MP4 matches project.fps exactly. */
+function startAnnexbEncoder(sess) {
+  const fps = sess.fps;
+  const args = [
+    "-y", "-hide_banner",
+    "-fflags", "+genpts",
+    "-f", "h264", "-r", String(fps), "-i", "pipe:0",
+  ];
+  if (sess.wav) args.push("-i", sess.wav);
+  args.push("-map", "0:v:0", "-c:v", "copy", "-bsf:v", COLOR_BSF, ...COLOR_TAGS);
+  // do not use -shortest: with unset/generated PTS it drops the audio track
+  if (sess.wav) args.push("-map", "1:a:0", "-c:a", "aac", "-b:a", "192k");
+  args.push("-movflags", "+faststart+write_colr", sess.partPath);
+  attachProc(sess, spawn("ffmpeg", args, { stdio: ["pipe", "ignore", "pipe"] }));
+  return sess.proc;
+}
 function cleanupExport(id) {
   const s = exportSessions.get(id);
   if (!s) return;
@@ -259,6 +322,21 @@ function cleanupExport(id) {
   try { s.proc?.kill(); } catch {}
   try { fs.rmSync(s.dir, { recursive: true, force: true }); } catch {}
   if (s.partPath) try { fs.rmSync(s.partPath, { force: true }); } catch {}
+}
+function sweepIdleExports() {
+  const now = Date.now();
+  for (const [id, s] of [...exportSessions]) {
+    if (now - (s.lastTouch || 0) > EXPORT_IDLE_MS) cleanupExport(id);
+  }
+}
+function startExportSweep() {
+  if (exportSweepTimer) return;
+  exportSweepTimer = setInterval(sweepIdleExports, EXPORT_SWEEP_MS);
+}
+function stopExportSweep() {
+  if (!exportSweepTimer) return;
+  clearInterval(exportSweepTimer);
+  exportSweepTimer = null;
 }
 
 /* Static file with HTTP Range support (required for <video> seeking) */
@@ -428,12 +506,13 @@ const server = http.createServer(async (req, res) => {
   if (p === "/api/export/begin" && req.method === "POST") {
     try {
       const opts = JSON.parse((await readBody(req)).toString("utf8") || "{}");
-      if (opts.profile) resolveProfile(opts.profile); // 400, not 500, on a bad id — even without ffmpeg
+      const mode = opts.mode === "annexb" ? "annexb" : "jpeg";
+      if (mode !== "annexb" && opts.profile) resolveProfile(opts.profile); // 400, not 500, on a bad id — even without ffmpeg
       if (!HAS_FFMPEG) { sendJSON(res, 400, { error: "ffmpeg not found on PATH" }); return; }
-      sendJSON(res, 200, await beginExport(opts.fps || 30, opts.name, opts.profile, opts.hasAudio !== false));
+      sendJSON(res, 200, await beginExport(opts.fps, opts.name, opts.profile, opts.hasAudio !== false, mode));
     } catch (e) {
       // an unusable profile is the caller's problem, not a server fault
-      const bad = /^Unknown encoding profile|was rejected by ffmpeg/.test(e.message || "");
+      const bad = /^Unknown encoding profile|was rejected by ffmpeg|export fps required/.test(e.message || "");
       sendJSON(res, bad ? 400 : 500, { error: String(e.message || e) });
     }
     return;
@@ -444,12 +523,20 @@ const server = http.createServer(async (req, res) => {
     if (!sess) { sendJSON(res, 404, { error: "no such export session" }); return; }
     try {
       const body = await readBody(req);
+      if (!body || !body.length) throw new Error("empty frame");
       if (sess.hasAudio && !sess.wav) {
         sendJSON(res, 409, { error: "audio mix has not been uploaded yet" });
         return;
       }
-      if (!sess.proc) startEncoder(sess);
-      await writeExportFrame(sess, body);
+      // queue behind any in-flight write so concurrent POSTs cannot interleave stdin
+      const run = async () => {
+        if (!sess.proc) sess.mode === "annexb" ? startAnnexbEncoder(sess) : startEncoder(sess);
+        await writeExportFrame(sess, body);
+      };
+      const writeJob = sess.writeLock.then(run, run);
+      sess.writeLock = writeJob.catch(() => {}); // keep the chain alive after a failed write
+      await writeJob;
+      touchExport(sess);
       sendJSON(res, 200, { ok: true });
     } catch (e) {
       cleanupExport(id);
@@ -464,6 +551,7 @@ const server = http.createServer(async (req, res) => {
       const wavPath = path.join(sess.dir, "audio.wav");
       fs.writeFileSync(wavPath, await readBody(req));
       sess.wav = wavPath;
+      touchExport(sess);
       sendJSON(res, 200, { ok: true });
     } catch (e) { sendJSON(res, 500, { error: String(e) }); }
     return;
@@ -474,6 +562,7 @@ const server = http.createServer(async (req, res) => {
     if (!sess) { sendJSON(res, 404, { error: "no such export session" }); return; }
     try {
       if (url.searchParams.get("discard")) { cleanupExport(id); sendJSON(res, 200, { ok: true }); return; }
+      touchExport(sess); // keep alive through final mux
       if (!sess.proc) throw new Error("no frames were uploaded");
       sess.proc.stdin.end();
       const code = await sess.done;
@@ -572,4 +661,17 @@ server.listen(PORT, HOST, () => {
   console.log(`  encode prof. : ${PROFILES_FILE} (${Object.keys(enc.profiles).join(", ")} · default ${enc.default})`);
   for (const issue of enc.issues || []) console.log(`     ⚠ ${issue}`);
   console.log("");
+  startExportSweep();
 });
+
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopExportSweep();
+  for (const id of [...exportSessions.keys()]) cleanupExport(id);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref?.();
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

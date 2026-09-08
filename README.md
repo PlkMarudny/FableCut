@@ -91,7 +91,7 @@ same time.
 - **Export frame / reframing** — composition canvas can be larger than the delivery
   crop (`exportFrame` in `project.json`). Preview dims the overscan; drag the
   **Export frame** handle to reframe (e.g. 16:9 canvas → 9:16 export). Fast export
-  crops to the frame; Realtime export is disabled while a frame is set
+  crops to the frame; WebCodecs and Realtime export are disabled while a frame is set
 - **Program Monitor zoom** — mouse-wheel over the preview zooms the composition
   toward the cursor (fit → up to **2 screen pixels per canvas pixel**). Magnified
   view uses **native scrollbars** so overflow stays reachable; middle-click or
@@ -195,7 +195,10 @@ same time.
   encodes them via an **encoding profile** from `encoding-profiles.json`
   (keeps rendering if you switch tabs). The Export dialog has a profile
   selector; pin a project default with `encodeProfile` in `project.json`
-- Realtime MediaRecorder fallback when ffmpeg isn't available
+- WebCodecs export: the browser HW-encodes Annex-B H.264; the server
+  stream-copies and muxes audio. Faster uploads; bitrate/VBR-CBR in the
+  Export dialog. Unavailable while an export frame is set (use Fast)
+- Realtime MediaRecorder fallback when ffmpeg or WebCodecs isn't available
 
 ## Quick start
 
