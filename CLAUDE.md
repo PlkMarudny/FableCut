@@ -433,13 +433,15 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 - `GET  /api/events`  — SSE: named event `change` when project.json, ./media or
   ./library changes; named event `profiles` when `encoding-profiles.json` changes
   (UI refreshes the export-profile list only — no project reload)
-- Fast export (used by the UI; browser renders frames, ffmpeg encodes):
+- Fast / WebCodecs export (browser compositor → server ffmpeg):
   `GET /api/export/ffmpeg` → `{available}` · `GET /api/export/profiles[?detail=1]` →
-  `{default, profiles, issues}` · `POST /api/export/begin` `{fps,name,profile?,hasAudio?}` →
-  `{id,profile,label,summary}` (**400** if `profile` is not a defined id, or if ffmpeg
-  rejects its args in the dry run)
-  · `POST /api/export/frame?id=` (JPEG body, in order) · `POST /api/export/audio?id=` (WAV
-  body — must be sent before the first frame; ffmpeg is spawned on frame 1)
+  `{default, profiles, issues}` · `POST /api/export/begin`
+  `{fps,name,mode?,profile?,hasAudio?}` → `{id,mode,profile?,label,summary}`
+  (`mode` is `"jpeg"` (default, Fast) or `"annexb"` (WebCodecs H.264 elementary stream);
+  jpeg **400** if `profile` is not a defined id, or if ffmpeg rejects its args in the dry run)
+  · `POST /api/export/frame?id=` (JPEG body for jpeg mode, Annex-B NAL bytes for
+  annexb — must be after audio; ffmpeg is spawned on the first frame in both modes)
+  · `POST /api/export/audio?id=` (WAV body — must be sent before the first frame)
   · `POST /api/export/end?id=[&discard=1]` → `{src}` under `/exports/`
 
 ## Recipes
@@ -556,19 +558,34 @@ Omit `exportFrame` to export the full canvas.
 guides (▦) to keep captions out of platform UI zones.
 
 **Project frame rate**: set `fps` in `project.json` (or the Program Monitor FPS
-dropdown — 24 / 25 / 30 / 50 / 60). Preview stepping, timecode frames, Fast/
-Realtime export, and `/api/export/begin` all use this value; pass the same
+dropdown — 24 / 25 / 30 / 50 / 60). Preview stepping, timecode frames, Fast /
+WebCodecs / Realtime export, and `/api/export/begin` all use this value; pass the same
 `fps` when starting an export via the API.
 
 ## Export
 
-Export is user-driven (Export button → dialog). Two engines: **Fast** (browser
-renders each frame with the normal compositor — including SVG frames, keys and
-AI masks — streams JPEG frames + an offline WAV mix to the server, a single ffmpeg
-pass encodes them via an **encoding profile** into `./exports/`) and **Realtime**
-(MediaRecorder fallback). Claude cannot trigger export headlessly — the
-compositor lives in the browser; ask the user to click Export, or render with
-ffmpeg directly from `media/` sources if a file is needed.
+Export is user-driven (Export button → dialog). Three engines:
+
+1. **Fast** — browser renders each frame with the normal compositor (SVG, keys,
+   AI masks), streams JPEGs + an offline WAV mix to the server; a single ffmpeg
+   pass encodes them via an **encoding profile** into `./exports/`. Quality /
+   software path; keeps rendering if you switch tabs.
+2. **WebCodecs** — same frame-accurate compositor loop, but the browser’s
+   `VideoEncoder` produces Annex-B H.264 (Main 4:2:0) and the server stream-copies
+   (`-c:v copy`) while muxing the WAV. Faster uploads, less server CPU. Requires
+   Chromium-class `VideoEncoder` with `avc: { format: "annexb" }` plus ffmpeg.
+   Encoding profiles do not apply (the bitstream is already encoded). No ffmpeg-style
+   CRF — quality is bitrate + VBR/CBR (export dialog; remembered in localStorage).
+   Optional `bitrateMode: "quantizer"` (fixed QP) exists in the spec but is rarely
+   supported by hardware encoders with Annex-B. Unavailable while an `exportFrame`
+   crop is set — use Fast for cropped delivery.
+3. **Realtime (MediaRecorder)** — automatic offline fallback when the server,
+   ffmpeg, or WebCodecs is unavailable. Plays the timeline once and records it;
+   keep the tab focused.
+
+Claude cannot trigger export headlessly — the compositor lives in the browser;
+ask the user to click Export, or render with ffmpeg directly from `media/`
+sources if a file is needed.
 
 ### Encoding profiles (`encoding-profiles.json`)
 
@@ -576,7 +593,7 @@ User-editable at the repo root. A profile is a **raw ffmpeg argument list** plus
 things that are not ffmpeg arguments: `jpegQuality` (browser frame quality),
 `extension` (output container), and optional `color` (output matrix / range tags).
 Edit the file while the server runs — the UI hot-reloads the profile list via an SSE
-`profiles` event (no full project reload).
+`profiles` event (no full project reload). Fast export only; WebCodecs ignores them.
 
 ```jsonc
 {
