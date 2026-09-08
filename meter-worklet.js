@@ -1,7 +1,8 @@
 /* FableCut per-track meter worklet + stereo program sum pass-through.
    Inputs 0…nAudio−1 = A-track buses; input nAudio = video/other spill on master.
    Pass-through sum → stereo out. Per-track RMS/LUFS/Peak via port; master L/R
-   is metered on the main thread (AnalyserNodes on the worklet output). */
+   RMS/Peak is metered on the main thread (AnalyserNodes on the worklet output),
+   while master LUFS is computed here on the true summed program output. */
 function shelfCoeffs(fs) {
   const f0 = 1681.974450955533;
   const G = 3.999843853973347;
@@ -49,7 +50,8 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
     this._nTracks = Math.max(1, opts.nTracks || 1);
     this._nAudio = Math.max(0, opts.nAudioTracks ?? opts.nTracks ?? 1);
     this._block = 0;
-    this._sumSq = new Float64Array(this._nTracks);
+    this._sumSqL = new Float64Array(this._nTracks);
+    this._sumSqR = new Float64Array(this._nTracks);
     this._peak = new Float64Array(this._nTracks);
     this._sumSqK = new Float64Array(this._nTracks);
     this._frames = 0;
@@ -67,8 +69,15 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
       this._hpfR.push(makeBiquad(hpf));
     }
 
-    // Momentary = 400 ms of block mean-squares (BS.1770) — per A-track only;
-    // master L/R is sampled via AnalyserNodes on the post-meter output in app.js.
+    // Filters for the summed program output so the master LUFS is the true
+    // post-mix reading, not an approximation from per-track values.
+    this._shelfOutL = makeBiquad(shelf);
+    this._hpfOutL = makeBiquad(hpf);
+    this._shelfOutR = makeBiquad(shelf);
+    this._hpfOutR = makeBiquad(hpf);
+    this._sumSqKOut = 0;
+
+    // Momentary = 400 ms of block mean-squares (BS.1770) — per A-track + program.
     const hopFrames = 128 * this._hopBlocks;
     this._lufsLen = Math.max(1, Math.round(0.4 * sampleRate / hopFrames));
     this._lufsRing = [];
@@ -79,6 +88,9 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
       this._lufsIdx.push(0);
       this._lufsFilled.push(0);
     }
+    this._lufsRingOut = new Float64Array(this._lufsLen);
+    this._lufsIdxOut = 0;
+    this._lufsFilledOut = 0;
   }
 
   process(inputs, outputs) {
@@ -99,7 +111,8 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
       const n = L ? L.length : (outL ? outL.length : 128);
       frames = n;
 
-      let sum = this._sumSq[t];
+      let sumL = this._sumSqL[t];
+      let sumR = this._sumSqR[t];
       let peak = this._peak[t];
       let sumK = this._sumSqK[t];
       const sL = this._shelfL[t], hL = this._hpfL[t];
@@ -108,8 +121,8 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
       for (let i = 0; i < n; i++) {
         const l = L ? L[i] : 0;
         const r = R ? R[i] : 0;
-        const mono = R ? (l + r) * 0.5 : l;
-        sum += mono * mono;
+        sumL += l * l;
+        sumR += r * r;
         const aL = l >= 0 ? l : -l;
         const aR = r >= 0 ? r : -r;
         if (aL > peak) peak = aL;
@@ -122,9 +135,23 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
         if (outL) outL[i] += l;
         if (outR) outR[i] += r;
       }
-      this._sumSq[t] = sum;
+      this._sumSqL[t] = sumL;
+      this._sumSqR[t] = sumR;
       this._peak[t] = peak;
       this._sumSqK[t] = sumK;
+    }
+
+    // Filter the summed program output for a true master LUFS reading.
+    if (outL && outR && frames > 0) {
+      const sL = this._shelfOutL, hL = this._hpfOutL;
+      const sR = this._shelfOutR, hR = this._hpfOutR;
+      let sumK = this._sumSqKOut;
+      for (let i = 0; i < frames; i++) {
+        const fl = biquadStep(hL, biquadStep(sL, outL[i]));
+        const fr = biquadStep(hR, biquadStep(sR, outR[i]));
+        sumK += fl * fl + fr * fr;
+      }
+      this._sumSqKOut = sumK;
     }
 
     if (frames) this._frames += frames;
@@ -136,7 +163,11 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
       const peak = new Array(this._nAudio);
       const lufs = new Array(this._nAudio);
       for (let t = 0; t < this._nAudio; t++) {
-        rms[t] = Math.sqrt(this._sumSq[t] / n);
+        // Track bar follows the louder channel so a mono stem panned hard L/R
+        // (or any stereo track) stays in sync with the per-channel master meters.
+        const rmsL = Math.sqrt(this._sumSqL[t] / n);
+        const rmsR = Math.sqrt(this._sumSqR[t] / n);
+        rms[t] = Math.max(rmsL, rmsR);
         peak[t] = this._peak[t];
 
         // Channel-weighted mean square for this hop (L+R, G=1 each)
@@ -152,9 +183,26 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
         const meanMs = acc / Math.max(1, filled);
         lufs[t] = meanMs > 1e-12 ? -0.691 + 10 * Math.log10(meanMs) : -70;
 
-        this._sumSq[t] = 0;
+        this._sumSqL[t] = 0;
+        this._sumSqR[t] = 0;
         this._peak[t] = 0;
         this._sumSqK[t] = 0;
+      }
+
+      // Program LUFS from the actual summed output (includes video spill).
+      let masterLufs = -70;
+      if (outL && outR) {
+        const blockMs = this._sumSqKOut / n;
+        const ring = this._lufsRingOut;
+        const idx = this._lufsIdxOut;
+        ring[idx] = blockMs;
+        this._lufsIdxOut = (idx + 1) % this._lufsLen;
+        if (this._lufsFilledOut < this._lufsLen) this._lufsFilledOut++;
+        let acc = 0;
+        for (let i = 0; i < this._lufsFilledOut; i++) acc += ring[i];
+        const meanMs = acc / Math.max(1, this._lufsFilledOut);
+        masterLufs = meanMs > 1e-12 ? -0.691 + 10 * Math.log10(meanMs) : -70;
+        this._sumSqKOut = 0;
       }
 
       this.port.postMessage({
@@ -162,6 +210,7 @@ class FableCutMeterProcessor extends AudioWorkletProcessor {
         rms,
         peak,
         lufs,
+        masterLufs,
         frames: n,
       });
       this._block = 0;

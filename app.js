@@ -4095,6 +4095,7 @@ function resetMasterMeterBallistics() {
   meterState.master.dispL = meterState.master.dispR = METER_DB_MIN;
   meterState.master.peakHoldL = meterState.master.peakHoldR = METER_DB_MIN;
   meterState.master.peakHoldTL = meterState.master.peakHoldTR = 0;
+  meterState.master.lufs = -70;
   meterState.lastLit[MASTER_METER_L] = meterState.lastLit[MASTER_METER_R] = -1;
   meterState.lastHold[MASTER_METER_L] = meterState.lastHold[MASTER_METER_R] = -1;
 }
@@ -4241,7 +4242,7 @@ async function installMeterWorklet(audio) {
   const nInputs = Math.max(1, nAudio + 1); // +1 = video/other spill on master
   let meter = null;
   try {
-    await audio.ctx.audioWorklet.addModule("meter-worklet.js?v=7");
+    await audio.ctx.audioWorklet.addModule("meter-worklet.js?v=8");
     // Aborted by syncAudioGraphTracks while we were loading — retry fresh.
     if (meterState._reloadMeter) return;
     meter = new AudioWorkletNode(audio.ctx, "fablecut-meter", {
@@ -4263,6 +4264,7 @@ async function installMeterWorklet(audio) {
         meterState.peak[id] = msg.peak[i] || 0;
         meterState.lufs[id] = msg.lufs[i] != null ? msg.lufs[i] : -70;
       }
+      if (msg.masterLufs != null) meterState.master.lufs = msg.masterLufs;
     };
 
     // Connect outputs first so a wiring error never leaves the graph silent.
@@ -4437,8 +4439,9 @@ function meterReadingDb(id) {
     const isL = id === MASTER_METER_L;
     if (mode === "peak") return rmsToDb(isL ? m.peakL : m.peakR);
     if (mode === "lufs") {
-      // Per-channel level for stereo master bars (worklet stereo LUFS is one combined value).
-      return rmsToDb(isL ? m.rmsL : m.rmsR);
+      // Master LUFS is a single program value; both L/R bars display it.
+      const v = m.lufs;
+      return v == null || v < METER_DB_MIN ? METER_DB_MIN : Math.min(METER_DB_MAX, v);
     }
     return rmsToDb(isL ? m.rmsL : m.rmsR);
   }
