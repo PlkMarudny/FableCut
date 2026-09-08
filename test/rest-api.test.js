@@ -82,6 +82,8 @@ test("GET /api/library lists assets and validates the dir argument", async (t) =
   // A served src must actually resolve — a listing that links to 404s is useless.
   const one = await fetch(base + items[0].src);
   assert.equal(one.status, 200);
+  assert.match(one.headers.get("content-security-policy") || "", /sandbox/);
+  await one.arrayBuffer();
 
   for (const bad of ["", "bogus", "../..", "sfx/../../.."]) {
     const r = await fetch(base + "/api/library?dir=" + encodeURIComponent(bad));

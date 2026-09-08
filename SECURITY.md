@@ -45,7 +45,10 @@ HTTP server intended for a single trusted user on their own machine. Since
   fetches a remote file into `./media/`. The fetch is **HTTPS-only** and
   refuses localhost, private, link-local and CGNAT destinations (including
   after DNS lookup and on redirects), so a crafted URL cannot turn the editor
-  into an SSRF proxy. The stored `src` is always a local `/media/…` path.
+  into an SSRF proxy. Remote SVG is refused: `/media/*.svg` is served
+  same-origin as `image/svg+xml`, and a scripted SVG opened as a document
+  would run on the editor origin. The stored `src` is always a local
+  `/media/…` path. Local `.svg` files (drop / library) are unchanged.
 
 It remains **not** hardened for untrusted networks or multi-tenant use:
 
