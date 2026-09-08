@@ -7,15 +7,144 @@
 <meta name="description" content="A Premiere-style video editor that runs in your browser and exposes its whole timeline as one JSON file. Edit it yourself, or let an AI agent cut your video while you watch.">
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
 <meta name="theme-color" content="#0a0a0f">
+<link rel="canonical" href="https://ronak-create.github.io/FableCut/">
 
-<!-- Open Graph / social -->
+<!-- Open Graph / social. Absolute URLs: most crawlers will not resolve a
+     relative og:image, and a bare text card is what gets shared instead. -->
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="FableCut">
+<meta property="og:locale" content="en_US">
+<meta property="og:url" content="https://ronak-create.github.io/FableCut/">
 <meta property="og:title" content="FableCut - the browser video editor AI agents can drive">
 <meta property="og:description" content="A Premiere-style browser video editor whose whole timeline is one JSON file. Any agent that writes JSON can edit video.">
-<meta property="og:image" content="./screenshot.png">
+<meta property="og:image" content="https://ronak-create.github.io/FableCut/screenshot.png">
+<meta property="og:image:width" content="1502">
+<meta property="og:image:height" content="812">
+<meta property="og:image:alt" content="The FableCut editor: a timeline with four video and four audio tracks, per-track and master audio meters, a preview monitor, and the inspector showing a clip's volume and pan.">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="FableCut - the browser video editor AI agents can drive">
+<meta name="twitter:description" content="A Premiere-style browser video editor whose whole timeline is one JSON file. Any agent that writes JSON can edit video.">
+<meta name="twitter:image" content="https://ronak-create.github.io/FableCut/screenshot.png">
 
-<link rel="stylesheet" href="./styles.css?v=8">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://ronak-create.github.io/FableCut/#app",
+      "name": "FableCut",
+      "alternateName": "FableCut video editor",
+      "applicationCategory": "MultimediaApplication",
+      "applicationSubCategory": "Video editor",
+      "operatingSystem": "Windows, macOS, Linux",
+      "url": "https://ronak-create.github.io/FableCut/",
+      "downloadUrl": "https://github.com/ronak-create/FableCut",
+      "codeRepository": "https://github.com/ronak-create/FableCut",
+      "license": "https://opensource.org/licenses/MIT",
+      "isAccessibleForFree": true,
+      "description": "A Premiere-style video editor that runs in the browser and keeps its whole timeline in one JSON file, so an AI agent can edit video through MCP or a REST API while you watch.",
+      "featureList": [
+        "JSON timeline (project.json) as the editing interface",
+        "MCP server for Claude Code, Claude Desktop and other MCP clients",
+        "REST API for media, analysis, live reload and export",
+        "Live reload of the open editor over server-sent events",
+        "Multi-track video and audio with per-clip volume, pan and keyframes",
+        "Fast ffmpeg export, WebCodecs hardware export and a realtime fallback"
+      ],
+      "softwareRequirements": "Node.js 18 or newer and a Chromium-based browser; ffmpeg optional for fast export",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "screenshot": "https://ronak-create.github.io/FableCut/screenshot.png",
+      "author": {
+        "@type": "Person",
+        "name": "Ronak Parmar",
+        "url": "https://github.com/ronak-create"
+      }
+    },
+    {
+      "@type": "SoftwareSourceCode",
+      "@id": "https://ronak-create.github.io/FableCut/#source",
+      "name": "FableCut",
+      "codeRepository": "https://github.com/ronak-create/FableCut",
+      "programmingLanguage": "JavaScript",
+      "runtimePlatform": "Node.js",
+      "license": "https://opensource.org/licenses/MIT",
+      "about": {
+        "@id": "https://ronak-create.github.io/FableCut/#app"
+      }
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://ronak-create.github.io/FableCut/#website",
+      "url": "https://ronak-create.github.io/FableCut/",
+      "name": "FableCut",
+      "inLanguage": "en",
+      "about": {
+        "@id": "https://ronak-create.github.io/FableCut/#app"
+      }
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://ronak-create.github.io/FableCut/#faq",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Can an AI actually edit video?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes, and you get to watch it happen. Your whole edit lives in one file called project.json: the clips, the tracks, the effects, every keyframe. An agent rewrites that file the same way it writes code, and the open editor picks up the change in about 150 milliseconds. Nothing is hidden behind a render API you cannot see into."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What is an MCP video editor?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "MCP is the Model Context Protocol, the standard way an AI client talks to outside tools. FableCut ships an MCP server, so Claude Code, Claude Desktop or any other MCP client gets real typed tools for reading and rewriting your timeline instead of guessing at it."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Do I need ffmpeg?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Only if you want the fast export. Put ffmpeg on your PATH and exports run through it. Skip it and the editor records the timeline in the browser instead. Everything else, preview and trimming and effects and titles, works fine without it."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does my footage get uploaded anywhere?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. The server runs on your own machine and listens on 127.0.0.1 only, so your media sits in a local folder and never goes near anyone's cloud. Two things do touch the network, and both are your call: the + URL button downloads a file you paste in, and AI background removal fetches its model from a CDN the first time you use it."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is FableCut free?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. MIT licensed, free for personal and commercial work, with no account, no telemetry and no paid tier waiting for you later. It also has zero npm dependencies, so node server.js really is the whole install."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What do I need to run it?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Node 18 or newer and a Chromium browser. Clone the repo, run node server.js, open http://localhost:7777. It works on Windows, macOS and Linux, and if you would rather not deal with paths at all, it installs as a Claude Code plugin."
+          }
+        }
+      ]
+    }
+  ]
+}
+</script>
+<link rel="stylesheet" href="./styles.css?v=9">
 </head>
 <body>
 
@@ -49,6 +178,7 @@
       <a href="#demo">Demo</a>
       <a href="#how">How it works</a>
       <a href="#start">Quick start</a>
+      <a href="#faq">FAQ</a>
       <a href="https://deepwiki.com/ronak-create/FableCut" rel="noopener">Docs</a>
       <a href="https://discord.gg/EFMQH7d6Tv" rel="noopener">Discord</a>
       <a class="nav-cta" href="https://github.com/ronak-create/FableCut" rel="noopener">
@@ -234,6 +364,43 @@ node server.js</code></pre>
       <a class="btn btn-ghost" href="https://github.com/ronak-create/FableCut/blob/main/CLAUDE.md" rel="noopener">Read the full manual</a>
       <a class="btn btn-ghost" href="https://deepwiki.com/ronak-create/FableCut" rel="noopener">Browse the docs on DeepWiki</a>
       <a class="btn btn-ghost" href="https://discord.gg/EFMQH7d6Tv" rel="noopener">Join the Discord</a>
+    </div>
+  </div>
+</section>
+
+<!-- ── FAQ: plain answers to the questions people actually type ── -->
+<section class="section line-top faq" id="faq">
+  <div class="wrap">
+    <div class="head reveal zoom">
+      <span class="tick"></span>
+      <h2>Questions people ask first.</h2>
+      <p class="sub">Short answers. The long versions live in the README and <code>CLAUDE.md</code>.</p>
+    </div>
+    <div class="bento faq-grid reveal">
+      <div class="cell cell-wide">
+        <h3>Can an AI actually edit video?</h3>
+        <p>Yes, and you get to watch it happen. Your whole edit lives in one file called <code>project.json</code>: the clips, the tracks, the effects, every keyframe. An agent rewrites that file the same way it writes code, and the open editor picks up the change in about 150 milliseconds. Nothing is hidden behind a render API you cannot see into.</p>
+      </div>
+      <div class="cell">
+        <h3>What is an MCP video editor?</h3>
+        <p>MCP is the Model Context Protocol, the standard way an AI client talks to outside tools. FableCut ships an MCP server, so Claude Code, Claude Desktop or any other MCP client gets real typed tools for reading and rewriting your timeline instead of guessing at it.</p>
+      </div>
+      <div class="cell">
+        <h3>Do I need ffmpeg?</h3>
+        <p>Only if you want the fast export. Put ffmpeg on your PATH and exports run through it. Skip it and the editor records the timeline in the browser instead. Everything else, preview and trimming and effects and titles, works fine without it.</p>
+      </div>
+      <div class="cell cell-wide">
+        <h3>Does my footage get uploaded anywhere?</h3>
+        <p>No. The server runs on your own machine and listens on 127.0.0.1 only, so your media sits in a local folder and never goes near anyone's cloud. Two things do touch the network, and both are your call: the <strong>+ URL</strong> button downloads a file you paste in, and AI background removal fetches its model from a CDN the first time you use it.</p>
+      </div>
+      <div class="cell">
+        <h3>Is FableCut free?</h3>
+        <p>Yes. MIT licensed, free for personal and commercial work, with no account, no telemetry and no paid tier waiting for you later. It also has zero npm dependencies, so <code>node server.js</code> really is the whole install.</p>
+      </div>
+      <div class="cell cell-wide">
+        <h3>What do I need to run it?</h3>
+        <p>Node 18 or newer and a Chromium browser. Clone the repo, run <code>node server.js</code>, open <code>http://localhost:7777</code>. It works on Windows, macOS and Linux, and if you would rather not deal with paths at all, it installs as a Claude Code plugin.</p>
+      </div>
     </div>
   </div>
 </section>

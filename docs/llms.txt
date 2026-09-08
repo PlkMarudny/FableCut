@@ -1,0 +1,39 @@
+# FableCut
+
+> A Premiere-style video editor that runs in the browser and keeps its entire
+> timeline in one JSON file, so an AI agent can edit video through MCP or a
+> REST API while a human watches the cut change. MIT licensed, zero npm
+> dependencies, runs locally on your own machine.
+
+FableCut is not a cloud service and has no black-box render API. x in `project.json`. An
+agent rewrites that file the way it rewrites code; the open editor reloads in
+about 150 ms. A human and an agent can work the same timeline at once.
+
+## Facts
+
+- License: MIT. Free for personal and commercial use. No account, no telemetry,
+  no paid tier.
+- Requirements: Node.js 18+ and a Chromium-based browser. ffmpeg on PATH is
+  optional but recommended (fast export and upload remuxing).
+- Install: `git clone https://github.com/ronak-create/FableCut.git`, then
+  `node server.js`, then open http://localhost:7777.
+- The server binds 127.0.0.1 only. Media stays in a local folder; nothing is
+  uploaded to a cloud service.
+- Control surfaces: an MCP server (stdio, client-neutral), a REST API, and
+  direct edits to `project.json` with live reload over server-sent events.
+- Editing: multi-track video and audio (up to 16 per kind), per-clip volume,
+  stereo pan, speed ramps, keyframes, transitions, titles with kinetic text
+  animation, SVG library, chroma key, AI background removal.
+- Export: fast ffmpeg export via encoding profiles, WebCodecs hardware export
+  (browser encodes H.264, server muxes), and a realtime MediaRecorder fallback.
+- Also installable as a Claude Code plugin, which registers the MCP server and
+  adds `edit-video` and `remake-reel` skills.
+
+## Links
+
+- Site: https://ronak-create.github.io/FableCut/
+- Repository: https://github.com/ronak-create/FableCut
+- Agent manual (full schema, semantics, recipes): https://github.com/ronak-create/FableCut/blob/main/CLAUDE.md
+- README: https://github.com/ronak-create/FableCut/blob/main/README.md
+- Changelog: https://github.com/ronak-create/FableCut/blob/main/CHANGELOG.md
+- Docs: https://deepwiki.com/ronak-create/FableCut

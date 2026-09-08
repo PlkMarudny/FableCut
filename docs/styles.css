@@ -214,6 +214,9 @@ h3 { font-family: var(--sans); font-size: 1.08rem; font-weight: 650; letter-spac
 .cell p { color: var(--text-dim); font-size: 0.95rem; }
 .cell code { color: #cbd5ff; background: rgba(123, 108, 255, 0.12); padding: 2px 6px; border-radius: 5px; }
 .cell-wide { grid-column: span 2; }
+.faq-grid .cell p { max-width: 68ch; }
+.faq-grid .cell-wide p { max-width: none; }
+.faq-grid .cell code { font-size: 0.92em; }
 .cell-tall { grid-row: span 2; }
 .cell.accent { background: radial-gradient(130% 130% at 100% 0%, rgba(79, 140, 255, 0.13), transparent 56%), var(--surface); border-color: rgba(123, 108, 255, 0.26); }
 .cell.dark { background: #0c0c12; }
