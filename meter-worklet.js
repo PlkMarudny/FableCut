@@ -1,7 +1,8 @@
 /* FableCut per-track meter worklet + stereo program sum pass-through.
    Inputs 0…nAudio−1 = A-track buses; input nAudio = video/other spill on master.
    Pass-through sum → stereo out. Per-track RMS/LUFS/Peak via port; master L/R
-   is metered on the main thread (AnalyserNodes on the worklet output). */function shelfCoeffs(fs) {
+   is metered on the main thread (AnalyserNodes on the worklet output). */
+function shelfCoeffs(fs) {
   const f0 = 1681.974450955533;
   const G = 3.999843853973347;
   const Q = 0.7071752369554196;
