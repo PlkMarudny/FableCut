@@ -1,5 +1,6 @@
 # Runtime user data — recreated automatically
 project.json
+live.json
 media/*
 !media/.gitkeep
 exports/*

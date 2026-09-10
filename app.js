@@ -580,6 +580,12 @@ function kfChannel(c, key, local, fallback) {
   return fallback;
 }
 const kfTimeEps = () => 0.5 / projectFps();
+/* Is the playhead over the clip (± half a frame)? Keyframe edits are only
+   meaningful then — off-clip writes would land clamped on the clip's edge. */
+function playheadOverClip(c) {
+  const eps = kfTimeEps();
+  return state.time >= c.start - eps && state.time <= c.start + c.duration + eps;
+}
 /* Keyframe on this channel whose absolute time matches the playhead. */
 function kfAtPlayhead(c, k) {
   const arr = c.keyframes?.[k];
@@ -614,24 +620,47 @@ function fmtInspNum(v, step) {
   if (Math.abs(n - Math.round(n)) < 1e-6) return String(Math.round(n));
   return String(+n.toFixed(3));
 }
+/* Inspector playhead-sync cache: the rAF loop re-syncs inspector fields only
+   when the playhead, selection, or keyed values changed since the last sync.
+   Mutators that don't re-render the inspector bump inspPropGen. */
+let inspSyncStamp = "";
+let inspPropGen = 0;
+const inspStampNow = () => state.time + "|" + state.selId + "|" + inspPropGen;
+/* Audio hold loops one frame of audio built from volume / pan / the speed
+   remap — a write to any of them must re-cut it. The mutators own this (like
+   dirtyTimeline); scheduleAudioHoldRefresh itself no-ops unless holding. */
+function refreshAudioHoldFor(k) {
+  if (k === "volume" || k === "pan" || k === "speed") scheduleAudioHoldRefresh();
+}
 /* Write an animatable prop: static if the channel has no keyframes; otherwise
-   update the keyframe under the playhead or insert one (auto-key). */
+   update the keyframe under the playhead or insert one (auto-key). Returns
+   false when the write was refused — a keyed channel with the playhead off
+   the clip would corrupt the edge keyframe, so it must not be written.
+   dirtyTimeline ownership: the keyframe mutators (setAnimProp /
+   toggleKfAtPlayhead / resetProp*) set it themselves when a keyframe appears
+   or disappears (clip markers move); value-only writes skip it — the graphs
+   redraw every rAF anyway. Callers never set it for these. The same goes for
+   refreshAudioHoldFor() on volume/pan/speed writes. */
 function setAnimProp(c, k, v) {
-  if (!c || !ANIMATABLE.includes(k) || typeof v !== "number" || isNaN(v)) return;
+  if (!c || !ANIMATABLE.includes(k) || typeof v !== "number" || isNaN(v)) return false;
   const arr = c.keyframes?.[k];
+  if (Array.isArray(arr) && arr.length && !playheadOverClip(c)) return false;
+  inspPropGen++;
+  refreshAudioHoldFor(k);
   if (!Array.isArray(arr) || !arr.length) {
     c.props[k] = v;
-    return;
+    return true;
   }
   const near = kfAtPlayhead(c, k);
-  if (near) { near.v = v; return; }
+  if (near) { near.v = v; return true; }
   const lt = +clamp(state.time - c.start, 0, c.duration).toFixed(3);
   const eps = kfTimeEps();
   const dup = arr.find((kf) => Math.abs(kf.t - lt) < eps);
-  if (dup) { dup.v = v; return; }
+  if (dup) { dup.v = v; return true; }
   arr.push({ t: lt, v });
   arr.sort((a, b) => a.t - b.t);
   state.dirtyTimeline = true;
+  return true;
 }
 /* Wipe a property: factory default + delete that channel's keyframes. */
 function resetPropChannel(c, k) {
@@ -643,6 +672,7 @@ function resetPropChannel(c, k) {
   }
   if (!Object.hasOwn(DEFAULT_PROPS, k)) return;
   c.props[k] = DEFAULT_PROPS[k];
+  refreshAudioHoldFor(k);
   if (c.keyframes?.[k]) {
     delete c.keyframes[k];
     if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
@@ -652,30 +682,33 @@ function resetPropChannel(c, k) {
   if (k === "font") ensureFont(String(DEFAULT_PROPS.font));
 }
 /* Playhead-local reset: remove the keyframe under the playhead, else set the
-   value at the playhead to the property default (auto-keys if already keyed). */
+   value at the playhead to the property default (auto-keys if already keyed).
+   Returns false when refused (keyed channel, playhead off the clip). */
 function resetPropAtPlayhead(c, k) {
-  if (!c || !k) return;
+  if (!c || !k) return false;
   if (k === "transIn" || k === "transOut") {
     resetPropChannel(c, k);
-    return;
+    return true;
   }
-  if (!Object.hasOwn(DEFAULT_PROPS, k)) return;
-  if (ANIMATABLE.includes(k) && kfAtPlayhead(c, k)) {
-    toggleKfAtPlayhead(c, k);
-    state.dirtyTimeline = true;
-    return;
-  }
+  if (!Object.hasOwn(DEFAULT_PROPS, k)) return false;
+  if (ANIMATABLE.includes(k) && kfAtPlayhead(c, k)) return toggleKfAtPlayhead(c, k);
   const def = DEFAULT_PROPS[k];
-  if (ANIMATABLE.includes(k) && c.keyframes?.[k]?.length) setAnimProp(c, k, def);
-  else c.props[k] = def;
+  if (ANIMATABLE.includes(k) && c.keyframes?.[k]?.length) {
+    if (!setAnimProp(c, k, def)) return false;
+  } else { c.props[k] = def; refreshAudioHoldFor(k); }
   if (k === "text" || k === "font") state.dirtyTimeline = true;
   if (k === "font") ensureFont(String(def));
+  return true;
 }
-/* ◆ : add a keyframe at the playhead, or remove the one already there. */
+/* ◆ : add a keyframe at the playhead, or remove the one already there.
+   Refused (false) when the playhead is off the clip — there is no "at the
+   playhead" then, and clamping would plant a keyframe on the clip's edge. */
 function toggleKfAtPlayhead(c, k) {
-  if (!c || !ANIMATABLE.includes(k)) return;
+  if (!c || !ANIMATABLE.includes(k) || !playheadOverClip(c)) return false;
   const near = kfAtPlayhead(c, k);
   if (near) {
+    inspPropGen++;
+    refreshAudioHoldFor(k);
     const rest = c.keyframes[k].filter((kf) => kf !== near);
     if (rest.length) c.keyframes[k] = rest;
     else {
@@ -683,17 +716,25 @@ function toggleKfAtPlayhead(c, k) {
       delete c.keyframes[k];
       if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
     }
-    return;
+    state.dirtyTimeline = true; // a diamond left the clip — mutators own this flag
+    return true;
   }
   const fallback = +(c.props?.[k] ?? DEFAULT_PROPS[k] ?? 0);
   const v = kfChannel(c, k, state.time - c.start, fallback);
-  if (typeof v !== "number" || isNaN(v)) return;
+  if (typeof v !== "number" || isNaN(v)) return false;
+  inspPropGen++;
+  refreshAudioHoldFor(k);
   if (!c.keyframes) c.keyframes = {};
   const arr = (c.keyframes[k] = c.keyframes[k] || []);
   const lt = +clamp(state.time - c.start, 0, c.duration).toFixed(3);
   const dup = arr.find((kf) => Math.abs(kf.t - lt) < kfTimeEps());
-  if (dup) dup.v = v;
-  else { arr.push({ t: lt, v }); arr.sort((a, b) => a.t - b.t); }
+  if (dup) dup.v = v; // value-only: no marker moves, no timeline rebuild
+  else {
+    arr.push({ t: lt, v });
+    arr.sort((a, b) => a.t - b.t);
+    state.dirtyTimeline = true;
+  }
+  return true;
 }
 function hasSpeedRamp(c) {
   return Array.isArray(c.keyframes?.speed) && c.keyframes.speed.length > 0;
@@ -3211,7 +3252,6 @@ function setTime(t) {
   state.time = clamp(t, 0, Math.max(projDur(), 0));
   seekMediaWhilePaused();
   if (state.audioHold) scheduleAudioHoldRefresh();
-  syncInspectorPlayhead();
 }
 
 /* Absolute timeline times of every keyframe on the given clips (deduped). */
@@ -3688,6 +3728,7 @@ function renderInspector(lite) {
     </div>`;
   }
   els.inspector.innerHTML = html;
+  inspSyncStamp = inspStampNow(); // full rebuild already reflects this state
   els.inspector.querySelectorAll("label.insp-reset[data-reset]").forEach((lab) => {
     lab.addEventListener("click", (e) => {
       const all = e.ctrlKey || e.metaKey;
@@ -3697,9 +3738,12 @@ function renderInspector(lite) {
       const keys = lab.dataset.reset.split(",").map((s) => s.trim()).filter(Boolean);
       if (!keys.length) return;
       pushUndo();
-      for (const k of keys) (all ? resetPropChannel : resetPropAtPlayhead)(c, k);
-      if (state.audioHold && keys.some((k) => k === "volume" || k === "pan"))
-        scheduleAudioHoldRefresh();
+      let refused = false;
+      for (const k of keys) {
+        if (all) resetPropChannel(c, k); // channel-wide: playhead-independent
+        else refused = !resetPropAtPlayhead(c, k) || refused;
+      }
+      if (refused) toast("Move the playhead over the clip to edit its keyframes");
       scheduleSave();
       renderInspector();
     });
@@ -3713,8 +3757,8 @@ function renderInspector(lite) {
       if (k === "weight") v = +v || 0;
       if (k === "font") ensureFont(String(v));
       if (k === "name") { c.name = String(v); state.dirtyTimeline = true; }
-      else if (k === "start") { c.start = Math.max(0, +v || 0); state.dirtyTimeline = true; }
-      else if (k === "duration") { c.duration = Math.max(MIN_DUR, +v || MIN_DUR); state.dirtyTimeline = true; }
+      else if (k === "start") { c.start = Math.max(0, +v || 0); state.dirtyTimeline = true; inspPropGen++; }
+      else if (k === "duration") { c.duration = Math.max(MIN_DUR, +v || MIN_DUR); state.dirtyTimeline = true; inspPropGen++; }
       else if (k === "transIn" || k === "transOut") {
         const key = k === "transIn" ? "transitionIn" : "transitionOut";
         const side = k === "transIn" ? "in" : "out";
@@ -3732,11 +3776,13 @@ function renderInspector(lite) {
           state.dirtyTimeline = true;
         }
       }
-      else if (ANIMATABLE.includes(k)) setAnimProp(c, k, v);
+      else if (ANIMATABLE.includes(k)) {
+        if (!setAnimProp(c, k, v))
+          toast("Move the playhead over the clip to edit its keyframes");
+      }
       else { c.props[k] = v; if (k === "text") state.dirtyTimeline = true; }
       const valEl = els.inspector.querySelector(`[data-val="${k}"]`);
       if (valEl) valEl.textContent = input.value + (valEl.dataset.unit || "");
-      if (state.audioHold && (k === "volume" || k === "pan")) scheduleAudioHoldRefresh();
       scheduleSave();
       if (ANIMATABLE.includes(k)) syncInspectorPlayhead();
     });
@@ -3783,15 +3829,16 @@ function renderInspector(lite) {
   els.inspector.querySelectorAll("[data-kf]").forEach((btn) => {
     btn.addEventListener("click", () => {
       pushUndo();
-      toggleKfAtPlayhead(c, btn.dataset.kf);
-      state.dirtyTimeline = true;
+      if (!toggleKfAtPlayhead(c, btn.dataset.kf)) // owns dirtyTimeline on success
+        toast("Move the playhead over the clip to add or remove keyframes");
       scheduleSave(); renderInspector();
     });
   });
   els.inspector.querySelectorAll("[data-kfclear]").forEach((btn) => {
     btn.addEventListener("click", () => {
       pushUndo();
-      delete c.keyframes[btn.dataset.kfclear];
+      delete c.keyframes[btn.dataset.kfclear]; // raw mutation — owns its own side effects
+      refreshAudioHoldFor(btn.dataset.kfclear);
       if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
       state.dirtyTimeline = true;
       scheduleSave(); renderInspector();
@@ -3809,15 +3856,39 @@ function renderInspector(lite) {
       toggleKfGraph(lab.dataset.kfgraph);
     });
   });
+  syncInspectorOffClip(c);
   renderKfGraphsPanel();
 }
 
-/* Patch inspector fields to the playhead (no innerHTML rebuild — keeps focus). */
+/* Off the clip, keyframed fields show their edge value but must not be
+   editable — a write would land clamped on the clip's edge. Disables those
+   inputs and the ◆ buttons. Called on every inspector sync and after each
+   full renderInspector rebuild. */
+function syncInspectorOffClip(c) {
+  const off = !playheadOverClip(c);
+  const active = document.activeElement;
+  for (const input of els.inspector.querySelectorAll("[data-k]")) {
+    const k = input.dataset.k;
+    if (!ANIMATABLE.includes(k) || input === active) continue; // don't yank focus mid-edit
+    input.disabled = off && !!(c.keyframes?.[k]?.length);
+  }
+  for (const btn of els.inspector.querySelectorAll("[data-kf]")) {
+    btn.disabled = off;
+    btn.title = off ? "Move the playhead over the clip to add or remove keyframes"
+      : btn.classList.contains("on") ? "Remove keyframe at playhead" : "Set keyframe at playhead";
+  }
+}
+/* Patch inspector fields to the playhead (no innerHTML rebuild — keeps focus).
+   Runs every rAF tick but exits early unless time, selection, or keyed values
+   actually changed since the last sync. */
 function syncInspectorPlayhead() {
   const root = els && els.inspector;
   if (!root) return;
   const c = getClip(state.selId);
   if (!c) return;
+  const stamp = inspStampNow();
+  if (stamp === inspSyncStamp) return;
+  inspSyncStamp = stamp;
   const p = propsAtPlayhead(c);
   const active = document.activeElement;
   for (const input of root.querySelectorAll("[data-k]")) {
@@ -3827,7 +3898,14 @@ function syncInspectorPlayhead() {
     const v = p[k];
     if (typeof v !== "number" || isNaN(v)) continue;
     const next = fmtInspNum(v, input.type === "range" ? input.step : undefined);
-    if (Math.abs(+input.value - +next) > 1e-6) input.value = next;
+    if (input.type === "range") {
+      // Thumb saturates at the slider's ends; the label keeps the true value,
+      // so an out-of-range keyframe doesn't churn the input every frame.
+      const mn = +input.min, mx = +input.max;
+      const shown = Number.isFinite(mn) && +next < mn ? input.min
+        : Number.isFinite(mx) && +next > mx ? input.max : next;
+      if (Math.abs(+input.value - +shown) > 1e-6) input.value = shown;
+    } else if (Math.abs(+input.value - +next) > 1e-6) input.value = next;
     const valEl = root.querySelector(`[data-val="${k}"]`);
     if (valEl) {
       const text = next + (valEl.dataset.unit || "");
@@ -3842,9 +3920,8 @@ function syncInspectorPlayhead() {
     btn.classList.toggle("on", on);
     const label = "◆" + (n || "");
     if (btn.textContent !== label) btn.textContent = label;
-    const title = on ? "Remove keyframe at playhead" : "Set keyframe at playhead";
-    if (btn.title !== title) btn.title = title;
   }
+  syncInspectorOffClip(c); // after the class pass, so ◆ titles read the fresh "on" state
 }
 
 /* ── Keyframe graphs (program-monitor left gutter) ── */
@@ -4974,6 +5051,22 @@ function applyTransition(p, type, k, W, H, dir) {
       break;
   }
 }
+/* Translation the in/out transition envelopes add on top of the keyframed
+   props at timeline time t — probed through applyTransition itself, so it can
+   never disagree with the compositor. Canvas box drags write resting
+   (envelope-free) geometry, so displayed-space results must have this
+   subtracted back out. */
+function transOffsetAt(c, t) {
+  const p = { x: 0, y: 0, scale: 1, opacity: 1, volume: 1, rotation: 0, blur: 0, rgbSplit: 0 };
+  const local = t - c.start, W = els.preview.width, H = els.preview.height;
+  const tin = c.transitionIn, tout = c.transitionOut;
+  if (tin && tin.duration > 0 && local < tin.duration)
+    applyTransition(p, tin.type, 1 - EASE["ease-out"](clamp(local / tin.duration, 0, 1)), W, H, -1);
+  if (tout && tout.duration > 0 && local > c.duration - tout.duration)
+    applyTransition(p, tout.type,
+      EASE["ease-in"](clamp((local - (c.duration - tout.duration)) / tout.duration, 0, 1)), W, H, 1);
+  return { x: +p.x || 0, y: +p.y || 0 };
+}
 /* Rebase clip-local keyframe times by -offset, dropping ones outside [0, dur] */
 function shiftKF(kfs, offset, dur) {
   if (!kfs) return undefined;
@@ -5464,6 +5557,11 @@ els.preview.addEventListener("pointermove", (e) => {
   } else if (canvasDrag.mode === "box") {
     const aspect = canvasDrag.aspect || 1;
     const lockAR = e.shiftKey;
+    // The displayed box is the resting box plus the transition envelope; the
+    // writes below target the resting geometry, so strip the envelope's
+    // translation back out (boxed text ignores scale, and the center midpoint
+    // is rotation-invariant — translation is the only component that leaks).
+    const env = transOffsetAt(c, state.time);
     if (e.ctrlKey || e.metaKey) {
       // Ctrl/Cmd: resize from center (all corners move).
       const b = clipBounds(c, evalProps(c, state.time), W, H), lp = toLocal(pt, b);
@@ -5504,8 +5602,8 @@ els.preview.addEventListener("pointermove", (e) => {
       const c2 = Math.cos(rot), s2 = Math.sin(rot);
       const freeX = fix.x + ldx * c2 - ldy * s2;
       const freeY = fix.y + ldx * s2 + ldy * c2;
-      setAnimProp(c, "x", Math.round((fix.x + freeX) / 2 - W / 2));
-      setAnimProp(c, "y", Math.round((fix.y + freeY) / 2 - H / 2));
+      setAnimProp(c, "x", Math.round((fix.x + freeX) / 2 - W / 2 - env.x));
+      setAnimProp(c, "y", Math.round((fix.y + freeY) / 2 - H / 2 - env.y));
       c.props.boxW = +Math.abs(ldx).toFixed(1);
       c.props.boxH = +Math.abs(ldy).toFixed(1);
     }
