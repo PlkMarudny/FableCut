@@ -1323,7 +1323,7 @@ input[type=range] {
   line-height: 1;
 }
 
-.kf-btn:hover {
+.kf-btn:hover:not(:disabled) {
   color: #fff;
   border-color: #4a4a56;
 }
@@ -1331,6 +1331,19 @@ input[type=range] {
 .kf-btn.has {
   color: #ffd166;
   border-color: #ffd16666;
+}
+
+.kf-btn.has.on {
+  background: #ffd166;
+  color: #1a1a22;
+  border-color: #ffd166;
+}
+
+/* Playhead off the clip: keyframed fields are read-only (edge value shown) */
+.inspector input:disabled,
+.inspector .kf-btn:disabled {
+  opacity: .4;
+  cursor: not-allowed;
 }
 
 /* ── Timeline ── */

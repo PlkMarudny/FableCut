@@ -579,6 +579,168 @@ function kfChannel(c, key, local, fallback) {
   }
   return fallback;
 }
+const kfTimeEps = () => 0.5 / projectFps();
+/* Is the playhead over the clip (± half a frame)? Keyframe edits are only
+   meaningful then — off-clip writes would land clamped on the clip's edge. */
+function playheadOverClip(c) {
+  const eps = kfTimeEps();
+  return state.time >= c.start - eps && state.time <= c.start + c.duration + eps;
+}
+/* Keyframe on this channel whose absolute time matches the playhead. */
+function kfAtPlayhead(c, k) {
+  const arr = c.keyframes?.[k];
+  if (!Array.isArray(arr) || !arr.length) return null;
+  const eps = kfTimeEps();
+  const abs = state.time;
+  return arr.find((kf) => Math.abs(c.start + kf.t - abs) < eps) || null;
+}
+/* Static props with keyed channels replaced by the value at the playhead
+   (no transition envelopes — those would fake a keyframe in the inspector). */
+function propsAtPlayhead(c) {
+  const p = { ...c.props };
+  if (!c.keyframes) return p;
+  const local = state.time - c.start;
+  for (const k of ANIMATABLE) {
+    const kfs = c.keyframes[k];
+    if (!Array.isArray(kfs) || !kfs.length) continue;
+    const v = kfChannel(c, k, local, +(p[k] ?? DEFAULT_PROPS[k] ?? 0));
+    if (typeof v === "number" && !isNaN(v)) p[k] = v;
+  }
+  return p;
+}
+function fmtInspNum(v, step) {
+  const n = +v;
+  if (!Number.isFinite(n)) return "0";
+  const s = +step;
+  if (Number.isFinite(s) && s > 0) {
+    if (s >= 1) return String(Math.round(n / s) * s);
+    const dec = Math.min(6, Math.max(0, Math.ceil(-Math.log10(s) - 1e-9)));
+    return String(+n.toFixed(dec));
+  }
+  if (Math.abs(n - Math.round(n)) < 1e-6) return String(Math.round(n));
+  return String(+n.toFixed(3));
+}
+/* Inspector playhead-sync cache: the rAF loop re-syncs inspector fields only
+   when the playhead, selection, keyed values, or the selected clip's start /
+   duration changed since the last sync.
+   Mutators that don't re-render the inspector bump inspPropGen. */
+let inspSyncStamp = "";
+let inspPropGen = 0;
+const inspStampNow = () => {
+  const c = getClip(state.selId);
+  return state.time + "|" + state.selId + "|" + inspPropGen + "|"
+    + (c ? c.start : "") + "|" + (c ? c.duration : "");
+};
+/* Audio hold loops one frame of audio built from volume / pan / the speed
+   remap — a write to any of them must re-cut it. The mutators own this (like
+   dirtyTimeline); scheduleAudioHoldRefresh itself no-ops unless holding. */
+function refreshAudioHoldFor(k) {
+  if (k === "volume" || k === "pan" || k === "speed") scheduleAudioHoldRefresh();
+}
+/* Write an animatable prop: static if the channel has no keyframes; otherwise
+   update the keyframe under the playhead or insert one (auto-key). Returns
+   false when the write was refused — a keyed channel with the playhead off
+   the clip would corrupt the edge keyframe, so it must not be written.
+   dirtyTimeline ownership: the keyframe mutators (setAnimProp /
+   toggleKfAtPlayhead / resetProp*) set it themselves when a keyframe appears
+   or disappears (clip markers move); value-only writes skip it — the graphs
+   redraw every rAF anyway. Callers never set it for these. The same goes for
+   refreshAudioHoldFor() on volume/pan/speed writes. */
+function setAnimProp(c, k, v) {
+  if (!c || !ANIMATABLE.includes(k) || typeof v !== "number" || isNaN(v)) return false;
+  const arr = c.keyframes?.[k];
+  if (Array.isArray(arr) && arr.length && !playheadOverClip(c)) return false;
+  inspPropGen++;
+  refreshAudioHoldFor(k);
+  if (!Array.isArray(arr) || !arr.length) {
+    c.props[k] = v;
+    return true;
+  }
+  const near = kfAtPlayhead(c, k);
+  if (near) { near.v = v; return true; }
+  const lt = +clamp(state.time - c.start, 0, c.duration).toFixed(3);
+  const eps = kfTimeEps();
+  const dup = arr.find((kf) => Math.abs(kf.t - lt) < eps);
+  if (dup) { dup.v = v; return true; }
+  arr.push({ t: lt, v });
+  arr.sort((a, b) => a.t - b.t);
+  state.dirtyTimeline = true;
+  return true;
+}
+/* Wipe a property: factory default + delete that channel's keyframes. */
+function resetPropChannel(c, k) {
+  if (!c || !k) return;
+  if (k === "transIn" || k === "transOut") {
+    c[k === "transIn" ? "transitionIn" : "transitionOut"] = undefined;
+    state.dirtyTimeline = true;
+    return;
+  }
+  if (!Object.hasOwn(DEFAULT_PROPS, k)) return;
+  c.props[k] = DEFAULT_PROPS[k];
+  refreshAudioHoldFor(k);
+  if (c.keyframes?.[k]) {
+    delete c.keyframes[k];
+    if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
+    state.dirtyTimeline = true;
+  }
+  if (k === "text" || k === "font") state.dirtyTimeline = true;
+  if (k === "font") ensureFont(String(DEFAULT_PROPS.font));
+}
+/* Playhead-local reset: remove the keyframe under the playhead, else set the
+   value at the playhead to the property default (auto-keys if already keyed).
+   Returns false when refused (keyed channel, playhead off the clip). */
+function resetPropAtPlayhead(c, k) {
+  if (!c || !k) return false;
+  if (k === "transIn" || k === "transOut") {
+    resetPropChannel(c, k);
+    return true;
+  }
+  if (!Object.hasOwn(DEFAULT_PROPS, k)) return false;
+  if (ANIMATABLE.includes(k) && kfAtPlayhead(c, k)) return toggleKfAtPlayhead(c, k);
+  const def = DEFAULT_PROPS[k];
+  if (ANIMATABLE.includes(k) && c.keyframes?.[k]?.length) {
+    if (!setAnimProp(c, k, def)) return false;
+  } else { c.props[k] = def; refreshAudioHoldFor(k); }
+  if (k === "text" || k === "font") state.dirtyTimeline = true;
+  if (k === "font") ensureFont(String(def));
+  return true;
+}
+/* ◆ : add a keyframe at the playhead, or remove the one already there.
+   Refused (false) when the playhead is off the clip — there is no "at the
+   playhead" then, and clamping would plant a keyframe on the clip's edge. */
+function toggleKfAtPlayhead(c, k) {
+  if (!c || !ANIMATABLE.includes(k) || !playheadOverClip(c)) return false;
+  const near = kfAtPlayhead(c, k);
+  if (near) {
+    inspPropGen++;
+    refreshAudioHoldFor(k);
+    const rest = c.keyframes[k].filter((kf) => kf !== near);
+    if (rest.length) c.keyframes[k] = rest;
+    else {
+      c.props[k] = near.v;
+      delete c.keyframes[k];
+      if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
+    }
+    state.dirtyTimeline = true; // a diamond left the clip — mutators own this flag
+    return true;
+  }
+  const fallback = +(c.props?.[k] ?? DEFAULT_PROPS[k] ?? 0);
+  const v = kfChannel(c, k, state.time - c.start, fallback);
+  if (typeof v !== "number" || isNaN(v)) return false;
+  inspPropGen++;
+  refreshAudioHoldFor(k);
+  if (!c.keyframes) c.keyframes = {};
+  const arr = (c.keyframes[k] = c.keyframes[k] || []);
+  const lt = +clamp(state.time - c.start, 0, c.duration).toFixed(3);
+  const dup = arr.find((kf) => Math.abs(kf.t - lt) < kfTimeEps());
+  if (dup) dup.v = v; // value-only: no marker moves, no timeline rebuild
+  else {
+    arr.push({ t: lt, v });
+    arr.sort((a, b) => a.t - b.t);
+    state.dirtyTimeline = true;
+  }
+  return true;
+}
 function hasSpeedRamp(c) {
   return Array.isArray(c.keyframes?.speed) && c.keyframes.speed.length > 0;
 }
@@ -3125,7 +3287,7 @@ function goToKeyframe(dir) {
   }
   const times = keyframeTimelineTimes(clips);
   if (!times.length) { toast("No keyframes"); return; }
-  const eps = 0.5 / projectFps();
+  const eps = kfTimeEps();
   if (dir > 0) {
     const next = times.find((t) => t > state.time + eps);
     if (next == null) { toast("No next keyframe"); return; }
@@ -3389,15 +3551,20 @@ function renderInspector(lite) {
     const s = els.inspector.querySelector("[data-k=start]"), d = els.inspector.querySelector("[data-k=duration]");
     if (s) s.value = c.start.toFixed(2);
     if (d) d.value = c.duration.toFixed(2);
+    syncInspectorPlayhead(); // start/duration are in the stamp — refresh keyed fields + off-clip lock
     return;
   }
-  const p = c.props;
+  const p = propsAtPlayhead(c);
   const kfCount = (k) => (c.keyframes && c.keyframes[k] ? c.keyframes[k].length : 0);
-  const kfCtl = (k) => !ANIMATABLE.includes(k) ? "" :
-    `<span class="kf-ctl"><button class="kf-btn${kfCount(k) ? " has" : ""}" data-kf="${k}" title="Set keyframe at playhead">◆${kfCount(k) || ""}</button>${kfCount(k) ? `<button class="kf-btn" data-kfclear="${k}" title="Clear keyframes">✕</button>` : ""}</span>`;
+  const kfCtl = (k) => {
+    if (!ANIMATABLE.includes(k)) return "";
+    const n = kfCount(k), on = !!kfAtPlayhead(c, k);
+    return `<span class="kf-ctl"><button class="kf-btn${n ? " has" : ""}${on ? " on" : ""}" data-kf="${k}" title="${on ? "Remove keyframe at playhead" : "Set keyframe at playhead"}">◆${n || ""}</button>${n ? `<button class="kf-btn" data-kfclear="${k}" title="Clear keyframes">✕</button>` : ""}</span>`;
+  };
   /* Label carries two affordances that key off different click modifiers:
      plain click toggles the keyframe graph (animatable props), Ctrl/Cmd-click
-     resets the prop(s). `reset` overrides which keys reset; defaults to k. */
+     resets the whole channel, Shift-click resets at the playhead / removes
+     that keyframe. `reset` overrides which keys reset; defaults to k. */
   const propLabel = (label, k = "", reset) => {
     const keys = reset !== undefined ? reset : k;
     const list = (Array.isArray(keys) ? keys : String(keys || "").split(",")).map((s) => s.trim()).filter(Boolean);
@@ -3411,16 +3578,20 @@ function renderInspector(lite) {
       canReset ? "insp-reset" : "",
     ].filter(Boolean).join(" ");
     const attrs = (isGraph ? ` data-kfgraph="${k}"` : "") + (canReset ? ` data-reset="${list.join(",")}"` : "");
-    const title = isGraph && canReset ? "Click: keyframe graph · Ctrl-click: reset"
-      : isGraph ? "Show / hide keyframe graph" : "Ctrl-click to reset";
+    const title = isGraph && canReset
+      ? "Click: keyframe graph · Ctrl-click: reset channel · Shift-click: reset at playhead / remove keyframe"
+      : isGraph ? "Show / hide keyframe graph"
+        : "Ctrl-click: reset channel · Shift-click: reset at playhead / remove keyframe";
     return `<label class="${cls}"${attrs} title="${title}">${label}</label>`;
   };
   const row = (label, inner, k = "", reset) =>
     `<div class="insp-row">${propLabel(label, k, reset)}${inner}${k ? kfCtl(k) : ""}</div>`;
-  const slider = (k, min, max, step, val, unit = "") =>
-    row(k[0].toUpperCase() + k.slice(1),
-      `<input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${val}">
-       <span class="val" data-val="${k}">${val}${unit}</span>`, k);
+  const slider = (k, min, max, step, val, unit = "") => {
+    const shown = fmtInspNum(val, step);
+    return row(k[0].toUpperCase() + k.slice(1),
+      `<input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${shown}">
+       <span class="val" data-val="${k}" data-unit="${unit}">${shown}${unit}</span>`, k);
+  };
   let html = (state.selIds.size > 1
     ? `<div class="insp-multi">${state.selIds.size} clips selected — drag moves them together, Del deletes all. Fields below edit the primary (white-outlined) clip.</div>`
     : "") + `<div class="insp-section"><h3>Clip — ${c.kind}</h3>
@@ -3438,8 +3609,8 @@ function renderInspector(lite) {
     </div>`;
   } else if (c.kind !== "audio") {
     html += `<div class="insp-section"><h3>Transform</h3>
-      ${row("Position X", `<input type="number" data-k="x" value="${p.x}">`, "x")}
-      ${row("Position Y", `<input type="number" data-k="y" value="${p.y}">`, "y")}
+      ${row("Position X", `<input type="number" data-k="x" value="${fmtInspNum(p.x)}">`, "x")}
+      ${row("Position Y", `<input type="number" data-k="y" value="${fmtInspNum(p.y)}">`, "y")}
       ${slider("scale", 0.1, 4, 0.01, p.scale)}
       ${slider("rotation", -180, 180, 1, p.rotation, "°")}
       ${slider("opacity", 0, 1, 0.01, p.opacity)}
@@ -3500,7 +3671,7 @@ function renderInspector(lite) {
   }
   const tsel = (label, key, tr) => {
     const active = state.transFocus === (key === "transIn" ? "in" : "out");
-    return `<div class="insp-row${active ? " trans-active" : ""}"><label class="insp-reset" data-reset="${key}" title="Ctrl-click to reset">${label}</label>
+    return `<div class="insp-row${active ? " trans-active" : ""}"><label class="insp-reset" data-reset="${key}" title="Ctrl-click: reset · Shift-click: reset">${label}</label>
       <span class="insp-ctrls"><select data-k="${key}">${TRANSITIONS.map((x) => `<option ${x === (tr?.type || "none") ? "selected" : ""}>${x}</option>`).join("")}</select>
        <input type="number" class="insp-dur" data-k="${key}Dur" step="0.1" min="0.1" value="${tr?.duration ?? 1}"></span></div>`;
   };
@@ -3515,8 +3686,8 @@ function renderInspector(lite) {
     html += `<div class="insp-section"><h3>Text</h3>
       ${row("Content", `<textarea data-k="text">${p.text}</textarea>`, "", "text")}
       ${row(hasTextBox(p) && p.boxFit ? "Max size" : "Font size",
-        `<input type="range" data-k="fontSize" min="12" max="300" step="1" value="${p.fontSize}">
-         <span class="val" data-val="fontSize">${p.fontSize}px</span>`, "fontSize")}
+        `<input type="range" data-k="fontSize" min="12" max="300" step="1" value="${fmtInspNum(p.fontSize, 1)}">
+         <span class="val" data-val="fontSize" data-unit="px">${fmtInspNum(p.fontSize, 1)}px</span>`, "fontSize")}
       ${row("Box W/H", `<span class="insp-ctrls">
         <input type="number" data-k="boxW" min="0" step="1" value="${p.boxW || 0}" title="Width in px (0 = no box — hug content)" style="max-width:64px">
         <input type="number" data-k="boxH" min="0" step="1" value="${p.boxH || 0}" title="Height in px (0 = no box — hug content)" style="max-width:64px">
@@ -3563,29 +3734,22 @@ function renderInspector(lite) {
     </div>`;
   }
   els.inspector.innerHTML = html;
+  inspSyncStamp = inspStampNow(); // full rebuild already reflects this state
   els.inspector.querySelectorAll("label.insp-reset[data-reset]").forEach((lab) => {
     lab.addEventListener("click", (e) => {
-      if (!(e.ctrlKey || e.metaKey)) return;
+      const all = e.ctrlKey || e.metaKey;
+      const local = e.shiftKey && !all;
+      if (!all && !local) return;
       e.preventDefault();
       const keys = lab.dataset.reset.split(",").map((s) => s.trim()).filter(Boolean);
       if (!keys.length) return;
       pushUndo();
+      let refused = false;
       for (const k of keys) {
-        if (k === "transIn" || k === "transOut") {
-          c[k === "transIn" ? "transitionIn" : "transitionOut"] = undefined;
-          state.dirtyTimeline = true;
-          continue;
-        }
-        if (!Object.hasOwn(DEFAULT_PROPS, k)) continue;
-        c.props[k] = DEFAULT_PROPS[k];
-        if (c.keyframes?.[k]) {
-          delete c.keyframes[k];
-          if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
-          state.dirtyTimeline = true;
-        }
-        if (k === "text" || k === "font") state.dirtyTimeline = true;
-        if (k === "font") ensureFont(String(DEFAULT_PROPS.font));
+        if (all) resetPropChannel(c, k); // channel-wide: playhead-independent
+        else refused = !resetPropAtPlayhead(c, k) || refused;
       }
+      if (refused) toast("Move the playhead over the clip to edit its keyframes");
       scheduleSave();
       renderInspector();
     });
@@ -3599,8 +3763,8 @@ function renderInspector(lite) {
       if (k === "weight") v = +v || 0;
       if (k === "font") ensureFont(String(v));
       if (k === "name") { c.name = String(v); state.dirtyTimeline = true; }
-      else if (k === "start") { c.start = Math.max(0, +v || 0); state.dirtyTimeline = true; }
-      else if (k === "duration") { c.duration = Math.max(MIN_DUR, +v || MIN_DUR); state.dirtyTimeline = true; }
+      else if (k === "start") { c.start = Math.max(0, +v || 0); state.dirtyTimeline = true; inspPropGen++; }
+      else if (k === "duration") { c.duration = Math.max(MIN_DUR, +v || MIN_DUR); state.dirtyTimeline = true; inspPropGen++; }
       else if (k === "transIn" || k === "transOut") {
         const key = k === "transIn" ? "transitionIn" : "transitionOut";
         const side = k === "transIn" ? "in" : "out";
@@ -3618,13 +3782,20 @@ function renderInspector(lite) {
           state.dirtyTimeline = true;
         }
       }
+      else if (ANIMATABLE.includes(k)) {
+        if (!setAnimProp(c, k, v))
+          toast("Move the playhead over the clip to edit its keyframes");
+      }
       else { c.props[k] = v; if (k === "text") state.dirtyTimeline = true; }
       const valEl = els.inspector.querySelector(`[data-val="${k}"]`);
-      if (valEl) valEl.textContent = input.value;
-      if (state.audioHold && (k === "volume" || k === "pan")) scheduleAudioHoldRefresh();
+      if (valEl) valEl.textContent = input.value + (valEl.dataset.unit || "");
       scheduleSave();
+      if (ANIMATABLE.includes(k)) syncInspectorPlayhead();
     });
-    input.addEventListener("focus", () => pushUndo(), { once: true });
+    input.addEventListener("focus", () => {
+      pushUndo();
+      if (ANIMATABLE.includes(k) && state.playing) pause();
+    }, { once: true });
   });
   els.inspector.querySelectorAll("[data-action]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -3663,25 +3834,17 @@ function renderInspector(lite) {
   });
   els.inspector.querySelectorAll("[data-kf]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const k = btn.dataset.kf;
-      const input = els.inspector.querySelector(`[data-k="${k}"]`);
-      const v = input ? parseFloat(input.value) : +(c.props[k] || 0);
-      if (isNaN(v)) return;
       pushUndo();
-      if (!c.keyframes) c.keyframes = {};
-      const arr = (c.keyframes[k] = c.keyframes[k] || []);
-      const lt = +clamp(state.time - c.start, 0, c.duration).toFixed(3);
-      const near = arr.find((kf) => Math.abs(kf.t - lt) < 0.5 / projectFps());
-      if (near) near.v = v; else arr.push({ t: lt, v });
-      arr.sort((a, b) => a.t - b.t);
-      state.dirtyTimeline = true;
+      if (!toggleKfAtPlayhead(c, btn.dataset.kf)) // owns dirtyTimeline on success
+        toast("Move the playhead over the clip to add or remove keyframes");
       scheduleSave(); renderInspector();
     });
   });
   els.inspector.querySelectorAll("[data-kfclear]").forEach((btn) => {
     btn.addEventListener("click", () => {
       pushUndo();
-      delete c.keyframes[btn.dataset.kfclear];
+      delete c.keyframes[btn.dataset.kfclear]; // raw mutation — owns its own side effects
+      refreshAudioHoldFor(btn.dataset.kfclear);
       if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
       state.dirtyTimeline = true;
       scheduleSave(); renderInspector();
@@ -3694,12 +3857,77 @@ function renderInspector(lite) {
   }
   els.inspector.querySelectorAll("[data-kfgraph]").forEach((lab) => {
     lab.addEventListener("click", (e) => {
-      if (e.ctrlKey || e.metaKey) return; // Ctrl/Cmd-click is reserved for prop reset
+      if (e.ctrlKey || e.metaKey || e.shiftKey) return; // modifiers reserved for prop reset
       e.preventDefault();
       toggleKfGraph(lab.dataset.kfgraph);
     });
   });
+  syncInspectorOffClip(c);
   renderKfGraphsPanel();
+}
+
+/* Off the clip, keyframed fields show their edge value but must not be
+   editable — a write would land clamped on the clip's edge. Disables those
+   inputs and the ◆ buttons. Called on every inspector sync and after each
+   full renderInspector rebuild. */
+function syncInspectorOffClip(c) {
+  const off = !playheadOverClip(c);
+  const active = document.activeElement;
+  for (const input of els.inspector.querySelectorAll("[data-k]")) {
+    const k = input.dataset.k;
+    if (!ANIMATABLE.includes(k) || input === active) continue; // don't yank focus mid-edit
+    input.disabled = off && !!(c.keyframes?.[k]?.length);
+  }
+  for (const btn of els.inspector.querySelectorAll("[data-kf]")) {
+    btn.disabled = off;
+    btn.title = off ? "Move the playhead over the clip to add or remove keyframes"
+      : btn.classList.contains("on") ? "Remove keyframe at playhead" : "Set keyframe at playhead";
+  }
+}
+/* Patch inspector fields to the playhead (no innerHTML rebuild — keeps focus).
+   Runs every rAF tick but exits early unless time, selection, or keyed values
+   actually changed since the last sync. */
+function syncInspectorPlayhead() {
+  const root = els && els.inspector;
+  if (!root) return;
+  const c = getClip(state.selId);
+  if (!c) return;
+  const stamp = inspStampNow();
+  if (stamp === inspSyncStamp) return;
+  inspSyncStamp = stamp;
+  const p = propsAtPlayhead(c);
+  const active = document.activeElement;
+  for (const input of root.querySelectorAll("[data-k]")) {
+    const k = input.dataset.k;
+    if (!ANIMATABLE.includes(k)) continue;
+    if (active === input) continue;
+    const v = p[k];
+    if (typeof v !== "number" || isNaN(v)) continue;
+    const next = fmtInspNum(v, input.type === "range" ? input.step : undefined);
+    if (input.type === "range") {
+      // Thumb saturates at the slider's ends; the label keeps the true value,
+      // so an out-of-range keyframe doesn't churn the input every frame.
+      const mn = +input.min, mx = +input.max;
+      const shown = Number.isFinite(mn) && +next < mn ? input.min
+        : Number.isFinite(mx) && +next > mx ? input.max : next;
+      if (Math.abs(+input.value - +shown) > 1e-6) input.value = shown;
+    } else if (Math.abs(+input.value - +next) > 1e-6) input.value = next;
+    const valEl = root.querySelector(`[data-val="${k}"]`);
+    if (valEl) {
+      const text = next + (valEl.dataset.unit || "");
+      if (valEl.textContent !== text) valEl.textContent = text;
+    }
+  }
+  for (const btn of root.querySelectorAll("[data-kf]")) {
+    const k = btn.dataset.kf;
+    const n = (c.keyframes?.[k] && c.keyframes[k].length) || 0;
+    const on = !!kfAtPlayhead(c, k);
+    btn.classList.toggle("has", n > 0);
+    btn.classList.toggle("on", on);
+    const label = "◆" + (n || "");
+    if (btn.textContent !== label) btn.textContent = label;
+  }
+  syncInspectorOffClip(c); // after the class pass, so ◆ titles read the fresh "on" state
 }
 
 /* ── Keyframe graphs (program-monitor left gutter) ── */
@@ -4829,6 +5057,22 @@ function applyTransition(p, type, k, W, H, dir) {
       break;
   }
 }
+/* Translation the in/out transition envelopes add on top of the keyframed
+   props at timeline time t — probed through applyTransition itself, so it can
+   never disagree with the compositor. Canvas box drags write resting
+   (envelope-free) geometry, so displayed-space results must have this
+   subtracted back out. */
+function transOffsetAt(c, t) {
+  const p = { x: 0, y: 0, scale: 1, opacity: 1, volume: 1, rotation: 0, blur: 0, rgbSplit: 0 };
+  const local = t - c.start, W = els.preview.width, H = els.preview.height;
+  const tin = c.transitionIn, tout = c.transitionOut;
+  if (tin && tin.duration > 0 && local < tin.duration)
+    applyTransition(p, tin.type, 1 - EASE["ease-out"](clamp(local / tin.duration, 0, 1)), W, H, -1);
+  if (tout && tout.duration > 0 && local > c.duration - tout.duration)
+    applyTransition(p, tout.type,
+      EASE["ease-in"](clamp((local - (c.duration - tout.duration)) / tout.duration, 0, 1)), W, H, 1);
+  return { x: +p.x || 0, y: +p.y || 0 };
+}
 /* Rebase clip-local keyframe times by -offset, dropping ones outside [0, dur] */
 function shiftKF(kfs, offset, dur) {
   if (!kfs) return undefined;
@@ -5239,35 +5483,29 @@ els.preview.addEventListener("pointerdown", (e) => {
     const b = clipBounds(cur, evalProps(cur, state.time), W, H), lp = toLocal(pt, b);
     const hd = overlayHandles(b, W, H), grab = hd.hs * 1.8;
     if (Math.hypot(pt.x - hd.rotate.x, pt.y - hd.rotate.y) <= grab) {
-      canvasDrag = { mode: "rotate", id: cur.id, startRot: +cur.props.rotation || 0, startAng: Math.atan2(pt.y - b.cy, pt.x - b.cx) };
+      const ep = propsAtPlayhead(cur);
+      canvasDrag = { mode: "rotate", id: cur.id, startRot: +ep.rotation || 0, startAng: Math.atan2(pt.y - b.cy, pt.x - b.cx), cx: b.cx, cy: b.cy };
     } else if (hd.corners.some((h) => Math.abs(pt.x - h.x) <= grab && Math.abs(pt.y - h.y) <= grab)) {
       if (cur.kind === "text") {
-        ensureTextBox(cur);
-        // Recompute bounds after seeding the box; pin the opposite corner.
-        const b2 = clipBounds(cur, evalProps(cur, state.time), W, H);
-        const hd2 = overlayHandles(b2, W, H);
-        const ci = hd2.corners.findIndex((h) => Math.abs(pt.x - h.x) <= grab && Math.abs(pt.y - h.y) <= grab);
-        const signs = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
-        const [dsx, dsy] = signs[ci >= 0 ? ci : 0];
-        const cs = Math.cos(b2.rot), sn = Math.sin(b2.rot);
-        const ox = -dsx * b2.hw, oy = -dsy * b2.hh; // opposite corner in local space
         canvasDrag = {
-          mode: "box", id: cur.id, rot: b2.rot, dragSX: dsx, dragSY: dsy,
-          fix: { x: b2.cx + ox * cs - oy * sn, y: b2.cy + ox * sn + oy * cs },
-          aspect: Math.max(0.05, (b2.hw * 2) / Math.max(1e-6, b2.hh * 2)),
+          ...beginTextBoxDrag(cur, pt, W, H),
+          seedBox: !hasTextBox(cur.props),
+          startClient: { x: e.clientX, y: e.clientY },
         };
       } else {
-        canvasDrag = { mode: "scale", id: cur.id, startScale: +cur.props.scale || 1, startDist: Math.hypot(lp.x, lp.y) || 1 };
+        canvasDrag = { mode: "scale", id: cur.id, startScale: +(propsAtPlayhead(cur).scale) || 1, startDist: Math.hypot(lp.x, lp.y) || 1 };
       }
     } else if (Math.abs(lp.x) <= b.hw && Math.abs(lp.y) <= b.hh) {
-      canvasDrag = { mode: "move", id: cur.id, startX: +cur.props.x || 0, startY: +cur.props.y || 0, startPt: pt };
+      const ep = propsAtPlayhead(cur);
+      canvasDrag = { mode: "move", id: cur.id, startX: +ep.x || 0, startY: +ep.y || 0, startPt: pt };
     }
   }
   if (!canvasDrag) {
     const hit = pickClipAt(pt, W, H);
     if (!hit) return;
     if (hit.id !== state.selId) { selectClip(hit.id); renderInspector(); }
-    canvasDrag = { mode: "move", id: hit.id, startX: +hit.props.x || 0, startY: +hit.props.y || 0, startPt: pt };
+    const ep = propsAtPlayhead(hit);
+    canvasDrag = { mode: "move", id: hit.id, startX: +ep.x || 0, startY: +ep.y || 0, startPt: pt };
   }
   canvasDidMove = false;
   if (canvasDrag.mode === "move") els.preview.style.cursor = "move";
@@ -5309,13 +5547,31 @@ els.preview.addEventListener("pointermove", (e) => {
   if (!canvasDrag) { updateCanvasCursor(e); return; }
   const c = getClip(canvasDrag.id); if (!c) return;
   const W = els.preview.width, H = els.preview.height, pt = canvasPt(e);
-  if (!canvasDidMove) { pushUndo(); canvasDidMove = true; } // one undo per drag, only if it actually moves
+  // Hug-content titles: don't seed a box until the pointer actually moves
+  // (same ~3px deadzone as clip drags), so a click-release is a no-op.
+  if (canvasDrag.seedBox && !canvasDidMove) {
+    const s = canvasDrag.startClient;
+    if (s && Math.hypot(e.clientX - s.x, e.clientY - s.y) < 3) return;
+  }
+  if (!canvasDidMove) {
+    pushUndo(); // snapshot includes hug-content, before any box seed
+    canvasDidMove = true;
+    if (canvasDrag.seedBox) {
+      ensureTextBox(c);
+      Object.assign(canvasDrag, beginTextBoxDrag(c, pt, W, H), { seedBox: false });
+    }
+  }
   if (canvasDrag.mode === "move") {
-    c.props.x = Math.round(canvasDrag.startX + (pt.x - canvasDrag.startPt.x));
-    c.props.y = Math.round(canvasDrag.startY + (pt.y - canvasDrag.startPt.y));
+    setAnimProp(c, "x", Math.round(canvasDrag.startX + (pt.x - canvasDrag.startPt.x)));
+    setAnimProp(c, "y", Math.round(canvasDrag.startY + (pt.y - canvasDrag.startPt.y)));
   } else if (canvasDrag.mode === "box") {
     const aspect = canvasDrag.aspect || 1;
     const lockAR = e.shiftKey;
+    // The displayed box is the resting box plus the transition envelope; the
+    // writes below target the resting geometry, so strip the envelope's
+    // translation back out (boxed text ignores scale, and the center midpoint
+    // is rotation-invariant — translation is the only component that leaks).
+    const env = transOffsetAt(c, state.time);
     if (e.ctrlKey || e.metaKey) {
       // Ctrl/Cmd: resize from center (all corners move).
       const b = clipBounds(c, evalProps(c, state.time), W, H), lp = toLocal(pt, b);
@@ -5356,19 +5612,19 @@ els.preview.addEventListener("pointermove", (e) => {
       const c2 = Math.cos(rot), s2 = Math.sin(rot);
       const freeX = fix.x + ldx * c2 - ldy * s2;
       const freeY = fix.y + ldx * s2 + ldy * c2;
-      c.props.x = Math.round((fix.x + freeX) / 2 - W / 2);
-      c.props.y = Math.round((fix.y + freeY) / 2 - H / 2);
+      setAnimProp(c, "x", Math.round((fix.x + freeX) / 2 - W / 2 - env.x));
+      setAnimProp(c, "y", Math.round((fix.y + freeY) / 2 - H / 2 - env.y));
       c.props.boxW = +Math.abs(ldx).toFixed(1);
       c.props.boxH = +Math.abs(ldy).toFixed(1);
     }
   } else if (canvasDrag.mode === "scale") {
     const b = clipBounds(c, evalProps(c, state.time), W, H), lp = toLocal(pt, b);
-    c.props.scale = clamp(+(canvasDrag.startScale * (Math.hypot(lp.x, lp.y) / canvasDrag.startDist)).toFixed(3), 0.05, 12);
+    setAnimProp(c, "scale", clamp(+(canvasDrag.startScale * (Math.hypot(lp.x, lp.y) / canvasDrag.startDist)).toFixed(3), 0.05, 12));
   } else {
-    const cx = W / 2 + (+c.props.x || 0), cy = H / 2 + (+c.props.y || 0);
+    const cx = canvasDrag.cx, cy = canvasDrag.cy;
     let deg = canvasDrag.startRot + (Math.atan2(pt.y - cy, pt.x - cx) - canvasDrag.startAng) * 180 / Math.PI;
     if (e.shiftKey) deg = Math.round(deg / 15) * 15;
-    c.props.rotation = Math.round(deg);
+    setAnimProp(c, "rotation", Math.round(deg));
   }
 });
 function endCanvasDrag(e) {
@@ -5652,14 +5908,31 @@ function measureTextHalfSize(p) {
 /* First corner-drag on a hug-content title: create a box from current bounds. */
 function ensureTextBox(c) {
   if (c.kind !== "text" || hasTextBox(c.props)) return;
-  const half = measureTextHalfSize(c.props);
-  const sc = +c.props.scale || 1;
+  const p = propsAtPlayhead(c);
+  const half = measureTextHalfSize(p);
+  const sc = +p.scale || 1;
   if (Math.abs(sc - 1) > 0.01) {
-    c.props.fontSize = Math.round((+c.props.fontSize || 72) * sc);
-    c.props.scale = 1;
+    setAnimProp(c, "fontSize", Math.round((+p.fontSize || 72) * sc));
+    setAnimProp(c, "scale", 1);
   }
   c.props.boxW = Math.max(40, +(half.hw * 2).toFixed(1));
   c.props.boxH = Math.max(24, +(half.hh * 2).toFixed(1));
+}
+/* Pin the opposite corner for a boxed-text resize (call after any seed). */
+function beginTextBoxDrag(c, pt, W, H) {
+  const b2 = clipBounds(c, evalProps(c, state.time), W, H);
+  const hd2 = overlayHandles(b2, W, H);
+  const grab = hd2.hs * 1.8;
+  const ci = hd2.corners.findIndex((h) => Math.abs(pt.x - h.x) <= grab && Math.abs(pt.y - h.y) <= grab);
+  const signs = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+  const [dsx, dsy] = signs[ci >= 0 ? ci : 0];
+  const cs = Math.cos(b2.rot), sn = Math.sin(b2.rot);
+  const ox = -dsx * b2.hw, oy = -dsy * b2.hh;
+  return {
+    mode: "box", id: c.id, rot: b2.rot, dragSX: dsx, dragSY: dsy,
+    fix: { x: b2.cx + ox * cs - oy * sn, y: b2.cy + ox * sn + oy * cs },
+    aspect: Math.max(0.05, (b2.hw * 2) / Math.max(1e-6, b2.hh * 2)),
+  };
 }
 function drawText(c, p, local) {
   const useBox = hasTextBox(p);
@@ -5990,6 +6263,7 @@ function loop(ts) {
   drawRuler();
   updateSafeOverlay();
   updateKfGraphs();
+  syncInspectorPlayhead();
   updateMeterUI(dt);
   els.tcCurrent.textContent = fmt(state.time);
   els.tcTotal.textContent = fmt(dur);
