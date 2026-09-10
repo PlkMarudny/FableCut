@@ -73,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left nodes wired to live track buses). Panner attach degrades gracefully if
   `StereoPannerNode` is unavailable; inspector volume/pan changes refresh
   audio-hold voices.
+- **Export follows IN/OUT** — Fast, WebCodecs, and Realtime now export the
+  work area instead of always the whole timeline: no markers → full span; IN
+  only → IN to the end; OUT only → start to OUT; both → IN–OUT. Independent
+  of the Limit playback toggle. The Export dialog shows the range.
 
 ## [1.7.0] - 2026-08-25
 

@@ -2592,6 +2592,13 @@ function playRange() {
   const end = project.outPoint != null ? project.outPoint : Math.max(projDur(), 0);
   return { start, end: Math.max(end, start) };
 }
+/* Export window — same IN/OUT rules as playRange, always (Limit is playback-only). */
+function exportRange() {
+  const fps = projectFps();
+  const { start, end } = playRange();
+  const dur = Math.max(1 / fps, end - start);
+  return { start, end: start + dur, dur };
+}
 function playLimited() {
   return state.workAreaPlay && !state.exporting && hasWorkArea();
 }
@@ -6280,6 +6287,7 @@ function ensureFont(name) {
 
 /* ── Main loop ── */
 let lastTs = null;
+let exportWindow = null;
 function loop(ts) {
   if (lastTs == null) lastTs = ts;
   const dt = Math.min(0.1, (ts - lastTs) / 1000);
@@ -6289,7 +6297,8 @@ function loop(ts) {
   const dur = projDur();
   if (state.playing) {
     state.time += dt * playRate();
-    const end = playStopAt(dur);
+    let end = playStopAt(dur);
+    if (state.exporting && !state.rendering && exportWindow) end = exportWindow.end;
     if (state.time >= end) {
       state.time = end;
       if (state.exporting) finishExport(true);
@@ -6314,7 +6323,10 @@ function loop(ts) {
   els.tcCurrent.textContent = fmt(state.time);
   els.tcTotal.textContent = fmt(dur);
   if (state.exporting && !state.rendering) {
-    const pct = dur ? (state.time / dur) * 100 : 0;
+    const w = exportWindow;
+    const span = w ? w.dur : dur;
+    const t0 = w ? w.start : 0;
+    const pct = span ? ((state.time - t0) / span) * 100 : 0;
     els.exportProgress.style.width = pct.toFixed(1) + "%";
     els.exportTitle.textContent = `Exporting… ${pct.toFixed(0)}%`;
   }
@@ -6506,6 +6518,8 @@ async function openExportSetup() {
     warn.textContent = "";
     warn.classList.add("hidden");
   }
+  const rangeNote = $("exportRangeNote");
+  if (rangeNote) rangeNote.textContent = exportRangeNoteText();
   syncExportProfileVisibility();
   fetchEncodeProfiles().then(() => {
     populateExportProfileSelect();
@@ -6531,9 +6545,26 @@ function startChosenExport() {
   else startExport();
 }
 
+function exportRangeNoteText() {
+  const { start, dur } = exportRange();
+  const end = start + dur;
+  const inn = project.inPoint != null, out = project.outPoint != null;
+  if (!inn && !out) return `Full timeline · ${fmt(start)} → ${fmt(end)}`;
+  if (inn && out) return `IN–OUT · ${fmt(start)} → ${fmt(end)}`;
+  if (inn) return `IN to end · ${fmt(start)} → ${fmt(end)}`;
+  return `Start to OUT · ${fmt(start)} → ${fmt(end)}`;
+}
+
 /* ── Fast export ── */
 let renderCancelled = false;
 let exportAbort = null;
+function beginExportWindow() {
+  exportWindow = exportRange();
+  return exportWindow;
+}
+function endExportWindow() {
+  exportWindow = null;
+}
 let exportCropCanvas = null;
 let exportCropCtx = null;
 function canvasTaintError(e) {
@@ -6995,8 +7026,9 @@ function encodeWAV(buf) {
   }
   return new Blob([ab], { type: "audio/wav" });
 }
-/* Mix all audio-bearing clips offline, honoring volume keyframes + fades */
-async function renderAudioMix(dur) {
+/* Mix all audio-bearing clips offline, honoring volume keyframes + fades.
+   t0/t1 are timeline seconds (export window); mix time 0 is t0. */
+async function renderAudioMix(t0, t1) {
   const jobs = [];
   for (const c of project.clips) {
     if (c.kind !== "audio" && c.kind !== "video") continue;
@@ -7006,24 +7038,32 @@ async function renderAudioMix(dur) {
   }
   const sources = (await Promise.all(jobs)).filter(Boolean);
   if (!sources.length) return null;
+  const dur = Math.max(0, t1 - t0);
+  if (dur <= 0) return null;
   const sr = 48000;
   const off = new OfflineAudioContext(2, Math.ceil(dur * sr) + 1, sr);
+  let scheduled = false;
   for (const { c, buf } of sources) {
+    const a = Math.max(c.start, t0), b = Math.min(c.start + c.duration, t1);
+    if (b - a <= 1e-6) continue;
+    const mixWhen = Math.max(0, a - t0);
+    const mixDur = b - a;
+    const local0 = a - c.start;
     const src = off.createBufferSource(); src.buffer = buf;
     const g = off.createGain();
     const panner = off.createStereoPanner();
     g.connect(panner);
-    const n = Math.max(2, Math.ceil(c.duration * 30));
+    const n = Math.max(2, Math.ceil(mixDur * 30));
     const volCurve = new Float32Array(n);
     const panCurve = new Float32Array(n);
     for (let i = 0; i < n; i++) {
-      const ep = evalProps(c, c.start + (i / (n - 1)) * c.duration);
+      const ep = evalProps(c, a + (i / (n - 1)) * mixDur);
       volCurve[i] = clamp(ep.volume, 0, 4);
       panCurve[i] = clipPan(ep.pan);
     }
-    g.gain.setValueCurveAtTime(volCurve, Math.max(0, c.start), Math.max(0.01, c.duration));
+    g.gain.setValueCurveAtTime(volCurve, mixWhen, Math.max(0.01, mixDur));
     try {
-      panner.pan.setValueCurveAtTime(panCurve, Math.max(0, c.start), Math.max(0.01, c.duration));
+      panner.pan.setValueCurveAtTime(panCurve, mixWhen, Math.max(0.01, mixDur));
     } catch {
       panner.pan.value = panCurve[0] ?? 0;
     }
@@ -7035,16 +7075,18 @@ async function renderAudioMix(dur) {
     if (hasSpeedRamp(c)) {
       const rc = new Float32Array(n);
       for (let i = 0; i < n; i++)
-        rc[i] = clamp(kfChannel(c, "speed", (i / (n - 1)) * c.duration, clipSpeed(c)), 0.1, 8);
-      src.playbackRate.setValueCurveAtTime(rc, Math.max(0, c.start), Math.max(0.01, c.duration));
-      src.start(Math.max(0, c.start), Math.max(0, c.in));
-      src.stop(Math.max(0, c.start) + c.duration);
+        rc[i] = clamp(kfChannel(c, "speed", local0 + (i / (n - 1)) * mixDur, clipSpeed(c)), 0.1, 8);
+      src.playbackRate.setValueCurveAtTime(rc, mixWhen, Math.max(0.01, mixDur));
+      src.start(mixWhen, Math.max(0, mediaTimeAt(c, a)));
+      src.stop(mixWhen + mixDur);
     } else {
       const sp = clipSpeed(c);
       src.playbackRate.value = sp;
-      src.start(Math.max(0, c.start), Math.max(0, c.in), c.duration * sp);
+      src.start(mixWhen, Math.max(0, c.in + local0 * sp), mixDur * sp);
     }
+    scheduled = true;
   }
+  if (!scheduled) return null;
   return encodeWAV(await off.startRendering());
 }
 /* Frame-exact asset prep for the fast exporter: rasterize the SVG frame for
@@ -7069,14 +7111,15 @@ async function fastExport() {
   els.exportProgress.style.width = "0%";
   els.exportNote.textContent = "Rendering frames → ffmpeg. You can switch tabs; export continues.";
   restoreExportVideoState();
-  const fps = projectFps(), dur = Math.max(1 / fps, projDur());
+  const { start: t0, end: t1, dur } = beginExportWindow();
+  const fps = projectFps();
   const frames = Math.max(1, Math.round(dur * fps));
   let sessId = null;
   let uploadError = null;
   const setError = (err) => { if (!uploadError) uploadError = err; };
   try {
     els.exportTitle.textContent = "Mixing audio…";
-    const wav = await renderAudioMix(dur);
+    const wav = await renderAudioMix(t0, t1);
     if (renderCancelled) throw new Error("cancelled");
     const profileId = els.exportProfileSel?.value || effectiveEncodeProfileId();
     const jpegQ = exportProfileMeta(profileId).jpegQuality ?? 0.95;
@@ -7123,7 +7166,7 @@ async function fastExport() {
       if (uploadError) throw uploadError;
       await waitPixels(3);
       await up.waitBackpressure(2);
-      const t = f / fps;
+      const t = t0 + f / fps;
       state.time = t;
       await seekVideosTo(t);
       await prepareFrameAssets(t);
@@ -7178,6 +7221,7 @@ async function fastExport() {
   } finally {
     exportAbort = null;
     restoreExportVideoState();
+    endExportWindow();
     state.exporting = false; state.rendering = false;
     els.exportOverlay.classList.add("hidden");
     els.exportNote.textContent = "Rendering your sequence in real time. Keep this tab focused.";
@@ -7227,7 +7271,8 @@ async function webCodecsExport() {
   els.exportProgress.style.width = "0%";
   els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues.";
   restoreExportVideoState();
-  const fps = projectFps(), dur = Math.max(1 / fps, projDur());
+  const { start: t0, end: t1, dur } = beginExportWindow();
+  const fps = projectFps();
   const frames = Math.max(1, Math.round(dur * fps));
   const keyEvery = Math.max(1, Math.round(fps * 2));
   let sessId = null;
@@ -7237,7 +7282,7 @@ async function webCodecsExport() {
   let up = null;
   try {
     els.exportTitle.textContent = "Mixing audio…";
-    const wav = await renderAudioMix(dur);
+    const wav = await renderAudioMix(t0, t1);
     if (renderCancelled) throw new Error("cancelled");
 
     const begin = await fetch("/api/export/begin", {
@@ -7294,7 +7339,7 @@ async function webCodecsExport() {
       if (uploadError) throw uploadError;
       await up.waitBackpressure(2);
       await waitEncodeQueue(encoder, 2, { signal, getError: () => uploadError });
-      const t = f / fps;
+      const t = t0 + f / fps;
       state.time = t;
       await seekVideosTo(t);
       await prepareFrameAssets(t);
@@ -7342,6 +7387,7 @@ async function webCodecsExport() {
   } finally {
     exportAbort = null;
     restoreExportVideoState();
+    endExportWindow();
     state.exporting = false; state.rendering = false;
     els.exportOverlay.classList.add("hidden");
     els.exportNote.textContent = "Rendering your sequence in real time. Keep this tab focused.";
@@ -7366,7 +7412,8 @@ async function startExport() {
   ensureAudio();
   await runtime.audio.ctx.resume();
   pause();
-  state.time = 0;
+  const { start } = beginExportWindow();
+  state.time = start;
   seekMediaWhilePaused();
   await new Promise((r) => setTimeout(r, 350)); // let first frames decode
   const stream = els.preview.captureStream(projectFps());
@@ -7396,6 +7443,7 @@ async function startExport() {
 function finishExport(keep) {
   if (!state.exporting) return;
   state.exporting = false;
+  endExportWindow();
   if (runtime.pendingSync) syncFromServer();
   recDiscard = !keep;
   state.playing = false;

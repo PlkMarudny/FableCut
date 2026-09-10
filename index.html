@@ -191,6 +191,7 @@
 <div class="overlay hidden" id="exportSetup">
   <div class="dialog">
     <h2>Export</h2>
+    <p class="dim export-range-note" id="exportRangeNote"></p>
     <label class="engine-opt">
       <input type="radio" name="engine" id="engineFast">
       <span><b>Fast (ffmpeg)</b><br><span class="dim" id="engineFastNote">Frame-accurate ffmpeg encode. Keeps rendering if you switch tabs.</span></span>
@@ -293,7 +294,7 @@
       </table>
       <table class="keys">
         <tr><td><kbd>M</kbd></td><td>Add / remove marker at playhead</td></tr>
-        <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>Set IN / OUT work-area marker</td></tr>
+        <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>Set IN / OUT work-area marker (also bounds Export)</td></tr>
         <tr><td><kbd>⇧</kbd>+<kbd>I</kbd> / <kbd>⇧</kbd>+<kbd>O</kbd></td><td>Clear IN / OUT marker</td></tr>
         <tr><td><kbd>T</kbd></td><td>Split clips at IN/OUT markers</td></tr>
         <tr><td><kbd>⇧</kbd>+<kbd>T</kbd></td><td>Trim clips to IN/OUT (remove heads/tails)</td></tr>
