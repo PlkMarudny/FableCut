@@ -136,7 +136,10 @@ same time.
   keyframe time (tooltip lists channels; a count badge when several share a
   time). <kbd>Ctrl/Cmd+←</kbd> / <kbd>Ctrl/Cmd+→</kbd> jumps the playhead to
   the previous / next keyframe (selected clips first, else clips under the
-  playhead)
+  playhead). Inspector fields show the interpolated value at the playhead;
+  changing one updates the keyframe you’re on, or inserts one if that channel
+  is already keyed. The ◆ button adds a keyframe at the playhead, or removes
+  the one you’re parked on; ✕ clears the whole channel
 - **Keyframe graphs** — toggle a property’s curve in the inspector to show an
   interpolated value graph beside the program monitor; click the graph to seek
 - **Speed ramps** — keyframe `speed` and the engine time-remaps video *and* the
