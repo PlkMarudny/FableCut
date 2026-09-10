@@ -501,6 +501,7 @@ const els = {
   binList: $("binList"), binEmpty: $("binEmpty"), fileInput: $("fileInput"),
   binTabs: $("binTabs"), libList: $("libList"), toast: $("toast"),
   preview: $("preview"), tcCurrent: $("tcCurrent"), tcTotal: $("tcTotal"),
+  tcIo: $("tcIo"), tcIn: $("tcIn"), tcOut: $("tcOut"), tcDur: $("tcDur"),
   btnPlay: $("btnPlay"), inspector: $("inspector"),
   trackHeaders: $("trackHeaders"), timelineScroll: $("timelineScroll"),
   tracksContent: $("tracksContent"), tracks: $("tracks"), playhead: $("playhead"),
@@ -2617,6 +2618,34 @@ function gotoHome() {
 }
 function gotoEnd() {
   setTime(playLimited() && project.outPoint != null ? project.outPoint : projDur());
+}
+function setTcField(el, t) {
+  if (!el) return;
+  if (t == null) {
+    el.textContent = "00:00:00";
+    el.classList.add("unset");
+  } else {
+    el.textContent = fmt(t);
+    el.classList.remove("unset");
+  }
+}
+function updateTimecode(dur) {
+  const d = Math.max(dur ?? projDur(), 0);
+  els.tcCurrent.textContent = fmt(state.time);
+  els.tcTotal.textContent = fmt(d);
+  const has = hasWorkArea();
+  if (els.tcIo) {
+    els.tcIo.classList.toggle("idle", !has);
+    els.tcIo.setAttribute("aria-hidden", has ? "false" : "true");
+  }
+  setTcField(els.tcIn, project.inPoint);
+  setTcField(els.tcOut, project.outPoint);
+  if (has) {
+    const { start, end } = playRange();
+    setTcField(els.tcDur, Math.max(0, end - start));
+  } else {
+    setTcField(els.tcDur, null);
+  }
 }
 function syncTrimIOButton() {
   const has = hasWorkArea();
@@ -6320,8 +6349,7 @@ function loop(ts) {
   updateKfGraphs();
   syncInspectorPlayhead();
   updateMeterUI(dt);
-  els.tcCurrent.textContent = fmt(state.time);
-  els.tcTotal.textContent = fmt(dur);
+  updateTimecode(dur);
   if (state.exporting && !state.rendering) {
     const w = exportWindow;
     const span = w ? w.dur : dur;
