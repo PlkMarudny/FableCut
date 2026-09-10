@@ -633,6 +633,44 @@ function setAnimProp(c, k, v) {
   arr.sort((a, b) => a.t - b.t);
   state.dirtyTimeline = true;
 }
+/* Wipe a property: factory default + delete that channel's keyframes. */
+function resetPropChannel(c, k) {
+  if (!c || !k) return;
+  if (k === "transIn" || k === "transOut") {
+    c[k === "transIn" ? "transitionIn" : "transitionOut"] = undefined;
+    state.dirtyTimeline = true;
+    return;
+  }
+  if (!Object.hasOwn(DEFAULT_PROPS, k)) return;
+  c.props[k] = DEFAULT_PROPS[k];
+  if (c.keyframes?.[k]) {
+    delete c.keyframes[k];
+    if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
+    state.dirtyTimeline = true;
+  }
+  if (k === "text" || k === "font") state.dirtyTimeline = true;
+  if (k === "font") ensureFont(String(DEFAULT_PROPS.font));
+}
+/* Playhead-local reset: remove the keyframe under the playhead, else set the
+   value at the playhead to the property default (auto-keys if already keyed). */
+function resetPropAtPlayhead(c, k) {
+  if (!c || !k) return;
+  if (k === "transIn" || k === "transOut") {
+    resetPropChannel(c, k);
+    return;
+  }
+  if (!Object.hasOwn(DEFAULT_PROPS, k)) return;
+  if (ANIMATABLE.includes(k) && kfAtPlayhead(c, k)) {
+    toggleKfAtPlayhead(c, k);
+    state.dirtyTimeline = true;
+    return;
+  }
+  const def = DEFAULT_PROPS[k];
+  if (ANIMATABLE.includes(k) && c.keyframes?.[k]?.length) setAnimProp(c, k, def);
+  else c.props[k] = def;
+  if (k === "text" || k === "font") state.dirtyTimeline = true;
+  if (k === "font") ensureFont(String(def));
+}
 /* ◆ : add a keyframe at the playhead, or remove the one already there. */
 function toggleKfAtPlayhead(c, k) {
   if (!c || !ANIMATABLE.includes(k)) return;
@@ -3479,7 +3517,8 @@ function renderInspector(lite) {
   };
   /* Label carries two affordances that key off different click modifiers:
      plain click toggles the keyframe graph (animatable props), Ctrl/Cmd-click
-     resets the prop(s). `reset` overrides which keys reset; defaults to k. */
+     resets the whole channel, Shift-click resets at the playhead / removes
+     that keyframe. `reset` overrides which keys reset; defaults to k. */
   const propLabel = (label, k = "", reset) => {
     const keys = reset !== undefined ? reset : k;
     const list = (Array.isArray(keys) ? keys : String(keys || "").split(",")).map((s) => s.trim()).filter(Boolean);
@@ -3493,8 +3532,10 @@ function renderInspector(lite) {
       canReset ? "insp-reset" : "",
     ].filter(Boolean).join(" ");
     const attrs = (isGraph ? ` data-kfgraph="${k}"` : "") + (canReset ? ` data-reset="${list.join(",")}"` : "");
-    const title = isGraph && canReset ? "Click: keyframe graph · Ctrl-click: reset"
-      : isGraph ? "Show / hide keyframe graph" : "Ctrl-click to reset";
+    const title = isGraph && canReset
+      ? "Click: keyframe graph · Ctrl-click: reset channel · Shift-click: reset at playhead / remove keyframe"
+      : isGraph ? "Show / hide keyframe graph"
+        : "Ctrl-click: reset channel · Shift-click: reset at playhead / remove keyframe";
     return `<label class="${cls}"${attrs} title="${title}">${label}</label>`;
   };
   const row = (label, inner, k = "", reset) =>
@@ -3584,7 +3625,7 @@ function renderInspector(lite) {
   }
   const tsel = (label, key, tr) => {
     const active = state.transFocus === (key === "transIn" ? "in" : "out");
-    return `<div class="insp-row${active ? " trans-active" : ""}"><label class="insp-reset" data-reset="${key}" title="Ctrl-click to reset">${label}</label>
+    return `<div class="insp-row${active ? " trans-active" : ""}"><label class="insp-reset" data-reset="${key}" title="Ctrl-click: reset · Shift-click: reset">${label}</label>
       <span class="insp-ctrls"><select data-k="${key}">${TRANSITIONS.map((x) => `<option ${x === (tr?.type || "none") ? "selected" : ""}>${x}</option>`).join("")}</select>
        <input type="number" class="insp-dur" data-k="${key}Dur" step="0.1" min="0.1" value="${tr?.duration ?? 1}"></span></div>`;
   };
@@ -3649,27 +3690,16 @@ function renderInspector(lite) {
   els.inspector.innerHTML = html;
   els.inspector.querySelectorAll("label.insp-reset[data-reset]").forEach((lab) => {
     lab.addEventListener("click", (e) => {
-      if (!(e.ctrlKey || e.metaKey)) return;
+      const all = e.ctrlKey || e.metaKey;
+      const local = e.shiftKey && !all;
+      if (!all && !local) return;
       e.preventDefault();
       const keys = lab.dataset.reset.split(",").map((s) => s.trim()).filter(Boolean);
       if (!keys.length) return;
       pushUndo();
-      for (const k of keys) {
-        if (k === "transIn" || k === "transOut") {
-          c[k === "transIn" ? "transitionIn" : "transitionOut"] = undefined;
-          state.dirtyTimeline = true;
-          continue;
-        }
-        if (!Object.hasOwn(DEFAULT_PROPS, k)) continue;
-        c.props[k] = DEFAULT_PROPS[k];
-        if (c.keyframes?.[k]) {
-          delete c.keyframes[k];
-          if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
-          state.dirtyTimeline = true;
-        }
-        if (k === "text" || k === "font") state.dirtyTimeline = true;
-        if (k === "font") ensureFont(String(DEFAULT_PROPS.font));
-      }
+      for (const k of keys) (all ? resetPropChannel : resetPropAtPlayhead)(c, k);
+      if (state.audioHold && keys.some((k) => k === "volume" || k === "pan"))
+        scheduleAudioHoldRefresh();
       scheduleSave();
       renderInspector();
     });
@@ -3774,7 +3804,7 @@ function renderInspector(lite) {
   }
   els.inspector.querySelectorAll("[data-kfgraph]").forEach((lab) => {
     lab.addEventListener("click", (e) => {
-      if (e.ctrlKey || e.metaKey) return; // Ctrl/Cmd-click is reserved for prop reset
+      if (e.ctrlKey || e.metaKey || e.shiftKey) return; // modifiers reserved for prop reset
       e.preventDefault();
       toggleKfGraph(lab.dataset.kfgraph);
     });
