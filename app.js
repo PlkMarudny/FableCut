@@ -1108,6 +1108,8 @@ function applyProject(data) {
   renderBin(); renderInspector();
   updateWorkArea();
   syncTrimIOButton();
+  syncExportRangeSelect();
+  syncExportRangeUi();
   syncAllTrackDisabledUI();
 }
 function scheduleSave() {
@@ -6596,13 +6598,21 @@ function startChosenExport() {
   else startExport();
 }
 
-function fillExportRangeSelect() {
+/* Keep Range's IN–OUT option in sync with marker presence without clobbering
+   a deliberate "entire" choice. Invalid "in-out" (no work area) snaps to entire
+   so the displayed value matches exportRangeMode(). */
+function syncExportRangeSelect() {
   const sel = $("exportRangeSel");
   if (!sel) return;
   const opt = sel.querySelector('option[value="in-out"]');
   const has = hasWorkArea();
   if (opt) opt.disabled = !has;
-  sel.value = has ? "in-out" : "entire";
+  if (!has && sel.value === "in-out") sel.value = "entire";
+}
+function fillExportRangeSelect() {
+  syncExportRangeSelect();
+  const sel = $("exportRangeSel");
+  if (sel) sel.value = hasWorkArea() ? "in-out" : "entire";
 }
 function exportRangeNoteText() {
   const mode = exportRangeMode();
