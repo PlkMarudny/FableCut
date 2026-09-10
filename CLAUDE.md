@@ -469,13 +469,14 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 - Fast / WebCodecs export (browser compositor → server ffmpeg):
   `GET /api/export/ffmpeg` → `{available}` · `GET /api/export/profiles[?detail=1]` →
   `{default, profiles, issues}` · `POST /api/export/begin`
-  `{fps,name,mode?,profile?,hasAudio?}` → `{id,mode,profile?,label,summary}`
+  `{fps,name,mode?,profile?,hasAudio?,pixelFormat?,width?,height?}` → `{id,mode,profile?,label,summary}`
   (`fps` is required — pass `project.fps`, no server-side default;
   `mode` is `"jpeg"` (default, Fast) or `"annexb"` (WebCodecs H.264 elementary stream);
-  jpeg **400** if `profile` is not a defined id, or if ffmpeg rejects its args in the dry run)
-  · `POST /api/export/frame?id=` (JPEG body for jpeg mode; Annex-B bytes for
-  annexb — one POST may carry several concatenated JPEGs or AUs. Must be after audio;
-  ffmpeg is spawned on the first frame in both modes)
+  jpeg **400** if `profile` is not a defined id, or if ffmpeg rejects its args in the dry run;
+  optional `pixelFormat:"rgba"` plus `width`/`height` pipes raw canvas frames instead of JPEG)
+  · `POST /api/export/frame?id=` (JPEG body for jpeg mode; raw RGBA if `begin`
+  used `pixelFormat:"rgba"`; Annex-B for annexb — one POST may concatenate frames
+  or AUs. Must be after audio; ffmpeg is spawned on the first frame in both modes)
   · `POST /api/export/audio?id=` (WAV body — must be sent before the first frame)
   · `POST /api/export/end?id=[&discard=1]` → `{src}` under `/exports/`
 
@@ -656,7 +657,7 @@ Export is **one ffmpeg pass**. The server owns the input side and the output pat
 `args` is everything in between (plus JPEG color conversion derived from `color`):
 
 ```
-ffmpeg -y -f image2pipe -framerate <fps> -i -  [-i audio.wav]  <jpeg-color> <args…>  exports/<name><extension>
+ffmpeg -y -f image2pipe -framerate <fps> -i - [-i audio.wav] <jpeg-color> <args…> exports/<name><extension>
 ```
 
 - **There is no allow-list.** Any codec, filter, container or flag your local ffmpeg
@@ -678,6 +679,8 @@ ffmpeg -y -f image2pipe -framerate <fps> -i -  [-i audio.wav]  <jpeg-color> <arg
   in MP4 and pixel-format choices are all yours to write.
 - Frames arrive as **JPEG (4:2:0)**, so `yuv422p`/`yuv444p` cannot recover chroma the
   source never had; raise `jpegQuality` before reaching for a wider pixel format.
+  Optional `pixelFormat:"rgba"` on `/api/export/begin` pipes uncompressed canvas
+  frames instead (`-f rawvideo`) when a caller wants full chroma.
 - The audio mix is only present when the timeline has audio; with no audio there is a
   single input, so avoid hardcoded `-map 1:a`.
 

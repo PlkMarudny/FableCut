@@ -9,12 +9,14 @@
    nothing but a smaller set of usable formats. Typos are caught by dryRunProfile
    against the real ffmpeg build instead, which also knows which encoders it has.
 
-   Export is ONE ffmpeg pass; this module owns the input side (JPEG color
-   conversion + tags from profile.color) and the output path; the profile owns
-   everything in between:
+   Export is ONE ffmpeg pass; this module owns the input side (JPEG image2pipe
+   by default, or canvas RGBA when pixelFormat is "rgba") plus color conversion
+   and tags from profile.color; the profile owns everything in between:
 
-     ffmpeg -y -thread_queue_size 64 -f image2pipe -framerate <fps> -c:v mjpeg
-            -i - [-i audio.wav] <jpeg-color vf+tags> <profile args…> <out><extension>
+     ffmpeg -y -thread_queue_size 64 -f image2pipe -framerate <fps>
+            -c:v mjpeg -i - [-i audio.wav]
+            <jpeg-color vf+tags> <profile args…> <out><extension>
+   `pixelFormat: "rgba"` switches stdin to `-f rawvideo -pix_fmt rgba`.
    ═══════════════════════════════════════════════════════════════════════════ */
 "use strict";
 const fs = require("fs");
@@ -182,13 +184,14 @@ function listProfilesPublic(detail) {
   return out;
 }
 
-/* JPEG frames from the browser are full-range BT.601 (JFIF). Convert them to
-   the profile's output matrix/range and tag the stream, otherwise x264 emits
-   bt470bg/pc/unknown and players do the wrong YUV→RGB conversion — darker than
-   preview. Independent of -pix_fmt (420 vs 422/10-bit). */
-function jpegColorVf(color) {
+/* Canvas RGBA is full-range BT.709-ish (sRGB). JPEG/JFIF is full-range BT.601.
+   Convert to the profile's output matrix/range and tag the stream, otherwise
+   x264 emits bt470bg/pc/unknown and players do the wrong YUV→RGB conversion.
+   Independent of -pix_fmt (420 vs 422/10-bit). */
+function inputColorVf(color, inMatrix) {
   const c = color || DEFAULT_COLOR;
-  return `scale=in_range=full:in_color_matrix=bt601:out_range=${c.range}:out_color_matrix=${c.matrix}`;
+  const matrix = inMatrix === "bt601" ? "bt601" : "bt709";
+  return `scale=in_range=full:in_color_matrix=${matrix}:out_range=${c.range}:out_color_matrix=${c.matrix}`;
 }
 function jpegColorTags(color) {
   const c = color || DEFAULT_COLOR;
@@ -200,9 +203,9 @@ function jpegColorTags(color) {
   ];
 }
 
-function withJpegColor(profile) {
+function withInputColor(profile, inMatrix) {
   const color = profile.color || DEFAULT_COLOR;
-  const vf = jpegColorVf(color);
+  const vf = inputColorVf(color, inMatrix);
   const args = stripColorArgs((profile.args || []).slice());
   const vfAt = args.indexOf("-vf");
   if (vfAt >= 0 && args[vfAt + 1] != null) args[vfAt + 1] = `${vf},${args[vfAt + 1]}`;
@@ -211,22 +214,28 @@ function withJpegColor(profile) {
   return args;
 }
 
-/* The single export pass. Frames arrive on stdin as a JPEG stream; the audio
-   mix (when the timeline has any) is already on disk by the time we spawn. */
-function buildExportArgs(profile, { fps, wavPath, outPath }) {
-  // -hide_banner so a failure's stderr tail is the actual error, not the build config
-  // thread_queue_size: batched JPEG POSTs can dump many packets at once; the
-  // default queue of 8 blocks stdin (and the HTTP handler) until x264 catches up.
-  const args = [
-    "-y", "-hide_banner",
-    "-thread_queue_size", "64",
-    // -c:v mjpeg on the INPUT so ffmpeg does not have to probe stdin. image2pipe
-    // alone fails the probe when the first write and stdin EOF arrive together
-    // (short exports / batched POSTs); the later profile -c:v is the encoder.
-    "-f", "image2pipe", "-framerate", String(fps), "-c:v", "mjpeg", "-i", "-",
-  ];
+/* The single export pass. Fast export sends JPEG image2pipe by default;
+   `pixelFormat: "rgba"` is uncompressed canvas frames. Audio mix is on disk
+   before spawn. */
+function buildExportArgs(profile, { fps, wavPath, outPath, pixelFormat, width, height } = {}) {
+  const args = ["-y", "-hide_banner"];
+  const raw = pixelFormat === "rgba";
+  if (raw) {
+    const w = Math.max(2, width | 0), h = Math.max(2, height | 0);
+    // Small queue: each raw frame is width×height×4 bytes (1080p ≈ 8 MiB).
+    args.push(
+      "-thread_queue_size", "8",
+      "-f", "rawvideo", "-pix_fmt", "rgba",
+      "-s", `${w}x${h}`, "-framerate", String(fps), "-i", "-",
+    );
+  } else {
+    args.push(
+      "-thread_queue_size", "64",
+      "-f", "image2pipe", "-framerate", String(fps), "-c:v", "mjpeg", "-i", "-",
+    );
+  }
   if (wavPath) args.push("-i", wavPath);
-  args.push(...withJpegColor(profile), outPath);
+  args.push(...withInputColor(profile, raw ? "bt709" : "bt601"), outPath);
   return args;
 }
 
@@ -242,7 +251,7 @@ function dryRunProfile(profile, { fps = 30, hasAudio = true } = {}) {
   const args = ["-y", "-hide_banner", "-f", "lavfi",
     "-i", `color=c=black:s=64x64:r=${fps}:d=0.1`];
   if (hasAudio) args.push("-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo");
-  args.push("-t", "0.1", ...withJpegColor(profile), out);
+  args.push("-t", "0.1", ...withInputColor(profile, "bt709"), out);
   return new Promise((resolve) => {
     let stderr = "";
     let settled = false;

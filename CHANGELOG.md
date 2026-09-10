@@ -43,10 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Fast export no longer waits for each JPEG HTTP POST before drawing the next
-  frame. Uploads are pipelined and batched (same pattern as WebCodecs), and
-  JPEG encode of frame *n* overlaps seek/draw of frame *n+1*. ffmpeg's
-  image2pipe input is declared as mjpeg (no stdin probe) and given a larger
-  packet queue so a batched POST does not stall or fail to open.
+  frame. The compositor snapshots via `transferToImageBitmap` and keeps going;
+  JPEG encode runs in workers and uploads overlap in batches. Piping uncompressed
+  RGBA over HTTP was slower (1080p ≈ 8 MiB/frame); the UI is back on JPEG
+  image2pipe. `pixelFormat: "rgba"` remains on `/api/export/begin` for callers
+  that want raw frames.
 - `POST /api/export/begin` now **requires** `fps` (pass `project.fps`) instead
   of defaulting to 30, and takes `mode: "jpeg" | "annexb"`. Callers that relied
   on the old default must send the value; a missing or non-numeric `fps` is a

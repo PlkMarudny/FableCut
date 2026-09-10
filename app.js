@@ -6197,7 +6197,7 @@ async function openExportSetup() {
   }
   $("engineFastNote").textContent = fastOk
     ? (ef ? "Exports the " + ef.w + "×" + ef.h + " delivery frame (cropped). Keeps rendering if you switch tabs."
-      : "Frame-accurate. Server encodes H.264 from JPEG frames. Keeps going if you switch tabs.")
+      : "Frame-accurate. Server encodes from JPEG frames. Keeps going if you switch tabs.")
     : (ef
       ? "Needs the server + ffmpeg on PATH to export a cropped delivery frame."
       : "Needs the server + ffmpeg on PATH.");
@@ -6259,28 +6259,114 @@ let renderCancelled = false;
 let exportAbort = null;
 let exportCropCanvas = null;
 let exportCropCtx = null;
-function canvasToJpeg(canvas, quality) {
-  return new Promise((res, rej) => {
-    const fail = (e) => {
-      const tainted = e && (e.name === "SecurityError" || /taint/i.test(String(e.message || e)));
-      rej(tainted
-        ? new Error("Tainted canvas — a clip is from another origin (not /media or /library) without CORS, or an SVG could not be rasterized cleanly. Import the file into the project, or serve it with Access-Control-Allow-Origin.")
-        : (e || new Error("frame encode failed")));
-    };
-    try {
-      canvas.toBlob((blob) => blob ? res(blob) : fail(new Error("frame encode failed")), "image/jpeg", quality);
-    } catch (e) { fail(e); }
-  });
+function canvasTaintError(e) {
+  const tainted = e && (e.name === "SecurityError" || /taint/i.test(String(e.message || e)));
+  return tainted
+    ? new Error("Tainted canvas — a clip is from another origin (not /media or /library) without CORS, or an SVG could not be rasterized cleanly. Import the file into the project, or serve it with Access-Control-Allow-Origin.")
+    : (e || new Error("frame encode failed"));
 }
-function previewToExportBlob(quality = 0.95) {
+function exportSourceCanvas() {
   const ef = getExportFrame();
-  if (!ef) return canvasToJpeg(els.preview, quality);
+  if (!ef) return els.preview;
   if (!exportCropCanvas) exportCropCanvas = document.createElement("canvas");
   if (exportCropCanvas.width !== ef.w) exportCropCanvas.width = ef.w;
   if (exportCropCanvas.height !== ef.h) exportCropCanvas.height = ef.h;
   if (!exportCropCtx) exportCropCtx = exportCropCanvas.getContext("2d", { alpha: false });
   exportCropCtx.drawImage(els.preview, ef.x, ef.y, ef.w, ef.h, 0, 0, ef.w, ef.h);
-  return canvasToJpeg(exportCropCanvas, quality);
+  return exportCropCanvas;
+}
+let exportSnapOff = null, exportSnapCtx = null;
+/** Synchronous snapshot so the compositor can draw the next frame immediately.
+ *  JPEG encode runs off-thread from the ImageBitmap. */
+function snapshotExportFrame() {
+  const src = exportSourceCanvas();
+  try {
+    if (typeof OffscreenCanvas === "function") {
+      if (!exportSnapOff || exportSnapOff.width !== src.width || exportSnapOff.height !== src.height) {
+        exportSnapOff = new OffscreenCanvas(src.width, src.height);
+        exportSnapCtx = exportSnapOff.getContext("2d", { alpha: false });
+      }
+      exportSnapCtx.drawImage(src, 0, 0);
+      if (typeof exportSnapOff.transferToImageBitmap === "function")
+        return { kind: "bmp", bmp: exportSnapOff.transferToImageBitmap() };
+    }
+    const img = src.getContext("2d").getImageData(0, 0, src.width, src.height);
+    return { kind: "rgba", data: img.data, w: src.width, h: src.height };
+  } catch (e) { throw canvasTaintError(e); }
+}
+const JPEG_WORKER_SRC = `"use strict";
+self.onmessage = async (e) => {
+  const { id, bmp, quality } = e.data;
+  try {
+    const c = new OffscreenCanvas(bmp.width, bmp.height);
+    const ctx = c.getContext("2d", { alpha: false });
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+    const blob = await c.convertToBlob({ type: "image/jpeg", quality: quality || 0.92 });
+    const buf = await blob.arrayBuffer();
+    self.postMessage({ id, buf }, [buf]);
+  } catch (err) {
+    try { bmp.close(); } catch {}
+    self.postMessage({ id, error: String(err && err.message || err) });
+  }
+};
+`;
+function createJpegWorkers(n) {
+  if (typeof Worker !== "function" || typeof OffscreenCanvas !== "function") return null;
+  let url;
+  try { url = URL.createObjectURL(new Blob([JPEG_WORKER_SRC], { type: "text/javascript" })); }
+  catch { return null; }
+  const workers = [];
+  try {
+    for (let i = 0; i < n; i++) workers.push(new Worker(url));
+  } catch {
+    for (const w of workers) try { w.terminate(); } catch { }
+    URL.revokeObjectURL(url);
+    return null;
+  }
+  URL.revokeObjectURL(url);
+  const pending = new Map();
+  let nextId = 0, rr = 0;
+  for (const w of workers) {
+    w.onmessage = (e) => {
+      const rec = pending.get(e.data.id);
+      if (!rec) return;
+      pending.delete(e.data.id);
+      if (e.data.error) rec.reject(new Error(e.data.error));
+      else rec.resolve(e.data.buf);
+    };
+    w.onerror = () => {};
+  }
+  return {
+    encode(bmp, quality) {
+      const id = nextId++;
+      const w = workers[rr++ % workers.length];
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        try { w.postMessage({ id, bmp, quality }, [bmp]); }
+        catch (e) { pending.delete(id); reject(e); }
+      });
+    },
+    terminate() {
+      for (const rec of pending.values()) rec.reject(new Error("cancelled"));
+      pending.clear();
+      for (const w of workers) try { w.terminate(); } catch { }
+    },
+  };
+}
+function jpegFromBitmap(bmp, quality) {
+  const c = document.createElement("canvas");
+  c.width = bmp.width; c.height = bmp.height;
+  c.getContext("2d", { alpha: false }).drawImage(bmp, 0, 0);
+  try { bmp.close(); } catch { }
+  return new Promise((res, rej) => {
+    try {
+      c.toBlob((b) => {
+        if (!b) return rej(new Error("frame encode failed"));
+        b.arrayBuffer().then(res, rej);
+      }, "image/jpeg", quality);
+    } catch (e) { rej(canvasTaintError(e)); }
+  });
 }
 /** Preview may already be tainted (cross-origin PiP, old data: SVG). Resetting
  *  width clears the bitmap and the origin-clean flag; export redraws each frame. */
@@ -6292,6 +6378,8 @@ function resetExportCanvases() {
   }
   adjScratch.width = adjScratch.width;
   scratch.width = scratch.width;
+  exportSnapOff = null;
+  exportSnapCtx = null;
 }
 function waitMediaEl(el, ms = 2500) {
   if (el.readyState >= 2 && !(el.error)) return Promise.resolve();
@@ -6347,8 +6435,7 @@ async function armExportCors() {
 /* Sequential /frame POSTs, batched. Concurrent bodies can still race on ffmpeg
    stdin if they complete out of order, so the client starts each fetch only
    after the previous one settles; rendering runs ahead under backpressure.
-   JPEG Fast and WebCodecs Annex-B both concatenate on this path — image2pipe
-   and H.264 start-codes are self-delimiting. */
+   JPEG Fast and WebCodecs Annex-B both concatenate on this path. */
 function createExportUploader(sessId, { batchItems, batchBytes, signal, getError, setError }) {
   let batch = [];
   let packed = 0;
@@ -6423,8 +6510,8 @@ function createExportUploader(sessId, { batchItems, batchBytes, signal, getError
      • already within ½ media-frame → no-op
      • forward through a shot, buffered → play + requestVideoFrameCallback.
        If the last compositor tick was faster than a timeline frame, leave the
-       element playing (no play/pause per frame). If it was slower (typical Fast
-       JPEG upload), pause after the hit so the file cannot overrun.
+       element playing (no play/pause per frame). If it was slower, pause after
+       the hit so the file cannot overrun.
      • reverse / large jump / unbuffered / overshoot → hard seek
    Incoming clips are seek-prefetched ~1 s before they become active. */
 let exportSeekClock = 0;
@@ -6551,7 +6638,7 @@ async function seekVideosTo(t) {
   const now = performance.now();
   const frameMs = 1000 / fps;
   // Last compositor+upload tick faster than a timeline frame → decoder can
-  // stay in play() through the shot. Slower (Fast JPEG) → pause so we don't
+  // stay in play() through the shot. Slower → pause so we don't
   // overshoot and seek backwards every frame.
   const keepPlaying = exportSeekClock > 0 && (now - exportSeekClock) < frameMs * 1.4;
   exportSeekClock = now;
@@ -6722,8 +6809,6 @@ async function fastExport() {
         fps,
         name: project.name.replace(/[^\w\- ]+/g, "") || "export",
         profile: profileId,
-        // lets the server dry-run the profile with the same input count we
-        // will actually feed it, so -map based profiles are checked correctly
         hasAudio: !!wav,
       }),
       signal,
@@ -6737,43 +6822,72 @@ async function fastExport() {
     try { await document.fonts.ready; } catch { }
     resetExportCanvases();
     await armExportCors();
-    // JPEG bodies are ~10× Annex-B AUs; batch a handful so HTTP headers stop
-    // dominating, without holding many uncompressed frames in RAM.
+    // JPEG off the compositor thread: snapshot is sync, encode/upload run ahead
+    // under backpressure. Awaiting toBlob every frame was slower than ffmpeg.
     const up = createExportUploader(sessId, {
       batchItems: 8, batchBytes: 512 * 1024, signal,
       getError: () => uploadError, setError,
     });
-    let jpegPending = null;
+    const workers = createJpegWorkers(Math.min(3, Math.max(1, (navigator.hardwareConcurrency || 2) - 1)));
+    let pixelChain = Promise.resolve();
+    let pixelsInflight = 0;
+    const waitPixels = (max) => new Promise((res, rej) => {
+      const tick = () => {
+        if (renderCancelled || signal.aborted) { clearInterval(poll); rej(new Error("cancelled")); }
+        else if (uploadError) { clearInterval(poll); rej(uploadError); }
+        else if (pixelsInflight <= max) { clearInterval(poll); res(); }
+      };
+      const poll = setInterval(tick, 4);
+      tick();
+    });
+    try {
     for (let f = 0; f < frames; f++) {
       if (renderCancelled || signal.aborted) throw new Error("cancelled");
       if (uploadError) throw uploadError;
+      await waitPixels(3);
       await up.waitBackpressure(2);
       const t = f / fps;
-      state.time = t;                    // playhead follows the render
+      state.time = t;
       await seekVideosTo(t);
-      await prepareFrameAssets(t);       // exact SVG frames + AI masks
+      await prepareFrameAssets(t);
       drawFrame(t);
-      // Snapshot now (toBlob captures at call time) so the next seek/draw can
-      // overlap this frame's JPEG encode.
-      const thisJpeg = previewToExportBlob(jpegQ);
-      if (jpegPending) {
-        const blob = await jpegPending;
-        if (!blob) throw new Error("frame encode failed");
-        up.push(blob);
+      const snap = snapshotExportFrame();
+      pixelsInflight++;
+      let jpegP;
+      if (snap.kind === "bmp") {
+        jpegP = workers ? workers.encode(snap.bmp, jpegQ) : jpegFromBitmap(snap.bmp, jpegQ);
+      } else {
+        const c = document.createElement("canvas");
+        c.width = snap.w; c.height = snap.h;
+        c.getContext("2d", { alpha: false }).putImageData(new ImageData(snap.data, snap.w, snap.h), 0, 0);
+        jpegP = new Promise((res, rej) => {
+          try {
+            c.toBlob((b) => {
+              if (!b) return rej(new Error("frame encode failed"));
+              b.arrayBuffer().then(res, rej);
+            }, "image/jpeg", jpegQ);
+          } catch (e) { rej(canvasTaintError(e)); }
+        });
       }
-      jpegPending = thisJpeg;
+      pixelChain = pixelChain.then(async () => {
+        if (renderCancelled || signal.aborted) throw new Error("cancelled");
+        if (uploadError) throw uploadError;
+        const buf = await jpegP;
+        if (!buf || !(buf.byteLength || buf.size || buf.length)) throw new Error("frame encode failed");
+        up.push(buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf);
+      }).catch((err) => { setError(err); throw err; }).finally(() => { pixelsInflight--; });
       const pct = ((f + 1) / frames) * 100;
       els.exportProgress.style.width = pct.toFixed(1) + "%";
       els.exportTitle.textContent = `Rendering… ${pct.toFixed(0)}%`;
     }
-    if (jpegPending) {
-      const blob = await jpegPending;
-      if (!blob) throw new Error("frame encode failed");
-      up.push(blob);
-    }
+    await pixelChain;
+    if (uploadError) throw uploadError;
     els.exportTitle.textContent = "Encoding…";
     await up.done();
     if (uploadError) throw uploadError;
+    } finally {
+      try { workers?.terminate(); } catch { }
+    }
     const end = await fetch("/api/export/end?id=" + sessId, { method: "POST", signal }).then((r) => r.json());
     if (!end.src) throw new Error(end.error || "encode failed");
     const a = document.createElement("a");
