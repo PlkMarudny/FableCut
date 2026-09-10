@@ -623,9 +623,9 @@ Export is user-driven (Export button → dialog). Three engines:
 
 The exported span is chosen in the Export dialog (**Range**: Entire
 timeline / IN–OUT). IN–OUT is the default when `inPoint` / `outPoint` are
-set; pick Entire timeline to keep those markers for split/trim. Markers are
-clamped to the content span (`projDur`) so an IN past the last clip cannot
-produce a one-frame black file.
+set; pick Entire timeline to keep those markers for split/trim. Effective
+IN/OUT export bounds are clamped to `projDur` so an IN past the last clip
+cannot produce a one-frame black file.
 
 1. Entire timeline (or no markers) → the whole timeline
 2. IN–OUT, IN only → from `inPoint` to the end

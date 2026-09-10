@@ -209,7 +209,7 @@ same time.
   Export dialog. Unavailable while an export frame is set (use Fast)
 - Realtime MediaRecorder fallback when ffmpeg or WebCodecs isn't available
 - Export **Range** dropdown: Entire timeline or IN–OUT (defaults to IN–OUT when
-  markers are set). IN/OUT are clamped to the content span.
+  markers are set). Effective IN/OUT export bounds are clamped to `projDur()`.
 
 ## Quick start
 
