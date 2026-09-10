@@ -185,8 +185,8 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
   "panSchema": 1,                             // 1 = pan-aware; omit only on pre-pan projects (UI migrates once)
   "markers": [ { "t": 2.5 }, { "t": 5.0, "label": "drop" } ],
   // ^ beat/cue markers: gold diamonds on the ruler, snap targets for clip edges.
-  "inPoint": 10.023, // IN marker: export (and Limit playback) start here; omit = timeline start
-  "outPoint": 21.500, // OUT marker: export ends here; omit = timeline end
+  "inPoint": 10.023, // IN work-area marker (Limit playback + optional export range)
+  "outPoint": 21.500, // OUT work-area marker; omit = timeline end
   "folders": [
     // Project-bin virtual folders (tree). Media reference them via folderId.
     { "id": "f_broll", "name": "B-roll", "parentId": null, "open": true }
@@ -621,13 +621,16 @@ Export is user-driven (Export button → dialog). Three engines:
    ffmpeg, or WebCodecs is unavailable. Plays the timeline once and records it;
    keep the tab focused.
 
-The exported span follows the IN/OUT work area, independent of the Limit
-playback toggle:
+The exported span is chosen in the Export dialog (**Range**: Entire
+timeline / IN–OUT). IN–OUT is the default when `inPoint` / `outPoint` are
+set; pick Entire timeline to keep those markers for split/trim. Markers are
+clamped to the content span (`projDur`) so an IN past the last clip cannot
+produce a one-frame black file.
 
-1. No markers → the whole timeline
-2. IN only → from `inPoint` to the end
-3. OUT only → from the start to `outPoint`
-4. Both → the range between them
+1. Entire timeline (or no markers) → the whole timeline
+2. IN–OUT, IN only → from `inPoint` to the end
+3. IN–OUT, OUT only → from the start to `outPoint`
+4. IN–OUT, both → the range between them
 
 Claude cannot trigger export headlessly — the compositor lives in the browser;
 ask the user to click Export, or render with ffmpeg directly from `media/`

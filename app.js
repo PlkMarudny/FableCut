@@ -2593,13 +2593,29 @@ function playRange() {
   const end = project.outPoint != null ? project.outPoint : Math.max(projDur(), 0);
   return { start, end: Math.max(end, start) };
 }
-/* Export window — same IN/OUT rules as playRange, always (Limit is playback-only).
-   Duration is an integer frame count at project fps (min 1) so Fast / WebCodecs
-   frame loops and renderAudioMix share one length. */
+/* Export window. IN/OUT are clamped to the content span so a marker past
+   the last clip cannot inflate a 0-length range into a 1-frame black file.
+   Mode comes from the Export dialog (Entire timeline / IN–OUT). */
+function exportRangeMode() {
+  const sel = $("exportRangeSel");
+  const v = sel && sel.value === "in-out" ? "in-out" : "entire";
+  if (v === "in-out" && !hasWorkArea()) return "entire";
+  return v;
+}
 function exportRange() {
   const fps = projectFps();
-  const { start, end } = playRange();
-  const frames = Math.max(1, Math.round((end - start) * fps));
+  const span = Math.max(projDur(), 0);
+  let start = 0, end = span;
+  if (exportRangeMode() === "in-out") {
+    const r = playRange();
+    start = Math.min(Math.max(0, r.start), span);
+    end = Math.min(Math.max(0, r.end), span);
+    if (end < start) end = start;
+  }
+  const sec = Math.max(0, end - start);
+  let frames = Math.round(sec * fps);
+  if (exportRangeMode() === "entire") frames = Math.max(1, frames);
+  else frames = Math.max(0, frames);
   const dur = frames / fps;
   return { start, end: start + dur, dur, frames };
 }
@@ -6549,8 +6565,8 @@ async function openExportSetup() {
     warn.textContent = "";
     warn.classList.add("hidden");
   }
-  const rangeNote = $("exportRangeNote");
-  if (rangeNote) rangeNote.textContent = exportRangeNoteText();
+  fillExportRangeSelect();
+  syncExportRangeUi();
   syncExportProfileVisibility();
   fetchEncodeProfiles().then(() => {
     populateExportProfileSelect();
@@ -6570,20 +6586,40 @@ function startChosenExport() {
     alert("No export engine is available.");
     return;
   }
+  if (exportRange().frames < 1) {
+    alert("Export range is empty — IN/OUT is at or past the end of the timeline. Choose Entire timeline, or move the markers.");
+    return;
+  }
   els.exportSetup.classList.add("hidden");
   if (useFast) fastExport();
   else if (useSecond && state.connected && state.ffmpeg && state.webCodecs && !getExportFrame()) webCodecsExport();
   else startExport();
 }
 
+function fillExportRangeSelect() {
+  const sel = $("exportRangeSel");
+  if (!sel) return;
+  const opt = sel.querySelector('option[value="in-out"]');
+  const has = hasWorkArea();
+  if (opt) opt.disabled = !has;
+  sel.value = has ? "in-out" : "entire";
+}
 function exportRangeNoteText() {
-  const { start, dur } = exportRange();
+  const mode = exportRangeMode();
+  const { start, dur, frames } = exportRange();
   const end = start + dur;
+  if (mode === "entire") return `Full timeline · ${fmt(start)} → ${fmt(end)}`;
+  if (frames < 1) return "IN–OUT is empty — markers are at or past the end of the timeline.";
   const inn = project.inPoint != null, out = project.outPoint != null;
-  if (!inn && !out) return `Full timeline · ${fmt(start)} → ${fmt(end)}`;
   if (inn && out) return `IN–OUT · ${fmt(start)} → ${fmt(end)}`;
   if (inn) return `IN to end · ${fmt(start)} → ${fmt(end)}`;
   return `Start to OUT · ${fmt(start)} → ${fmt(end)}`;
+}
+function syncExportRangeUi() {
+  const note = $("exportRangeNote");
+  if (note) note.textContent = exportRangeNoteText();
+  const btn = $("btnStartExport");
+  if (btn) btn.disabled = exportRange().frames < 1;
 }
 
 /* ── Fast export ── */
@@ -7140,7 +7176,7 @@ async function fastExport() {
   const signal = exportAbort.signal;
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
-  els.exportNote.textContent = "Rendering frames → ffmpeg. Do not switch tabs.";
+  els.exportNote.textContent = "Rendering frames → ffmpeg. You can switch tabs; export continues.";
   restoreExportVideoState();
   const { start: t0, end: t1, frames } = beginExportWindow();
   const fps = projectFps();
@@ -7299,7 +7335,7 @@ async function webCodecsExport() {
   const signal = exportAbort.signal;
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
-  els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. Do not switch tabs.";
+  els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues";
   restoreExportVideoState();
   const { start: t0, end: t1, frames } = beginExportWindow();
   const fps = projectFps();
@@ -7514,6 +7550,7 @@ els.exportSetup?.addEventListener("change", (e) => {
     syncExportProfileVisibility();
     syncExportWcOpts();
   }
+  if (e.target.id === "exportRangeSel") syncExportRangeUi();
 });
 els.exportProfileSel?.addEventListener("change", (e) => {
   const id = e.target.value;

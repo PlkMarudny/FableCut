@@ -208,7 +208,14 @@
 <div class="overlay hidden" id="exportSetup">
   <div class="dialog">
     <h2>Export</h2>
-    <p class="dim export-range-note" id="exportRangeNote"></p>
+    <div class="export-profile-row" id="exportRangeRow">
+      <label class="export-profile-label" for="exportRangeSel">Range</label>
+      <select class="export-profile-sel" id="exportRangeSel" aria-describedby="exportRangeNote">
+        <option value="entire">Entire timeline</option>
+        <option value="in-out">IN–OUT</option>
+      </select>
+      <p class="dim export-profile-note" id="exportRangeNote"></p>
+    </div>
     <label class="engine-opt">
       <input type="radio" name="engine" id="engineFast">
       <span><b>Fast (ffmpeg)</b><br><span class="dim" id="engineFastNote">Frame-accurate ffmpeg encode. Keeps rendering if you switch tabs.</span></span>
