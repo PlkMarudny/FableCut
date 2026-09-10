@@ -5384,7 +5384,8 @@ els.preview.addEventListener("pointerdown", (e) => {
     const b = clipBounds(cur, evalProps(cur, state.time), W, H), lp = toLocal(pt, b);
     const hd = overlayHandles(b, W, H), grab = hd.hs * 1.8;
     if (Math.hypot(pt.x - hd.rotate.x, pt.y - hd.rotate.y) <= grab) {
-      canvasDrag = { mode: "rotate", id: cur.id, startRot: +cur.props.rotation || 0, startAng: Math.atan2(pt.y - b.cy, pt.x - b.cx) };
+      const ep = propsAtPlayhead(cur);
+      canvasDrag = { mode: "rotate", id: cur.id, startRot: +ep.rotation || 0, startAng: Math.atan2(pt.y - b.cy, pt.x - b.cx), cx: b.cx, cy: b.cy };
     } else if (hd.corners.some((h) => Math.abs(pt.x - h.x) <= grab && Math.abs(pt.y - h.y) <= grab)) {
       if (cur.kind === "text") {
         ensureTextBox(cur);
@@ -5402,17 +5403,19 @@ els.preview.addEventListener("pointerdown", (e) => {
           aspect: Math.max(0.05, (b2.hw * 2) / Math.max(1e-6, b2.hh * 2)),
         };
       } else {
-        canvasDrag = { mode: "scale", id: cur.id, startScale: +cur.props.scale || 1, startDist: Math.hypot(lp.x, lp.y) || 1 };
+        canvasDrag = { mode: "scale", id: cur.id, startScale: +(propsAtPlayhead(cur).scale) || 1, startDist: Math.hypot(lp.x, lp.y) || 1 };
       }
     } else if (Math.abs(lp.x) <= b.hw && Math.abs(lp.y) <= b.hh) {
-      canvasDrag = { mode: "move", id: cur.id, startX: +cur.props.x || 0, startY: +cur.props.y || 0, startPt: pt };
+      const ep = propsAtPlayhead(cur);
+      canvasDrag = { mode: "move", id: cur.id, startX: +ep.x || 0, startY: +ep.y || 0, startPt: pt };
     }
   }
   if (!canvasDrag) {
     const hit = pickClipAt(pt, W, H);
     if (!hit) return;
     if (hit.id !== state.selId) { selectClip(hit.id); renderInspector(); }
-    canvasDrag = { mode: "move", id: hit.id, startX: +hit.props.x || 0, startY: +hit.props.y || 0, startPt: pt };
+    const ep = propsAtPlayhead(hit);
+    canvasDrag = { mode: "move", id: hit.id, startX: +ep.x || 0, startY: +ep.y || 0, startPt: pt };
   }
   canvasDidMove = false;
   if (canvasDrag.mode === "move") els.preview.style.cursor = "move";
@@ -5456,8 +5459,8 @@ els.preview.addEventListener("pointermove", (e) => {
   const W = els.preview.width, H = els.preview.height, pt = canvasPt(e);
   if (!canvasDidMove) { pushUndo(); canvasDidMove = true; } // one undo per drag, only if it actually moves
   if (canvasDrag.mode === "move") {
-    c.props.x = Math.round(canvasDrag.startX + (pt.x - canvasDrag.startPt.x));
-    c.props.y = Math.round(canvasDrag.startY + (pt.y - canvasDrag.startPt.y));
+    setAnimProp(c, "x", Math.round(canvasDrag.startX + (pt.x - canvasDrag.startPt.x)));
+    setAnimProp(c, "y", Math.round(canvasDrag.startY + (pt.y - canvasDrag.startPt.y)));
   } else if (canvasDrag.mode === "box") {
     const aspect = canvasDrag.aspect || 1;
     const lockAR = e.shiftKey;
@@ -5501,19 +5504,19 @@ els.preview.addEventListener("pointermove", (e) => {
       const c2 = Math.cos(rot), s2 = Math.sin(rot);
       const freeX = fix.x + ldx * c2 - ldy * s2;
       const freeY = fix.y + ldx * s2 + ldy * c2;
-      c.props.x = Math.round((fix.x + freeX) / 2 - W / 2);
-      c.props.y = Math.round((fix.y + freeY) / 2 - H / 2);
+      setAnimProp(c, "x", Math.round((fix.x + freeX) / 2 - W / 2));
+      setAnimProp(c, "y", Math.round((fix.y + freeY) / 2 - H / 2));
       c.props.boxW = +Math.abs(ldx).toFixed(1);
       c.props.boxH = +Math.abs(ldy).toFixed(1);
     }
   } else if (canvasDrag.mode === "scale") {
     const b = clipBounds(c, evalProps(c, state.time), W, H), lp = toLocal(pt, b);
-    c.props.scale = clamp(+(canvasDrag.startScale * (Math.hypot(lp.x, lp.y) / canvasDrag.startDist)).toFixed(3), 0.05, 12);
+    setAnimProp(c, "scale", clamp(+(canvasDrag.startScale * (Math.hypot(lp.x, lp.y) / canvasDrag.startDist)).toFixed(3), 0.05, 12));
   } else {
-    const cx = W / 2 + (+c.props.x || 0), cy = H / 2 + (+c.props.y || 0);
+    const cx = canvasDrag.cx, cy = canvasDrag.cy;
     let deg = canvasDrag.startRot + (Math.atan2(pt.y - cy, pt.x - cx) - canvasDrag.startAng) * 180 / Math.PI;
     if (e.shiftKey) deg = Math.round(deg / 15) * 15;
-    c.props.rotation = Math.round(deg);
+    setAnimProp(c, "rotation", Math.round(deg));
   }
 });
 function endCanvasDrag(e) {
@@ -5797,11 +5800,12 @@ function measureTextHalfSize(p) {
 /* First corner-drag on a hug-content title: create a box from current bounds. */
 function ensureTextBox(c) {
   if (c.kind !== "text" || hasTextBox(c.props)) return;
-  const half = measureTextHalfSize(c.props);
-  const sc = +c.props.scale || 1;
+  const p = propsAtPlayhead(c);
+  const half = measureTextHalfSize(p);
+  const sc = +p.scale || 1;
   if (Math.abs(sc - 1) > 0.01) {
-    c.props.fontSize = Math.round((+c.props.fontSize || 72) * sc);
-    c.props.scale = 1;
+    setAnimProp(c, "fontSize", Math.round((+p.fontSize || 72) * sc));
+    setAnimProp(c, "scale", 1);
   }
   c.props.boxW = Math.max(40, +(half.hw * 2).toFixed(1));
   c.props.boxH = Math.max(24, +(half.hh * 2).toFixed(1));

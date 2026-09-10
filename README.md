@@ -138,7 +138,8 @@ same time.
   the previous / next keyframe (selected clips first, else clips under the
   playhead). Inspector fields show the interpolated value at the playhead;
   changing one updates the keyframe you’re on, or inserts one if that channel
-  is already keyed. The ◆ button adds a keyframe at the playhead, or removes
+  is already keyed. Dragging a clip in the program monitor (move / scale /
+  rotate) writes the same way. The ◆ button adds a keyframe at the playhead, or removes
   the one you’re parked on; ✕ clears the whole channel
 - **Keyframe graphs** — toggle a property’s curve in the inspector to show an
   interpolated value graph beside the program monitor; click the graph to seek
