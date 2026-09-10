@@ -579,6 +579,84 @@ function kfChannel(c, key, local, fallback) {
   }
   return fallback;
 }
+const kfTimeEps = () => 0.5 / projectFps();
+/* Keyframe on this channel whose absolute time matches the playhead. */
+function kfAtPlayhead(c, k) {
+  const arr = c.keyframes?.[k];
+  if (!Array.isArray(arr) || !arr.length) return null;
+  const eps = kfTimeEps();
+  const abs = state.time;
+  return arr.find((kf) => Math.abs(c.start + kf.t - abs) < eps) || null;
+}
+/* Static props with keyed channels replaced by the value at the playhead
+   (no transition envelopes — those would fake a keyframe in the inspector). */
+function propsAtPlayhead(c) {
+  const p = { ...c.props };
+  if (!c.keyframes) return p;
+  const local = state.time - c.start;
+  for (const k of ANIMATABLE) {
+    const kfs = c.keyframes[k];
+    if (!Array.isArray(kfs) || !kfs.length) continue;
+    const v = kfChannel(c, k, local, +(p[k] ?? DEFAULT_PROPS[k] ?? 0));
+    if (typeof v === "number" && !isNaN(v)) p[k] = v;
+  }
+  return p;
+}
+function fmtInspNum(v, step) {
+  const n = +v;
+  if (!Number.isFinite(n)) return "0";
+  const s = +step;
+  if (Number.isFinite(s) && s > 0) {
+    if (s >= 1) return String(Math.round(n / s) * s);
+    const dec = Math.min(6, Math.max(0, Math.ceil(-Math.log10(s) - 1e-9)));
+    return String(+n.toFixed(dec));
+  }
+  if (Math.abs(n - Math.round(n)) < 1e-6) return String(Math.round(n));
+  return String(+n.toFixed(3));
+}
+/* Write an animatable prop: static if the channel has no keyframes; otherwise
+   update the keyframe under the playhead or insert one (auto-key). */
+function setAnimProp(c, k, v) {
+  if (!c || !ANIMATABLE.includes(k) || typeof v !== "number" || isNaN(v)) return;
+  const arr = c.keyframes?.[k];
+  if (!Array.isArray(arr) || !arr.length) {
+    c.props[k] = v;
+    return;
+  }
+  const near = kfAtPlayhead(c, k);
+  if (near) { near.v = v; return; }
+  const lt = +clamp(state.time - c.start, 0, c.duration).toFixed(3);
+  const eps = kfTimeEps();
+  const dup = arr.find((kf) => Math.abs(kf.t - lt) < eps);
+  if (dup) { dup.v = v; return; }
+  arr.push({ t: lt, v });
+  arr.sort((a, b) => a.t - b.t);
+  state.dirtyTimeline = true;
+}
+/* ◆ : add a keyframe at the playhead, or remove the one already there. */
+function toggleKfAtPlayhead(c, k) {
+  if (!c || !ANIMATABLE.includes(k)) return;
+  const near = kfAtPlayhead(c, k);
+  if (near) {
+    const rest = c.keyframes[k].filter((kf) => kf !== near);
+    if (rest.length) c.keyframes[k] = rest;
+    else {
+      c.props[k] = near.v;
+      delete c.keyframes[k];
+      if (!Object.keys(c.keyframes).length) c.keyframes = undefined;
+    }
+    return;
+  }
+  const fallback = +(c.props?.[k] ?? DEFAULT_PROPS[k] ?? 0);
+  const v = kfChannel(c, k, state.time - c.start, fallback);
+  if (typeof v !== "number" || isNaN(v)) return;
+  if (!c.keyframes) c.keyframes = {};
+  const arr = (c.keyframes[k] = c.keyframes[k] || []);
+  const lt = +clamp(state.time - c.start, 0, c.duration).toFixed(3);
+  const dup = arr.find((kf) => Math.abs(kf.t - lt) < kfTimeEps());
+  if (dup) dup.v = v;
+  else { arr.push({ t: lt, v }); arr.sort((a, b) => a.t - b.t); }
+}
 function hasSpeedRamp(c) {
   return Array.isArray(c.keyframes?.speed) && c.keyframes.speed.length > 0;
 }
@@ -3095,6 +3173,7 @@ function setTime(t) {
   state.time = clamp(t, 0, Math.max(projDur(), 0));
   seekMediaWhilePaused();
   if (state.audioHold) scheduleAudioHoldRefresh();
+  syncInspectorPlayhead();
 }
 
 /* Absolute timeline times of every keyframe on the given clips (deduped). */
@@ -3125,7 +3204,7 @@ function goToKeyframe(dir) {
   }
   const times = keyframeTimelineTimes(clips);
   if (!times.length) { toast("No keyframes"); return; }
-  const eps = 0.5 / projectFps();
+  const eps = kfTimeEps();
   if (dir > 0) {
     const next = times.find((t) => t > state.time + eps);
     if (next == null) { toast("No next keyframe"); return; }
@@ -3391,10 +3470,13 @@ function renderInspector(lite) {
     if (d) d.value = c.duration.toFixed(2);
     return;
   }
-  const p = c.props;
+  const p = propsAtPlayhead(c);
   const kfCount = (k) => (c.keyframes && c.keyframes[k] ? c.keyframes[k].length : 0);
-  const kfCtl = (k) => !ANIMATABLE.includes(k) ? "" :
-    `<span class="kf-ctl"><button class="kf-btn${kfCount(k) ? " has" : ""}" data-kf="${k}" title="Set keyframe at playhead">◆${kfCount(k) || ""}</button>${kfCount(k) ? `<button class="kf-btn" data-kfclear="${k}" title="Clear keyframes">✕</button>` : ""}</span>`;
+  const kfCtl = (k) => {
+    if (!ANIMATABLE.includes(k)) return "";
+    const n = kfCount(k), on = !!kfAtPlayhead(c, k);
+    return `<span class="kf-ctl"><button class="kf-btn${n ? " has" : ""}${on ? " on" : ""}" data-kf="${k}" title="${on ? "Remove keyframe at playhead" : "Set keyframe at playhead"}">◆${n || ""}</button>${n ? `<button class="kf-btn" data-kfclear="${k}" title="Clear keyframes">✕</button>` : ""}</span>`;
+  };
   /* Label carries two affordances that key off different click modifiers:
      plain click toggles the keyframe graph (animatable props), Ctrl/Cmd-click
      resets the prop(s). `reset` overrides which keys reset; defaults to k. */
@@ -3417,10 +3499,12 @@ function renderInspector(lite) {
   };
   const row = (label, inner, k = "", reset) =>
     `<div class="insp-row">${propLabel(label, k, reset)}${inner}${k ? kfCtl(k) : ""}</div>`;
-  const slider = (k, min, max, step, val, unit = "") =>
-    row(k[0].toUpperCase() + k.slice(1),
-      `<input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${val}">
-       <span class="val" data-val="${k}">${val}${unit}</span>`, k);
+  const slider = (k, min, max, step, val, unit = "") => {
+    const shown = fmtInspNum(val, step);
+    return row(k[0].toUpperCase() + k.slice(1),
+      `<input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${shown}">
+       <span class="val" data-val="${k}" data-unit="${unit}">${shown}${unit}</span>`, k);
+  };
   let html = (state.selIds.size > 1
     ? `<div class="insp-multi">${state.selIds.size} clips selected — drag moves them together, Del deletes all. Fields below edit the primary (white-outlined) clip.</div>`
     : "") + `<div class="insp-section"><h3>Clip — ${c.kind}</h3>
@@ -3438,8 +3522,8 @@ function renderInspector(lite) {
     </div>`;
   } else if (c.kind !== "audio") {
     html += `<div class="insp-section"><h3>Transform</h3>
-      ${row("Position X", `<input type="number" data-k="x" value="${p.x}">`, "x")}
-      ${row("Position Y", `<input type="number" data-k="y" value="${p.y}">`, "y")}
+      ${row("Position X", `<input type="number" data-k="x" value="${fmtInspNum(p.x)}">`, "x")}
+      ${row("Position Y", `<input type="number" data-k="y" value="${fmtInspNum(p.y)}">`, "y")}
       ${slider("scale", 0.1, 4, 0.01, p.scale)}
       ${slider("rotation", -180, 180, 1, p.rotation, "°")}
       ${slider("opacity", 0, 1, 0.01, p.opacity)}
@@ -3515,8 +3599,8 @@ function renderInspector(lite) {
     html += `<div class="insp-section"><h3>Text</h3>
       ${row("Content", `<textarea data-k="text">${p.text}</textarea>`, "", "text")}
       ${row(hasTextBox(p) && p.boxFit ? "Max size" : "Font size",
-        `<input type="range" data-k="fontSize" min="12" max="300" step="1" value="${p.fontSize}">
-         <span class="val" data-val="fontSize">${p.fontSize}px</span>`, "fontSize")}
+        `<input type="range" data-k="fontSize" min="12" max="300" step="1" value="${fmtInspNum(p.fontSize, 1)}">
+         <span class="val" data-val="fontSize" data-unit="px">${fmtInspNum(p.fontSize, 1)}px</span>`, "fontSize")}
       ${row("Box W/H", `<span class="insp-ctrls">
         <input type="number" data-k="boxW" min="0" step="1" value="${p.boxW || 0}" title="Width in px (0 = no box — hug content)" style="max-width:64px">
         <input type="number" data-k="boxH" min="0" step="1" value="${p.boxH || 0}" title="Height in px (0 = no box — hug content)" style="max-width:64px">
@@ -3618,13 +3702,18 @@ function renderInspector(lite) {
           state.dirtyTimeline = true;
         }
       }
+      else if (ANIMATABLE.includes(k)) setAnimProp(c, k, v);
       else { c.props[k] = v; if (k === "text") state.dirtyTimeline = true; }
       const valEl = els.inspector.querySelector(`[data-val="${k}"]`);
-      if (valEl) valEl.textContent = input.value;
+      if (valEl) valEl.textContent = input.value + (valEl.dataset.unit || "");
       if (state.audioHold && (k === "volume" || k === "pan")) scheduleAudioHoldRefresh();
       scheduleSave();
+      if (ANIMATABLE.includes(k)) syncInspectorPlayhead();
     });
-    input.addEventListener("focus", () => pushUndo(), { once: true });
+    input.addEventListener("focus", () => {
+      pushUndo();
+      if (ANIMATABLE.includes(k) && state.playing) pause();
+    }, { once: true });
   });
   els.inspector.querySelectorAll("[data-action]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -3663,17 +3752,8 @@ function renderInspector(lite) {
   });
   els.inspector.querySelectorAll("[data-kf]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const k = btn.dataset.kf;
-      const input = els.inspector.querySelector(`[data-k="${k}"]`);
-      const v = input ? parseFloat(input.value) : +(c.props[k] || 0);
-      if (isNaN(v)) return;
       pushUndo();
-      if (!c.keyframes) c.keyframes = {};
-      const arr = (c.keyframes[k] = c.keyframes[k] || []);
-      const lt = +clamp(state.time - c.start, 0, c.duration).toFixed(3);
-      const near = arr.find((kf) => Math.abs(kf.t - lt) < 0.5 / projectFps());
-      if (near) near.v = v; else arr.push({ t: lt, v });
-      arr.sort((a, b) => a.t - b.t);
+      toggleKfAtPlayhead(c, btn.dataset.kf);
       state.dirtyTimeline = true;
       scheduleSave(); renderInspector();
     });
@@ -3700,6 +3780,41 @@ function renderInspector(lite) {
     });
   });
   renderKfGraphsPanel();
+}
+
+/* Patch inspector fields to the playhead (no innerHTML rebuild — keeps focus). */
+function syncInspectorPlayhead() {
+  const root = els && els.inspector;
+  if (!root) return;
+  const c = getClip(state.selId);
+  if (!c) return;
+  const p = propsAtPlayhead(c);
+  const active = document.activeElement;
+  for (const input of root.querySelectorAll("[data-k]")) {
+    const k = input.dataset.k;
+    if (!ANIMATABLE.includes(k)) continue;
+    if (active === input) continue;
+    const v = p[k];
+    if (typeof v !== "number" || isNaN(v)) continue;
+    const next = fmtInspNum(v, input.type === "range" ? input.step : undefined);
+    if (Math.abs(+input.value - +next) > 1e-6) input.value = next;
+    const valEl = root.querySelector(`[data-val="${k}"]`);
+    if (valEl) {
+      const text = next + (valEl.dataset.unit || "");
+      if (valEl.textContent !== text) valEl.textContent = text;
+    }
+  }
+  for (const btn of root.querySelectorAll("[data-kf]")) {
+    const k = btn.dataset.kf;
+    const n = (c.keyframes?.[k] && c.keyframes[k].length) || 0;
+    const on = !!kfAtPlayhead(c, k);
+    btn.classList.toggle("has", n > 0);
+    btn.classList.toggle("on", on);
+    const label = "◆" + (n || "");
+    if (btn.textContent !== label) btn.textContent = label;
+    const title = on ? "Remove keyframe at playhead" : "Set keyframe at playhead";
+    if (btn.title !== title) btn.title = title;
+  }
 }
 
 /* ── Keyframe graphs (program-monitor left gutter) ── */
@@ -5990,6 +6105,7 @@ function loop(ts) {
   drawRuler();
   updateSafeOverlay();
   updateKfGraphs();
+  syncInspectorPlayhead();
   updateMeterUI(dt);
   els.tcCurrent.textContent = fmt(state.time);
   els.tcTotal.textContent = fmt(dur);

@@ -1333,6 +1333,12 @@ input[type=range] {
   border-color: #ffd16666;
 }
 
+.kf-btn.has.on {
+  background: #ffd166;
+  color: #1a1a22;
+  border-color: #ffd166;
+}
+
 /* ── Timeline ── */
 .timeline-toolbar {
   display: flex;
