@@ -529,6 +529,13 @@ const ctx2d = els.preview.getContext("2d");
 /* ── Utils ─────────────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 9);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+/** Other host/port than the editor. drawImage of that media taints the canvas
+ *  unless it was fetched with CORS — Fast/WebCodecs export then cannot toBlob. */
+function isCrossOriginSrc(src) {
+  if (!src) return false;
+  try { return new URL(src, location.href).origin !== location.origin; }
+  catch { return false; }
+}
 function escapeHtml(s) {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
@@ -1067,11 +1074,21 @@ function probeAV(src, kind) {
   });
 }
 function loadImage(src) {
-  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+  return new Promise((res, rej) => {
+    const i = new Image();
+    // Must be set before src. Same-origin stays unset so /media needs no ACAO;
+    // cross-origin needs CORS or drawImage taints the canvas.
+    if (isCrossOriginSrc(src)) i.crossOrigin = "anonymous";
+    i.onload = () => res(i);
+    i.onerror = rej;
+    i.src = src;
+  });
 }
 async function grabThumb(m) {
   const v = document.createElement("video");
-  v.muted = true; v.preload = "auto"; v.src = m.src;
+  v.muted = true; v.preload = "auto";
+  if (isCrossOriginSrc(m.src)) v.crossOrigin = "anonymous";
+  v.src = m.src;
   await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = rej; });
   v.currentTime = Math.min(0.5, (v.duration || 1) / 2);
   await new Promise((res) => { v.onseeked = res; setTimeout(res, 1500); });
@@ -4866,22 +4883,46 @@ async function loadSvgMedia(m) {
   aux.svgFrames = new Map(); // quantized t -> HTMLImageElement (small LRU)
   aux.svgPending = null;
   runtime.mediaAux.set(m.id, aux);
-  if (!aux.svgAnimated) aux.img = await loadImage(m.src);
+  if (!aux.svgAnimated) aux.img = await rasterizeSvgMarkup(txt);
   state.dirtyTimeline = true;
 }
-function svgUrlAt(aux, t) {
+function svgMarkupAt(aux, t) {
+  if (!aux.svgAnimated) return aux.svgText;
   const style = `<style>*{animation-play-state:paused!important;` +
     `animation-delay:calc(var(--d,0s) - ${t.toFixed(4)}s)!important}</style>`;
-  const txt = aux.svgText.replace(/(<svg[^>]*>)/i, `$1${style}`);
-  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(txt);
+  return aux.svgText.replace(/(<svg[^>]*>)/i, `$1${style}`);
 }
-function renderSvgFrame(aux, t) {
+function closeSvgFrame(img) {
+  if (img && typeof img.close === "function") try { img.close(); } catch { }
+}
+function pruneSvgFrames(aux) {
+  if (!aux.svgFrames || aux.svgFrames.size <= 90) return;
+  const k = aux.svgFrames.keys().next().value;
+  closeSvgFrame(aux.svgFrames.get(k));
+  aux.svgFrames.delete(k);
+}
+/** Rasterize SVG markup without tainting the compositor canvas.
+ *  data: URLs (and <img src="*.svg"> in some browsers) mark the bitmap dirty
+ *  so toBlob throws. A same-origin blob + createImageBitmap stays origin-clean. */
+async function rasterizeSvgMarkup(markup) {
+  const blob = new Blob([markup], { type: "image/svg+xml;charset=utf-8" });
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bmp = await createImageBitmap(blob);
+      if (bmp.width && bmp.height) return bmp;
+      try { bmp.close(); } catch { }
+    } catch { /* Safari / empty SVG bitmaps */ }
+  }
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("svg raster failed"));
-    img.src = svgUrlAt(aux, t);
+    const url = URL.createObjectURL(blob);
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("svg raster failed")); };
+    img.src = url;
   });
+}
+function renderSvgFrame(aux, t) {
+  return rasterizeSvgMarkup(svgMarkupAt(aux, t));
 }
 /* Preview path: returns the best already-rasterized frame and schedules the
    exact one; export path awaits prepareSvgFrame() instead. */
@@ -4896,7 +4937,7 @@ function getSvgImage(c, t) {
   if (!aux.svgPending) {
     aux.svgPending = renderSvgFrame(aux, q).then((img) => {
       aux.svgFrames.set(q, img);
-      if (aux.svgFrames.size > 90) aux.svgFrames.delete(aux.svgFrames.keys().next().value);
+      pruneSvgFrames(aux);
       aux.lastImg = img;
     }).catch(() => { }).finally(() => { aux.svgPending = null; });
   }
@@ -4913,7 +4954,7 @@ async function prepareSvgFrame(c, t) {
   try {
     const img = await renderSvgFrame(aux, q);
     aux.svgFrames.set(q, img);
-    if (aux.svgFrames.size > 90) aux.svgFrames.delete(aux.svgFrames.keys().next().value);
+    pruneSvgFrames(aux);
     aux.lastImg = img;
   } catch { }
 }
@@ -5954,6 +5995,8 @@ function ensureFont(name) {
   runtime.googleLoaded.add(name);
   const link = document.createElement("link");
   link.rel = "stylesheet";
+  // CORS mode so @font-face files stay origin-clean when fillText hits the canvas.
+  link.crossOrigin = "anonymous";
   link.href = "https://fonts.googleapis.com/css2?family=" +
     encodeURIComponent(name).replace(/%20/g, "+") + ":ital,wght@0,300..900;1,300..900&display=swap";
   document.head.appendChild(link);
@@ -6213,16 +6256,166 @@ function startChosenExport() {
 
 /* ── Fast export ── */
 let renderCancelled = false;
+let exportAbort = null;
 let exportCropCanvas = null;
+let exportCropCtx = null;
+function canvasToJpeg(canvas, quality) {
+  return new Promise((res, rej) => {
+    const fail = (e) => {
+      const tainted = e && (e.name === "SecurityError" || /taint/i.test(String(e.message || e)));
+      rej(tainted
+        ? new Error("Tainted canvas — a clip is from another origin (not /media or /library) without CORS, or an SVG could not be rasterized cleanly. Import the file into the project, or serve it with Access-Control-Allow-Origin.")
+        : (e || new Error("frame encode failed")));
+    };
+    try {
+      canvas.toBlob((blob) => blob ? res(blob) : fail(new Error("frame encode failed")), "image/jpeg", quality);
+    } catch (e) { fail(e); }
+  });
+}
 function previewToExportBlob(quality = 0.95) {
   const ef = getExportFrame();
-  if (!ef) return new Promise((res) => els.preview.toBlob(res, "image/jpeg", quality));
+  if (!ef) return canvasToJpeg(els.preview, quality);
   if (!exportCropCanvas) exportCropCanvas = document.createElement("canvas");
-  exportCropCanvas.width = ef.w;
-  exportCropCanvas.height = ef.h;
-  exportCropCanvas.getContext("2d").drawImage(
-    els.preview, ef.x, ef.y, ef.w, ef.h, 0, 0, ef.w, ef.h);
-  return new Promise((res) => exportCropCanvas.toBlob(res, "image/jpeg", quality));
+  if (exportCropCanvas.width !== ef.w) exportCropCanvas.width = ef.w;
+  if (exportCropCanvas.height !== ef.h) exportCropCanvas.height = ef.h;
+  if (!exportCropCtx) exportCropCtx = exportCropCanvas.getContext("2d", { alpha: false });
+  exportCropCtx.drawImage(els.preview, ef.x, ef.y, ef.w, ef.h, 0, 0, ef.w, ef.h);
+  return canvasToJpeg(exportCropCanvas, quality);
+}
+/** Preview may already be tainted (cross-origin PiP, old data: SVG). Resetting
+ *  width clears the bitmap and the origin-clean flag; export redraws each frame. */
+function resetExportCanvases() {
+  els.preview.width = els.preview.width;
+  if (exportCropCanvas) {
+    exportCropCanvas.width = exportCropCanvas.width;
+    exportCropCtx = null;
+  }
+  adjScratch.width = adjScratch.width;
+  scratch.width = scratch.width;
+}
+function waitMediaEl(el, ms = 2500) {
+  if (el.readyState >= 2 && !(el.error)) return Promise.resolve();
+  return new Promise((res) => {
+    const done = () => {
+      clearTimeout(tm);
+      el.removeEventListener("loadeddata", done);
+      el.removeEventListener("error", done);
+      res();
+    };
+    const tm = setTimeout(done, ms);
+    el.addEventListener("loadeddata", done);
+    el.addEventListener("error", done);
+  });
+}
+/** Reload other-origin video/images with crossOrigin=anonymous for the export
+ *  compositor. Preview leaves them no-cors so a stream without ACAO still plays. */
+async function armExportCors() {
+  const jobs = [];
+  for (const c of project.clips) {
+    if (c.kind !== "video" || !isTrackEnabled(c.track)) continue;
+    const m = getMedia(c.mediaId);
+    if (!m || !isCrossOriginSrc(m.src)) continue;
+    const el = getClipEl(c);
+    if (!el || el.crossOrigin === "anonymous") continue;
+    const t = el.currentTime;
+    el.crossOrigin = "anonymous";
+    el.src = m.src;
+    jobs.push(waitMediaEl(el).then(() => {
+      try { if (Number.isFinite(t)) el.currentTime = t; } catch { }
+    }));
+  }
+  for (const m of project.media) {
+    if (m.kind !== "image" || !isCrossOriginSrc(m.src)) continue;
+    const aux = runtime.mediaAux.get(m.id);
+    if (!aux?.img || aux.img.crossOrigin === "anonymous") continue;
+    jobs.push(loadImage(m.src).then((img) => {
+      runtime.mediaAux.set(m.id, { ...aux, img });
+    }).catch(() => { }));
+  }
+  await Promise.all(jobs);
+  const missing = [];
+  for (const c of project.clips) {
+    if (c.kind !== "video" || !isTrackEnabled(c.track)) continue;
+    const m = getMedia(c.mediaId);
+    if (!m || !isCrossOriginSrc(m.src)) continue;
+    const el = runtime.clipEls.get(c.id);
+    if (el && (el.error || el.readyState < 2)) missing.push(m.name || m.src);
+  }
+  if (missing.length)
+    toast("No CORS on " + missing.join(", ") + " — blank in the export. Import into the project or add Access-Control-Allow-Origin.");
+}
+/* Sequential /frame POSTs, batched. Concurrent bodies can still race on ffmpeg
+   stdin if they complete out of order, so the client starts each fetch only
+   after the previous one settles; rendering runs ahead under backpressure.
+   JPEG Fast and WebCodecs Annex-B both concatenate on this path — image2pipe
+   and H.264 start-codes are self-delimiting. */
+function createExportUploader(sessId, { batchItems, batchBytes, signal, getError, setError }) {
+  let batch = [];
+  let packed = 0;
+  let sentFirst = false;
+  let uploadTail = Promise.resolve();
+  let uploadsInFlight = 0;
+  const cancelled = () => renderCancelled || !!(signal && signal.aborted);
+  const concatChunks = (parts, n) => {
+    if (parts.length === 1) return parts[0];
+    if (parts[0] instanceof Uint8Array) {
+      const out = new Uint8Array(n);
+      let o = 0;
+      for (const p of parts) { out.set(p, o); o += p.byteLength; }
+      return out;
+    }
+    return new Blob(parts);
+  };
+  const enqueueUpload = (body) => {
+    uploadsInFlight++;
+    const p = uploadTail.catch(() => {}).then(async () => {
+      if (cancelled()) throw new Error("cancelled");
+      const err = getError();
+      if (err) throw err;
+      const r = await fetch("/api/export/frame?id=" + sessId, {
+        method: "POST", body, signal,
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "frame upload failed");
+    });
+    uploadTail = p.catch((err) => {
+      if (!getError()) setError(err);
+    }).finally(() => { uploadsInFlight--; });
+    return p;
+  };
+  const flush = (force) => {
+    if (!batch.length) return;
+    const first = !sentFirst;
+    if (!force && !first && packed < batchBytes && batch.length < batchItems) return;
+    sentFirst = true;
+    const parts = batch, n = packed;
+    batch = [];
+    packed = 0;
+    enqueueUpload(concatChunks(parts, n));
+  };
+  return {
+    push(chunk) {
+      const size = chunk.size ?? chunk.byteLength ?? 0;
+      batch.push(chunk);
+      packed += size;
+      flush(false);
+    },
+    flush,
+    done() { flush(true); return uploadTail; },
+    waitBackpressure(max = 2) {
+      return new Promise((res, rej) => {
+        const tick = () => {
+          if (cancelled()) { clearInterval(poll); rej(new Error("cancelled")); }
+          else {
+            const err = getError();
+            if (err) { clearInterval(poll); rej(err); }
+            else if (uploadsInFlight <= max) { clearInterval(poll); res(); }
+          }
+        };
+        const poll = setInterval(tick, 20);
+        tick();
+      });
+    },
+  };
 }
 /* ── Fast / WebCodecs frame sync ──
    HTMLVideoElement has no “step one frame” API — assigning currentTime always
@@ -6506,6 +6699,8 @@ async function fastExport() {
   if (state.exporting) return;
   pause();
   state.exporting = true; state.rendering = true; renderCancelled = false;
+  exportAbort = new AbortController();
+  const signal = exportAbort.signal;
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
   els.exportNote.textContent = "Rendering frames → ffmpeg. You can switch tabs; export continues.";
@@ -6513,6 +6708,8 @@ async function fastExport() {
   const fps = projectFps(), dur = Math.max(1 / fps, projDur());
   const frames = Math.max(1, Math.round(dur * fps));
   let sessId = null;
+  let uploadError = null;
+  const setError = (err) => { if (!uploadError) uploadError = err; };
   try {
     els.exportTitle.textContent = "Mixing audio…";
     const wav = await renderAudioMix(dur);
@@ -6529,31 +6726,55 @@ async function fastExport() {
         // will actually feed it, so -map based profiles are checked correctly
         hasAudio: !!wav,
       }),
+      signal,
     }).then((r) => r.json());
     if (!begin.id) throw new Error(begin.error || "export begin failed");
     sessId = begin.id;
     if (wav) {
-      const r = await fetch("/api/export/audio?id=" + sessId, { method: "POST", body: wav });
+      const r = await fetch("/api/export/audio?id=" + sessId, { method: "POST", body: wav, signal });
       if (!r.ok) throw new Error("audio upload failed");
     }
     try { await document.fonts.ready; } catch { }
+    resetExportCanvases();
+    await armExportCors();
+    // JPEG bodies are ~10× Annex-B AUs; batch a handful so HTTP headers stop
+    // dominating, without holding many uncompressed frames in RAM.
+    const up = createExportUploader(sessId, {
+      batchItems: 8, batchBytes: 512 * 1024, signal,
+      getError: () => uploadError, setError,
+    });
+    let jpegPending = null;
     for (let f = 0; f < frames; f++) {
-      if (renderCancelled) throw new Error("cancelled");
+      if (renderCancelled || signal.aborted) throw new Error("cancelled");
+      if (uploadError) throw uploadError;
+      await up.waitBackpressure(2);
       const t = f / fps;
       state.time = t;                    // playhead follows the render
       await seekVideosTo(t);
       await prepareFrameAssets(t);       // exact SVG frames + AI masks
       drawFrame(t);
-      const blob = await previewToExportBlob(jpegQ);
-      if (!blob) throw new Error("frame encode failed");
-      const r = await fetch("/api/export/frame?id=" + sessId, { method: "POST", body: blob });
-      if (!r.ok) throw new Error((await r.json()).error || "frame upload failed");
+      // Snapshot now (toBlob captures at call time) so the next seek/draw can
+      // overlap this frame's JPEG encode.
+      const thisJpeg = previewToExportBlob(jpegQ);
+      if (jpegPending) {
+        const blob = await jpegPending;
+        if (!blob) throw new Error("frame encode failed");
+        up.push(blob);
+      }
+      jpegPending = thisJpeg;
       const pct = ((f + 1) / frames) * 100;
       els.exportProgress.style.width = pct.toFixed(1) + "%";
       els.exportTitle.textContent = `Rendering… ${pct.toFixed(0)}%`;
     }
+    if (jpegPending) {
+      const blob = await jpegPending;
+      if (!blob) throw new Error("frame encode failed");
+      up.push(blob);
+    }
     els.exportTitle.textContent = "Encoding…";
-    const end = await fetch("/api/export/end?id=" + sessId, { method: "POST" }).then((r) => r.json());
+    await up.done();
+    if (uploadError) throw uploadError;
+    const end = await fetch("/api/export/end?id=" + sessId, { method: "POST", signal }).then((r) => r.json());
     if (!end.src) throw new Error(end.error || "encode failed");
     const a = document.createElement("a");
     a.href = end.src;
@@ -6561,8 +6782,10 @@ async function fastExport() {
     a.click();
   } catch (e) {
     if (sessId) fetch("/api/export/end?id=" + sessId + "&discard=1", { method: "POST" }).catch(() => { });
-    if (String(e.message) !== "cancelled") alert("Export failed: " + e.message);
+    const msg = e?.name === "AbortError" ? "cancelled" : String(e.message || e);
+    if (msg !== "cancelled") alert("Export failed: " + msg);
   } finally {
+    exportAbort = null;
     restoreExportVideoState();
     state.exporting = false; state.rendering = false;
     els.exportOverlay.classList.add("hidden");
@@ -6572,11 +6795,6 @@ async function fastExport() {
 }
 
 /* ── WebCodecs export (browser H.264 → server mux) ── */
-/* Uploads MUST be strictly sequential — concurrent /frame POSTs race on the
-   same ffmpeg stdin and deadlock the pipe. Annex-B AUs concatenate (start
-   codes), so we batch them: first AU starts ffmpeg, later POSTs carry ~12 AUs
-   or ~128 KiB so HTTP headers stop dominating the payload. */
-let webCodecsAbort = null;
 function waitEncodeQueue(encoder, max = 2, { signal, getError } = {}) {
   const cancelled = () => renderCancelled || !!(signal && signal.aborted);
   const failed = () => (getError ? getError() : null);
@@ -6612,8 +6830,8 @@ async function webCodecsExport() {
   if (!state.webCodecs) { startExport(); return; }
   pause();
   state.exporting = true; state.rendering = true; renderCancelled = false;
-  webCodecsAbort = new AbortController();
-  const signal = webCodecsAbort.signal;
+  exportAbort = new AbortController();
+  const signal = exportAbort.signal;
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
   els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues.";
@@ -6624,61 +6842,8 @@ async function webCodecsExport() {
   let sessId = null;
   let encoder = null;
   let uploadError = null;
-  // single-flight POST chain; each body may be several concatenated Annex-B AUs
-  const BATCH_AUS = 12;
-  const BATCH_BYTES = 128 * 1024;
-  let batch = [];
-  let batchBytes = 0;
-  let sentFirstAu = false;
-  let uploadTail = Promise.resolve();
-  let uploadsInFlight = 0;
-  const concatAus = (parts, n) => {
-    if (parts.length === 1) return parts[0];
-    const out = new Uint8Array(n);
-    let o = 0;
-    for (const p of parts) { out.set(p, o); o += p.length; }
-    return out;
-  };
-  const enqueueUpload = (buf) => {
-    uploadsInFlight++;
-    // recover from a prior rejection so one failed POST doesn't stall the chain
-    const p = uploadTail.catch(() => {}).then(async () => {
-      if (renderCancelled || signal.aborted) throw new Error("cancelled");
-      if (uploadError) throw uploadError;
-      const r = await fetch("/api/export/frame?id=" + sessId, {
-        method: "POST", body: buf, signal,
-      });
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "frame upload failed");
-    });
-    uploadTail = p.catch((err) => {
-      if (!uploadError) uploadError = err;
-    }).finally(() => { uploadsInFlight--; });
-    return p;
-  };
-  const flushBatch = (force) => {
-    if (!batch.length) return;
-    const first = !sentFirstAu;
-    if (!force && !first && batchBytes < BATCH_BYTES && batch.length < BATCH_AUS) return;
-    sentFirstAu = true;
-    const parts = batch, n = batchBytes;
-    batch = [];
-    batchBytes = 0;
-    enqueueUpload(concatAus(parts, n));
-  };
-  const enqueueAu = (buf) => {
-    batch.push(buf);
-    batchBytes += buf.length;
-    flushBatch(false);
-  };
-  const waitUploadBackpressure = (max = 2) => new Promise((res, rej) => {
-    const tick = () => {
-      if (renderCancelled || signal.aborted) { clearInterval(poll); rej(new Error("cancelled")); }
-      else if (uploadError) { clearInterval(poll); rej(uploadError); }
-      else if (uploadsInFlight <= max) { clearInterval(poll); res(); }
-    };
-    const poll = setInterval(tick, 20);
-    tick();
-  });
+  const setError = (err) => { if (!uploadError) uploadError = err; };
+  let up = null;
   try {
     els.exportTitle.textContent = "Mixing audio…";
     const wav = await renderAudioMix(dur);
@@ -6700,6 +6865,10 @@ async function webCodecsExport() {
       const r = await fetch("/api/export/audio?id=" + sessId, { method: "POST", body: wav, signal });
       if (!r.ok) throw new Error("audio upload failed");
     }
+    up = createExportUploader(sessId, {
+      batchItems: 12, batchBytes: 128 * 1024, signal,
+      getError: () => uploadError, setError,
+    });
 
     // Always encode at project/frame resolution (not display CSS size).
     const w = Math.max(2, project.width | 0 || 1280);
@@ -6716,7 +6885,7 @@ async function webCodecsExport() {
         if (uploadError || renderCancelled || signal.aborted) return;
         const buf = new Uint8Array(chunk.byteLength);
         chunk.copyTo(buf);
-        enqueueAu(buf);
+        up.push(buf);
       },
       error: (e) => { uploadError = e; },
     });
@@ -6726,11 +6895,13 @@ async function webCodecsExport() {
       latencyMode: "quality",
     });
     try { await document.fonts.ready; } catch { }
+    resetExportCanvases();
+    await armExportCors();
 
     for (let f = 0; f < frames; f++) {
       if (renderCancelled || signal.aborted) throw new Error("cancelled");
       if (uploadError) throw uploadError;
-      await waitUploadBackpressure(2);
+      await up.waitBackpressure(2);
       await waitEncodeQueue(encoder, 2, { signal, getError: () => uploadError });
       const t = f / fps;
       state.time = t;
@@ -6740,10 +6911,17 @@ async function webCodecsExport() {
       // Absolute µs timestamps; duration = delta so average rate stays exact
       // (constant Math.round(1e6/fps) drifts, e.g. 33333µs → avg 1000000/33333).
       const ts = Math.round(f * 1e6 / fps);
-      const frame = new VideoFrame(els.preview, {
-        timestamp: ts,
-        duration: Math.round((f + 1) * 1e6 / fps) - ts,
-      });
+      let frame;
+      try {
+        frame = new VideoFrame(els.preview, {
+          timestamp: ts,
+          duration: Math.round((f + 1) * 1e6 / fps) - ts,
+        });
+      } catch (e) {
+        if (e && (e.name === "SecurityError" || /taint/i.test(String(e.message || e))))
+          throw new Error("Tainted canvas — a clip is from another origin (not /media or /library) without CORS. Import the file into the project, or serve it with Access-Control-Allow-Origin.");
+        throw e;
+      }
       try {
         encoder.encode(frame, { keyFrame: f === 0 || f % keyEvery === 0 });
       } finally {
@@ -6755,8 +6933,7 @@ async function webCodecsExport() {
     }
     els.exportTitle.textContent = "Finishing…";
     await encoder.flush();
-    flushBatch(true);
-    await uploadTail;
+    await up.done();
     if (uploadError) throw uploadError;
     encoder.close();
     encoder = null;
@@ -6772,7 +6949,7 @@ async function webCodecsExport() {
     const msg = e?.name === "AbortError" ? "cancelled" : String(e.message || e);
     if (msg !== "cancelled") alert("Export failed: " + msg);
   } finally {
-    webCodecsAbort = null;
+    exportAbort = null;
     restoreExportVideoState();
     state.exporting = false; state.rendering = false;
     els.exportOverlay.classList.add("hidden");
@@ -6890,7 +7067,7 @@ $("exportWcMode")?.addEventListener("change", async () => {
 $("btnCancelExport").addEventListener("click", () => {
   if (state.rendering) {
     renderCancelled = true;
-    try { webCodecsAbort?.abort(); } catch { }
+    try { exportAbort?.abort(); } catch { }
   } else finishExport(false);
 });
 $("btnPlay").addEventListener("click", () => state.playing ? pause() : play());

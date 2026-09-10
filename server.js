@@ -179,7 +179,8 @@ function faststart(file) { return maybeFaststart(file); }
 
 /* ── Export sessions ──
    Two modes share the same HTTP session API:
-     jpeg   — browser streams JPEGs; ffmpeg encodes via an encoding profile (Fast)
+     jpeg   — browser streams JPEGs (one POST may concatenate several);
+              ffmpeg encodes via an encoding profile (Fast)
      annexb — browser streams Annex-B H.264 (one POST may concatenate several AUs);
               ffmpeg stream-copies (WebCodecs)
    Both spawn on the FIRST frame, not here: the audio mix is uploaded between

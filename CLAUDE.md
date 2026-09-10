@@ -455,8 +455,11 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
   redirects to those. Remote SVG is refused (`/media/*.svg` is served
   same-origin as `image/svg+xml` — a scripted SVG opened as a document would
   run on the editor origin). Does not write `project.json` — register the media
-  afterwards (UI and `fablecut_import_media` do this). Do **not** put the
-  HTTPS URL in `media.src`: canvas CORS would break thumbs, FX and export.
+  afterwards (UI and `fablecut_import_media` do this). Do **not** put a
+  raw `https://` URL (or another origin, including `localhost` on a different
+  port) in `media.src`: canvas CORS would taint the compositor and Fast /
+  WebCodecs export cannot JPEG-encode. Import into `./media` so `src` is
+  `/media/…`, or serve the remote with `Access-Control-Allow-Origin`.
 - `POST /api/analyze` — body `{src:"/media/ref.mp4", threshold?, music?}`: analyze a
   reference video into an edit blueprint (see "Remake a reference video"); extracts
   its music into ./media. `GET /api/analyze?src=…` returns the cached blueprint.
@@ -471,7 +474,7 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
   `mode` is `"jpeg"` (default, Fast) or `"annexb"` (WebCodecs H.264 elementary stream);
   jpeg **400** if `profile` is not a defined id, or if ffmpeg rejects its args in the dry run)
   · `POST /api/export/frame?id=` (JPEG body for jpeg mode; Annex-B bytes for
-  annexb — one POST may carry several concatenated AUs. Must be after audio;
+  annexb — one POST may carry several concatenated JPEGs or AUs. Must be after audio;
   ffmpeg is spawned on the first frame in both modes)
   · `POST /api/export/audio?id=` (WAV body — must be sent before the first frame)
   · `POST /api/export/end?id=[&discard=1]` → `{src}` under `/exports/`

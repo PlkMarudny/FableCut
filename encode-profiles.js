@@ -13,8 +13,8 @@
    conversion + tags from profile.color) and the output path; the profile owns
    everything in between:
 
-     ffmpeg -y -f image2pipe -framerate <fps> -i - [-i audio.wav]
-            <jpeg-color vf+tags> <profile args…> <out><extension>
+     ffmpeg -y -thread_queue_size 64 -f image2pipe -framerate <fps> -c:v mjpeg
+            -i - [-i audio.wav] <jpeg-color vf+tags> <profile args…> <out><extension>
    ═══════════════════════════════════════════════════════════════════════════ */
 "use strict";
 const fs = require("fs");
@@ -215,7 +215,16 @@ function withJpegColor(profile) {
    mix (when the timeline has any) is already on disk by the time we spawn. */
 function buildExportArgs(profile, { fps, wavPath, outPath }) {
   // -hide_banner so a failure's stderr tail is the actual error, not the build config
-  const args = ["-y", "-hide_banner", "-f", "image2pipe", "-framerate", String(fps), "-i", "-"];
+  // thread_queue_size: batched JPEG POSTs can dump many packets at once; the
+  // default queue of 8 blocks stdin (and the HTTP handler) until x264 catches up.
+  const args = [
+    "-y", "-hide_banner",
+    "-thread_queue_size", "64",
+    // -c:v mjpeg on the INPUT so ffmpeg does not have to probe stdin. image2pipe
+    // alone fails the probe when the first write and stdin EOF arrive together
+    // (short exports / batched POSTs); the later profile -c:v is the encoder.
+    "-f", "image2pipe", "-framerate", String(fps), "-c:v", "mjpeg", "-i", "-",
+  ];
   if (wavPath) args.push("-i", wavPath);
   args.push(...withJpegColor(profile), outPath);
   return args;

@@ -193,8 +193,10 @@ same time.
 
 - Fast export: browser renders every frame + an offline audio mix; ffmpeg
   encodes them via an **encoding profile** from `encoding-profiles.json`
-  (keeps rendering if you switch tabs). The Export dialog has a profile
-  selector; pin a project default with `encodeProfile` in `project.json`
+  (keeps rendering if you switch tabs). Frame uploads are batched and overlap
+  with the next frame's render so HTTP round-trips do not stall the compositor.
+  The Export dialog has a profile selector; pin a project default with
+  `encodeProfile` in `project.json`
 - WebCodecs export: the browser HW-encodes Annex-B H.264; the server
   stream-copies and muxes audio. Faster uploads; bitrate/VBR-CBR in the
   Export dialog. Unavailable while an export frame is set (use Fast)
