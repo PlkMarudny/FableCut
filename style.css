@@ -1156,7 +1156,7 @@ body.track-size-s .clip.selected {
 }
 
 .timecode {
-  font: 600 14px/1 "Consolas", monospace;
+  font: 600 14px/1 Consolas, monospace;
   color: #b9b3ff;
   min-width: 0;
   height: auto;
@@ -1177,7 +1177,7 @@ body.track-size-s .clip.selected {
 
 .tc-slash {
   color: var(--dim);
-  font: 600 13px/1 "Consolas", monospace;
+  font: 600 13px/1 Consolas, monospace;
 }
 
 .tc-io {

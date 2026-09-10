@@ -2593,12 +2593,15 @@ function playRange() {
   const end = project.outPoint != null ? project.outPoint : Math.max(projDur(), 0);
   return { start, end: Math.max(end, start) };
 }
-/* Export window — same IN/OUT rules as playRange, always (Limit is playback-only). */
+/* Export window — same IN/OUT rules as playRange, always (Limit is playback-only).
+   Duration is an integer frame count at project fps (min 1) so Fast / WebCodecs
+   frame loops and renderAudioMix share one length. */
 function exportRange() {
   const fps = projectFps();
   const { start, end } = playRange();
-  const dur = Math.max(1 / fps, end - start);
-  return { start, end: start + dur, dur };
+  const frames = Math.max(1, Math.round((end - start) * fps));
+  const dur = frames / fps;
+  return { start, end: start + dur, dur, frames };
 }
 function playLimited() {
   return state.workAreaPlay && !state.exporting && hasWorkArea();
@@ -7137,11 +7140,10 @@ async function fastExport() {
   const signal = exportAbort.signal;
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
-  els.exportNote.textContent = "Rendering frames → ffmpeg. You can switch tabs; export continues.";
+  els.exportNote.textContent = "Rendering frames → ffmpeg. Do not switch tabs.";
   restoreExportVideoState();
-  const { start: t0, end: t1, dur } = beginExportWindow();
+  const { start: t0, end: t1, frames } = beginExportWindow();
   const fps = projectFps();
-  const frames = Math.max(1, Math.round(dur * fps));
   let sessId = null;
   let uploadError = null;
   const setError = (err) => { if (!uploadError) uploadError = err; };
@@ -7297,11 +7299,10 @@ async function webCodecsExport() {
   const signal = exportAbort.signal;
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
-  els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues.";
+  els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. Do not switch tabs.";
   restoreExportVideoState();
-  const { start: t0, end: t1, dur } = beginExportWindow();
+  const { start: t0, end: t1, frames } = beginExportWindow();
   const fps = projectFps();
-  const frames = Math.max(1, Math.round(dur * fps));
   const keyEvery = Math.max(1, Math.round(fps * 2));
   let sessId = null;
   let encoder = null;
