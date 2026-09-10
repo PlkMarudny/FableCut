@@ -5481,19 +5481,10 @@ els.preview.addEventListener("pointerdown", (e) => {
       canvasDrag = { mode: "rotate", id: cur.id, startRot: +ep.rotation || 0, startAng: Math.atan2(pt.y - b.cy, pt.x - b.cx), cx: b.cx, cy: b.cy };
     } else if (hd.corners.some((h) => Math.abs(pt.x - h.x) <= grab && Math.abs(pt.y - h.y) <= grab)) {
       if (cur.kind === "text") {
-        ensureTextBox(cur);
-        // Recompute bounds after seeding the box; pin the opposite corner.
-        const b2 = clipBounds(cur, evalProps(cur, state.time), W, H);
-        const hd2 = overlayHandles(b2, W, H);
-        const ci = hd2.corners.findIndex((h) => Math.abs(pt.x - h.x) <= grab && Math.abs(pt.y - h.y) <= grab);
-        const signs = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
-        const [dsx, dsy] = signs[ci >= 0 ? ci : 0];
-        const cs = Math.cos(b2.rot), sn = Math.sin(b2.rot);
-        const ox = -dsx * b2.hw, oy = -dsy * b2.hh; // opposite corner in local space
         canvasDrag = {
-          mode: "box", id: cur.id, rot: b2.rot, dragSX: dsx, dragSY: dsy,
-          fix: { x: b2.cx + ox * cs - oy * sn, y: b2.cy + ox * sn + oy * cs },
-          aspect: Math.max(0.05, (b2.hw * 2) / Math.max(1e-6, b2.hh * 2)),
+          ...beginTextBoxDrag(cur, pt, W, H),
+          seedBox: !hasTextBox(cur.props),
+          startClient: { x: e.clientX, y: e.clientY },
         };
       } else {
         canvasDrag = { mode: "scale", id: cur.id, startScale: +(propsAtPlayhead(cur).scale) || 1, startDist: Math.hypot(lp.x, lp.y) || 1 };
@@ -5550,7 +5541,20 @@ els.preview.addEventListener("pointermove", (e) => {
   if (!canvasDrag) { updateCanvasCursor(e); return; }
   const c = getClip(canvasDrag.id); if (!c) return;
   const W = els.preview.width, H = els.preview.height, pt = canvasPt(e);
-  if (!canvasDidMove) { pushUndo(); canvasDidMove = true; } // one undo per drag, only if it actually moves
+  // Hug-content titles: don't seed a box until the pointer actually moves
+  // (same ~3px deadzone as clip drags), so a click-release is a no-op.
+  if (canvasDrag.seedBox && !canvasDidMove) {
+    const s = canvasDrag.startClient;
+    if (s && Math.hypot(e.clientX - s.x, e.clientY - s.y) < 3) return;
+  }
+  if (!canvasDidMove) {
+    pushUndo(); // snapshot includes hug-content, before any box seed
+    canvasDidMove = true;
+    if (canvasDrag.seedBox) {
+      ensureTextBox(c);
+      Object.assign(canvasDrag, beginTextBoxDrag(c, pt, W, H), { seedBox: false });
+    }
+  }
   if (canvasDrag.mode === "move") {
     setAnimProp(c, "x", Math.round(canvasDrag.startX + (pt.x - canvasDrag.startPt.x)));
     setAnimProp(c, "y", Math.round(canvasDrag.startY + (pt.y - canvasDrag.startPt.y)));
@@ -5907,6 +5911,22 @@ function ensureTextBox(c) {
   }
   c.props.boxW = Math.max(40, +(half.hw * 2).toFixed(1));
   c.props.boxH = Math.max(24, +(half.hh * 2).toFixed(1));
+}
+/* Pin the opposite corner for a boxed-text resize (call after any seed). */
+function beginTextBoxDrag(c, pt, W, H) {
+  const b2 = clipBounds(c, evalProps(c, state.time), W, H);
+  const hd2 = overlayHandles(b2, W, H);
+  const grab = hd2.hs * 1.8;
+  const ci = hd2.corners.findIndex((h) => Math.abs(pt.x - h.x) <= grab && Math.abs(pt.y - h.y) <= grab);
+  const signs = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+  const [dsx, dsy] = signs[ci >= 0 ? ci : 0];
+  const cs = Math.cos(b2.rot), sn = Math.sin(b2.rot);
+  const ox = -dsx * b2.hw, oy = -dsy * b2.hh;
+  return {
+    mode: "box", id: c.id, rot: b2.rot, dragSX: dsx, dragSY: dsy,
+    fix: { x: b2.cx + ox * cs - oy * sn, y: b2.cy + ox * sn + oy * cs },
+    aspect: Math.max(0.05, (b2.hw * 2) / Math.max(1e-6, b2.hh * 2)),
+  };
 }
 function drawText(c, p, local) {
   const useBox = hasTextBox(p);
