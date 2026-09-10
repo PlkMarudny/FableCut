@@ -179,7 +179,8 @@ function faststart(file) { return maybeFaststart(file); }
 
 /* ── Export sessions ──
    Two modes share the same HTTP session API:
-     jpeg   — browser streams JPEGs; ffmpeg encodes via an encoding profile (Fast)
+     jpeg   — browser streams JPEGs (one POST may concatenate several);
+              ffmpeg encodes via an encoding profile (Fast)
      annexb — browser streams Annex-B H.264 (one POST may concatenate several AUs);
               ffmpeg stream-copies (WebCodecs)
    Both spawn on the FIRST frame, not here: the audio mix is uploaded between
@@ -206,11 +207,17 @@ function attachProc(sess, proc) {
   proc.stdin.on("error", () => {}); // EPIPE if ffmpeg dies mid-stream
   sess.done = new Promise((res) => proc.on("close", res));
 }
-async function beginExport(fps, name, profileId, hasAudio, mode) {
+async function beginExport(fps, name, profileId, hasAudio, mode, extra = {}) {
   const m = mode === "annexb" ? "annexb" : "jpeg";
   const rate = Number(fps);
   if (!Number.isFinite(rate) || rate <= 0) {
     throw new Error("export fps required (pass project.fps)");
+  }
+  const pixelFormat = extra.pixelFormat === "rgba" ? "rgba" : "jpeg";
+  const width = Math.max(0, extra.width | 0);
+  const height = Math.max(0, extra.height | 0);
+  if (pixelFormat === "rgba" && (width < 2 || height < 2)) {
+    throw new Error("export width/height required for rgba");
   }
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const safe = safeName(name || "export");
@@ -240,6 +247,7 @@ async function beginExport(fps, name, profileId, hasAudio, mode) {
   const { outPath, partPath } = reserveExportPaths(EXPORTS_DIR, safe, profile.extension);
   const sess = {
     mode: m, proc: null, fps: rate, profile, name: safe, hasAudio: !!hasAudio,
+    pixelFormat, width, height,
     dir, wav: null, partPath, outPath,
     stderr: "", done: null, lastTouch: Date.now(),
     err: () => sess.stderr.trim().split("\n").filter(Boolean).slice(-3)
@@ -254,6 +262,7 @@ async function beginExport(fps, name, profileId, hasAudio, mode) {
 function startEncoder(sess) {
   const proc = spawn("ffmpeg", buildExportArgs(sess.profile, {
     fps: sess.fps, wavPath: sess.wav, outPath: sess.partPath,
+    pixelFormat: sess.pixelFormat, width: sess.width, height: sess.height,
   }), { stdio: ["pipe", "ignore", "pipe"] });
   proc.stderr.on("data", (d) => { sess.stderr = (sess.stderr + d).slice(-2000); });
   // EPIPE on end()/late writes is normal once ffmpeg has exited; writeExportFrame
@@ -509,10 +518,10 @@ const server = http.createServer(async (req, res) => {
       const mode = opts.mode === "annexb" ? "annexb" : "jpeg";
       if (mode !== "annexb" && opts.profile) resolveProfile(opts.profile); // 400, not 500, on a bad id — even without ffmpeg
       if (!HAS_FFMPEG) { sendJSON(res, 400, { error: "ffmpeg not found on PATH" }); return; }
-      sendJSON(res, 200, await beginExport(opts.fps, opts.name, opts.profile, opts.hasAudio !== false, mode));
+      sendJSON(res, 200, await beginExport(opts.fps, opts.name, opts.profile, opts.hasAudio !== false, mode, opts));
     } catch (e) {
       // an unusable profile is the caller's problem, not a server fault
-      const bad = /^Unknown encoding profile|was rejected by ffmpeg|export fps required/.test(e.message || "");
+      const bad = /^Unknown encoding profile|was rejected by ffmpeg|export fps required|export width\/height required/.test(e.message || "");
       sendJSON(res, bad ? 400 : 500, { error: String(e.message || e) });
     }
     return;

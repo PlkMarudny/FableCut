@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bars collapse via **◂** / **▸** beside the master strip (master L/R stay visible).
 
 ### Changed
+- Fast export no longer waits for each JPEG HTTP POST before drawing the next
+  frame. The compositor snapshots via `transferToImageBitmap` and keeps going;
+  JPEG encode runs in workers and uploads overlap in batches. Piping uncompressed
+  RGBA over HTTP was slower (1080p ≈ 8 MiB/frame); the UI is back on JPEG
+  image2pipe. `pixelFormat: "rgba"` remains on `/api/export/begin` for callers
+  that want raw frames.
 - `POST /api/export/begin` now **requires** `fps` (pass `project.fps`) instead
   of defaulting to 30, and takes `mode: "jpeg" | "annexb"`. Callers that relied
   on the old default must send the value; a missing or non-numeric `fps` is a
@@ -53,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that omit `panSchema: 1` will be migrated again on the next open.
 
 ### Fixed
+- Fast / WebCodecs export no longer throws “tainted canvases may not be exported”
+  for animated SVG overlays (rasterized via a same-origin blob instead of a
+  `data:` URL) or for other-origin footage that sends CORS (reload with
+  `crossOrigin=anonymous` for the encode). A clip whose server omits
+  `Access-Control-Allow-Origin` still cannot be JPEG-encoded — import it into
+  `./media` instead.
 - MCP `initialize` no longer echoes an unsupported `protocolVersion`. Missing or unknown versions now negotiate to `2025-11-25` instead of claiming a revision the server does not speak (#58).
 - `CLAUDE.md` pointed agents at `fablecut_docs {section:"props"}`, which matches no `## ` heading and returns nothing useful; it now names a real section.
 - Audio graph teardown on project reload — clip chains

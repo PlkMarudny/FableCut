@@ -201,6 +201,57 @@ test("POST /api/export/begin validates the encoding profile", async (t) => {
   assert.equal(end.status, 200);
 });
 
+test("buildExportArgs uses raw RGBA when the client asks for it", () => {
+  const { buildExportArgs, resolveProfile } = require("../encode-profiles");
+  const args = buildExportArgs(resolveProfile("draft"), {
+    fps: 50, outPath: "out.mp4", pixelFormat: "rgba", width: 1920, height: 1080,
+  });
+  assert.ok(args.includes("rawvideo"));
+  assert.equal(args[args.indexOf("-s") + 1], "1920x1080");
+  assert.ok(args.indexOf("-f") < args.indexOf("-i"));
+});
+
+test("buildExportArgs still accepts JPEG image2pipe for older clients", () => {
+  const { buildExportArgs, resolveProfile } = require("../encode-profiles");
+  const args = buildExportArgs(resolveProfile("draft"), { fps: 30, outPath: "out.mp4" });
+  const i = args.indexOf("-thread_queue_size");
+  assert.ok(i >= 0);
+  assert.equal(args[args.indexOf("-c:v") + 1], "mjpeg");
+  assert.ok(args.indexOf("-c:v") < args.indexOf("-i"));
+});
+
+test("POST /api/export/frame accepts concatenated RGBA frames", async (t) => {
+  const { dir, base } = await boot(t);
+  const ffmpeg = await (await fetch(base + "/api/export/ffmpeg")).json();
+  if (!ffmpeg.available) return;
+
+  const w = 64, h = 64;
+  const frame = Buffer.alloc(w * h * 4, 0);
+  for (let i = 3; i < frame.length; i += 4) frame[i] = 255;
+
+  const begin = await fetch(base + "/api/export/begin", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fps: 30, name: "batch-rgba", profile: "draft", hasAudio: false,
+      pixelFormat: "rgba", width: w, height: h,
+    }),
+  });
+  const sess = await begin.json();
+  assert.equal(begin.status, 200, sess.error);
+
+  const posted = await fetch(base + "/api/export/frame?id=" + encodeURIComponent(sess.id), {
+    method: "POST", body: Buffer.concat([frame, frame, frame]),
+  });
+  assert.equal(posted.status, 200, (await posted.json().catch(() => ({}))).error);
+
+  const end = await fetch(base + "/api/export/end?id=" + encodeURIComponent(sess.id), { method: "POST" });
+  const out = await end.json();
+  assert.equal(end.status, 200, out.error);
+  assert.match(out.src, /^\/exports\//);
+  const file = path.join(dir, "exports", decodeURIComponent(out.src.split("/").pop()));
+  assert.ok(fs.existsSync(file), "batched RGBA frames should mux into a finished file");
+});
+
 test("the app shell and its assets are served", async (t) => {
   const { base } = await boot(t);
   const index = await fetch(base + "/");
