@@ -480,6 +480,37 @@ test("syncInspectorPlayhead: unchanged stamp is a no-op", () => {
   assert.equal(row.input.value, "2.5"); // local 3.5: 1 + (3-1)·0.75
 });
 
+test("syncInspectorPlayhead: clip start/duration change invalidates the stamp", () => {
+  const c = keyedClip();
+  const sb = makeSandbox({ clips: [c] });
+  const row = scaleRow();
+  const btn = kfBtn("scale");
+  sb.els.inspector = fakeInspector({
+    inputs: [row.input], buttons: [btn], vals: { scale: row.val },
+  });
+  sb.state.selId = "c1";
+  sb.state.time = 13; // on-clip, local 3 → scale 2
+  sb.syncInspectorPlayhead();
+  assert.equal(row.input.value, "2");
+  assert.equal(row.input.disabled, false);
+  const writes = row.input.writes;
+  c.start = 11; // still on-clip, local 2 → scale 1; time/sel/gen unchanged
+  sb.syncInspectorPlayhead();
+  assert.ok(row.input.writes > writes, "start change re-syncs");
+  assert.equal(row.input.value, "1");
+  c.start = 20; // playhead now off the clip
+  sb.syncInspectorPlayhead();
+  assert.equal(row.input.disabled, true, "off-clip lock after drag");
+  assert.equal(btn.disabled, true);
+  c.start = 10;
+  c.duration = 2; // 10–12, playhead 13 still off
+  sb.syncInspectorPlayhead();
+  assert.equal(row.input.disabled, true, "duration trim can push the playhead off");
+  c.duration = 5;
+  sb.syncInspectorPlayhead();
+  assert.equal(row.input.disabled, false);
+});
+
 test("syncInspectorPlayhead: out-of-range keyframe saturates the thumb, label keeps truth", () => {
   const c = keyedClip({ keyframes: { scale: [{ t: 2, v: 12 }] } });
   const sb = makeSandbox({ clips: [c] });

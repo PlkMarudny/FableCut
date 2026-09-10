@@ -621,11 +621,16 @@ function fmtInspNum(v, step) {
   return String(+n.toFixed(3));
 }
 /* Inspector playhead-sync cache: the rAF loop re-syncs inspector fields only
-   when the playhead, selection, or keyed values changed since the last sync.
+   when the playhead, selection, keyed values, or the selected clip's start /
+   duration changed since the last sync.
    Mutators that don't re-render the inspector bump inspPropGen. */
 let inspSyncStamp = "";
 let inspPropGen = 0;
-const inspStampNow = () => state.time + "|" + state.selId + "|" + inspPropGen;
+const inspStampNow = () => {
+  const c = getClip(state.selId);
+  return state.time + "|" + state.selId + "|" + inspPropGen + "|"
+    + (c ? c.start : "") + "|" + (c ? c.duration : "");
+};
 /* Audio hold loops one frame of audio built from volume / pan / the speed
    remap — a write to any of them must re-cut it. The mutators own this (like
    dirtyTimeline); scheduleAudioHoldRefresh itself no-ops unless holding. */
@@ -3546,6 +3551,7 @@ function renderInspector(lite) {
     const s = els.inspector.querySelector("[data-k=start]"), d = els.inspector.querySelector("[data-k=duration]");
     if (s) s.value = c.start.toFixed(2);
     if (d) d.value = c.duration.toFixed(2);
+    syncInspectorPlayhead(); // start/duration are in the stamp — refresh keyed fields + off-clip lock
     return;
   }
   const p = propsAtPlayhead(c);
