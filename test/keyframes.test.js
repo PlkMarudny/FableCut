@@ -542,6 +542,23 @@ test("syncInspectorPlayhead: focused field is never rewritten", () => {
   assert.equal(row.input.disabled, false, "focus is never yanked mid-edit");
 });
 
+test("syncInspectorPlayhead: blur re-syncs a field skipped while it held focus", () => {
+  const sb = makeSandbox({ clips: [keyedClip()] });
+  const row = scaleRow();
+  sb.els.inspector = fakeInspector({ inputs: [row.input], vals: { scale: row.val } });
+  sb.state.selId = "c1";
+  sb.state.time = 12;
+  sb.document.activeElement = row.input; // user is mid-edit on the slider
+  sb.syncInspectorPlayhead();
+  sb.state.time = 13;                    // a shortcut moves the playhead under them
+  sb.syncInspectorPlayhead();
+  assert.equal(row.input.writes, 0, "focused input is left alone while it has focus");
+  sb.document.activeElement = null;      // clicks away — the playhead does NOT move
+  sb.syncInspectorPlayhead();
+  assert.equal(row.input.value, "2", "value at the playhead is written on blur");
+  assert.equal(row.val.textContent, "2", "and the label catches up");
+});
+
 test("syncInspectorPlayhead: off the clip, keyframed fields lock, statics stay editable", () => {
   const sb = makeSandbox({ clips: [keyedClip()] });
   const scale = scaleRow();

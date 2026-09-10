@@ -636,7 +636,10 @@ let inspPropGen = 0;
 const inspStampNow = () => {
   const c = getClip(state.selId);
   return state.time + "|" + state.selId + "|" + inspPropGen + "|"
-    + (c ? c.start : "") + "|" + (c ? c.duration : "");
+    + (c ? c.start : "") + "|" + (c ? c.duration : "")
+    // Focus belongs in the stamp: the sync skips the focused field, so a blur
+    // has to invalidate the stamp or that field keeps the value it was left on.
+    + "|" + (document.activeElement?.dataset?.k || "");
 };
 /* Audio hold loops one frame of audio built from volume / pan / the speed
    remap — a write to any of them must re-cut it. The mutators own this (like
