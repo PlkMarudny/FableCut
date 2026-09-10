@@ -6305,7 +6305,9 @@ function loop(ts) {
     drawFrame();
   }
   if (state.dirtyTimeline) rebuildClips();
-  els.playhead.style.left = state.time * state.pps + "px";
+  // device-pixel snap — CSS-pixel round still AA-pulses at 125%/150% DPR
+  const dpr = devicePixelRatio || 1;
+  els.playhead.style.transform = `translateX(${Math.round(state.time * state.pps * dpr) / dpr}px)`;
   drawRuler();
   updateSafeOverlay();
   updateKfGraphs();
