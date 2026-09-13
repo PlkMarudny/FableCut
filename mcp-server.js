@@ -17,7 +17,7 @@ const { spawn, spawnSync } = require("child_process");
 const { loadEncodeProfiles, listProfilesPublic, resolveProfile, profileSummary } = require("./encode-profiles");
 
 const {
-  APP_DIR, DATA_DIR, MEDIA_DIR, ANALYSIS_DIR, LIBRARY_DIR, PROJECT_FILE, ensureDirs,
+  APP_DIR, DATA_DIR, MEDIA_DIR, ANALYSIS_DIR, LIBRARY_DIR, LIBRARY_SUBDIRS, PROJECT_FILE, ensureDirs,
 } = require("./paths");
 const { downloadImportUrl, kindFromName, maybeFaststart } = require("./import-url");
 
@@ -180,7 +180,7 @@ async function callTool(name, args) {
       const files = fs.existsSync(MEDIA_DIR)
         ? fs.readdirSync(MEDIA_DIR).filter((f) => fs.statSync(path.join(MEDIA_DIR, f)).isFile())
         : [];
-      const libSummary = ["sfx", "elements", "svg", "fonts"].map((d) => {
+      const libSummary = LIBRARY_SUBDIRS.map((d) => {
         const dir = path.join(LIBRARY_DIR, d);
         const n = fs.existsSync(dir) ? fs.readdirSync(dir).length : 0;
         return `${d}: ${n}`;

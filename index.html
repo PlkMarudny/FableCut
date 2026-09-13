@@ -276,19 +276,22 @@
 
 <!-- ══════════ LIVE SOURCE OVERLAY ══════════ -->
 <div class="overlay hidden" id="liveSourceOverlay">
-  <div class="dialog" id="liveSourceDialog" role="dialog" aria-modal="true" aria-labelledby="liveSourceTitle">
+  <div class="dialog live-source" id="liveSourceDialog" role="dialog" aria-modal="true" aria-labelledby="liveSourceTitle">
     <h2 id="liveSourceTitle">Add live source</h2>
-    <p class="dim">MediaMTX playback: availability from <code>/list</code>, video from <code>/get</code> fMP4. Clips keep normal in/out; extra recorded time shows as a ghost tail on the timeline.</p>
-    <label class="live-field">Path
-      <input id="liveSourcePath" type="text" spellcheck="false" placeholder="stream or http://localhost:9996/list?path=stream" autocomplete="off">
-    </label>
-    <label class="live-field">List URL
-      <input id="liveSourceList" type="text" spellcheck="false" value="http://localhost:9996/list" autocomplete="off">
-    </label>
+    <p class="dim">Click a screen to add that feed. Custom URL is for any other MediaMTX path.</p>
+    <div class="live-screens" id="liveSourceScreens" role="listbox" aria-label="Live source presets"></div>
+    <div class="live-source-manual hidden" id="liveSourceManual">
+      <label class="live-field">Path
+        <input id="liveSourcePath" type="text" spellcheck="false" placeholder="stream or http://localhost:9996/list?path=stream" autocomplete="off">
+      </label>
+      <label class="live-field">List URL
+        <input id="liveSourceList" type="text" spellcheck="false" value="http://localhost:9996/list" autocomplete="off">
+      </label>
+    </div>
     <p class="dim live-source-err hidden" id="liveSourceErr" role="status"></p>
     <div class="dialog-actions">
       <button type="button" class="btn" id="btnCancelLiveSource">Cancel</button>
-      <button type="button" class="btn primary" id="btnConfirmLiveSource">Add</button>
+      <button type="button" class="btn primary hidden" id="btnConfirmLiveSource">Add</button>
     </div>
   </div>
 </div>

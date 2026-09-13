@@ -2024,6 +2024,117 @@ body.track-size-s .clip .clip-kf-n {
   margin-bottom: 16px;
 }
 
+.dialog.live-source {
+  width: min(640px, 94vw);
+  max-height: min(90vh, 720px);
+  overflow: auto;
+}
+.live-screens {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 12px;
+  margin: 0 0 14px;
+}
+.live-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.live-screen-bezel {
+  display: block;
+  padding: 8px 8px 16px;
+  background: #26262e;
+  border: 1px solid #3a3a44;
+  border-radius: 6px;
+  box-shadow: inset 0 1px 0 #ffffff10, 0 4px 14px #0006;
+  transition: border-color .12s;
+}
+.live-screen:hover .live-screen-bezel,
+.live-screen:focus-visible .live-screen-bezel,
+.live-screen.is-custom-open .live-screen-bezel {
+  border-color: var(--accent);
+}
+.live-screen:focus-visible {
+  outline: none;
+}
+.live-screen-glass {
+  display: block;
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #0a0a0e;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.live-screen-glass video,
+.live-screen-poster,
+.live-screen-status,
+.live-screen-plus {
+  pointer-events: none;
+}
+.live-screen.is-online video[src] {
+  opacity: 1;
+}
+.live-screen-poster {
+  position: absolute;
+  inset: 0;
+  background: #0a0a0e center/cover no-repeat;
+}
+.live-screen.is-online video[src] ~ .live-screen-poster {
+  opacity: 0;
+}
+.live-screen-status {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  z-index: 1;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: #0009;
+  color: var(--dim);
+}
+.live-screen.is-online .live-screen-status { color: #7dce8a; }
+.live-screen.is-offline .live-screen-status { color: #ff8a8a; }
+.live-screen-name {
+  font-size: 12px;
+  color: #e8e8ee;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-screen-custom .live-screen-glass {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.live-screen-plus {
+  color: var(--dim);
+  font-size: 28px;
+  font-weight: 300;
+  line-height: 1;
+}
+.live-screen-glass video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+  opacity: 0;
+}
+.live-source-manual {
+  padding-top: 2px;
+}
 .dialog .live-field {
   display: flex;
   flex-direction: column;

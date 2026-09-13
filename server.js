@@ -556,7 +556,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /* API: default-asset library listing (./library/{sfx,elements,svg,fonts}) */
+  /* API: default-asset library listing (./library/{sfx,elements,svg,fonts,live}) */
   if (p === "/api/library" && req.method === "GET") {
     const dir = url.searchParams.get("dir");
     if (!LIBRARY_SUBDIRS.includes(dir)) { sendJSON(res, 400, { error: "dir must be one of " + LIBRARY_SUBDIRS.join("|") }); return; }

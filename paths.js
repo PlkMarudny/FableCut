@@ -30,7 +30,7 @@ const ANALYSIS_DIR = path.join(DATA_DIR, "analysis");
 const LIBRARY_DIR = path.join(DATA_DIR, "library");
 const PROJECT_FILE = path.join(DATA_DIR, "project.json");
 const LIVE_FILE = path.join(DATA_DIR, "live.json");
-const LIBRARY_SUBDIRS = ["sfx", "elements", "svg", "fonts"];
+const LIBRARY_SUBDIRS = ["sfx", "elements", "svg", "fonts", "live"];
 
 /* The asset library ships with the repo but users also drop their own files in
    (library/sfx is gitignored precisely for that). When the data dir is split

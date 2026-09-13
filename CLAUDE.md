@@ -125,11 +125,14 @@ Reusable assets, visible in the editor's left-panel tabs and never copied:
 | `library/elements/` | **Elements** | overlay art: alpha PNGs, light leaks, textures, stickers |
 | `library/svg/`      | **SVG**      | animated vector graphics **you author** (convention below) |
 | `library/fonts/`    | font editor  | `.ttf/.otf/.woff/.woff2`, auto-registered, family name = file name |
+| `library/live/`     | **+ Live** dialog | MediaMTX presets as mini-screens (`{name, path, list?}` JSON + optional poster). Not a bin tab. |
 
-- List via `GET /api/library?dir=sfx|elements|svg|fonts` (recursive; subfolders OK).
+- List via `GET /api/library?dir=sfx|elements|svg|fonts|live` (recursive; subfolders OK).
 - To use one in the timeline, add a media entry whose `src` is its library path,
   e.g. `{ "id":"m_x", "name":"whoosh.mp3", "kind":"audio", "src":"/library/sfx/whoosh.mp3" }`
-  — then reference it from clips like any other media.
+  — then reference it from clips like any other media. Live presets are registered
+  through the **+ Live** dialog (or `addMedia` with `live:true`), not by dropping
+  the JSON onto a track.
 - Dropping files into these folders live-refreshes the open UI.
 
 ## Authoring animated SVGs (the `svg` clip kind)
@@ -474,7 +477,7 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 - `GET  /api/media-proxy?src=<absolute URL>` — same-origin proxy for MediaMTX
   `/list` and `/get` (fMP4). **Loopback / `FABLECUT_ALLOWED_HOSTS` only** — not an
   open proxy. The UI uses this so `:7777` can play `:9996` without CORS.
-- `GET  /api/library?dir=sfx|elements|svg|fonts` — list library assets
+- `GET  /api/library?dir=sfx|elements|svg|fonts|live` — list library assets
 - `POST /api/upload?name=foo.mp4` — raw body saved into ./media, returns `{src}`.
   MP4/MOV/M4V uploads are auto-remuxed with `+faststart` (needs ffmpeg on PATH).
   Files copied straight into ./media by external tools skip this — remux big ones
@@ -519,7 +522,9 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 liveOrigin:"…Z", duration:<seconds from /list>}`. Drop/add a clip as usual. Do not
 grow `clip.duration` or `media.duration` from the agent on every poll — read the
 head from `GET /api/live` if you need it, and let the user extend via the ghost
-handle. After they extend, `in + duration` matches the new head.
+handle. After they extend, `in + duration` matches the new head. The **+ Live**
+dialog's mini-screens are `library/live/*.json` presets (`name`, `path`, optional
+`list` / `poster`); they are a UI shortcut, not a second schema.
 
 **Assemble a rough cut**: clips back-to-back on V1; each `start` = running sum
 of previous durations.

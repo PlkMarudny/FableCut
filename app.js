@@ -49,6 +49,8 @@ const LIVE_POLL_MS = 1500;
 const LIVE_HEAD_SAVE_MS = 2000; // debounce PUT /api/live — not project.json
 const LIVE_DEFAULT_TAIL_SEC = 10 * 60; // new live clips are a 10 min window ending at the recorded head
 const LIVE_BLOB_SEC = 45;              // /get is not Range-seekable over HTTP — fetch this many seconds as a blob
+const LIVE_PREVIEW_SEC = 4;            // + Live dialog mini-screens fetch this much tail
+const LIVE_POSTER_EXT = /\.(png|jpe?g|webp|gif|svg)$/i;
 
 const DEFAULT_PROPS = {
   x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, volume: 1, pan: 0,
@@ -505,6 +507,8 @@ const runtime = {
   livePlayWin: new Map(), // clipId -> {in, dur} of the blob currently on the element
   livePendingWin: new Map(), // clipId -> pinned {in, dur} fetch while the blob is in flight
   liveBlobs: new Map(),   // "mediaId@in x dur" -> {url, promise, in, dur}
+  liveSourceGen: 0,       // bumped to cancel + Live dialog previews
+  liveSourceUrls: [],     // blob: URLs for those mini-screen videos
   selfRevisions: new Set(), // revisions written by this tab — SSE echoes of these can be ignored
 };
 
@@ -1749,6 +1753,7 @@ async function syncFromServer(force) {
     applyProject(data);
     await probeMissingMeta();
     if (state.binTab !== "project") fetchLibrary(state.binTab).then(renderLibrary);
+    if (liveSourceOverlayOpen()) renderLiveSourceScreens();
     loadLibraryFonts();
     fetchEncodeProfiles();
   } catch { }
@@ -2276,22 +2281,185 @@ els.binList.addEventListener("click", (e) => {
   openFileImport(e.clientX, e.clientY);
 });
 
+function liveSourceOverlayOpen() {
+  const el = $("liveSourceOverlay");
+  return !!(el && !el.classList.contains("hidden"));
+}
+function stopLiveSourcePreviews() {
+  runtime.liveSourceGen = (runtime.liveSourceGen || 0) + 1;
+  const box = $("liveSourceScreens");
+  if (box) {
+    for (const v of box.querySelectorAll("video")) {
+      try { v.pause(); } catch { }
+      v.removeAttribute("src");
+      v.load();
+    }
+  }
+  for (const u of runtime.liveSourceUrls || []) URL.revokeObjectURL(u);
+  runtime.liveSourceUrls = [];
+}
+function showLiveSourceManual(on) {
+  const man = $("liveSourceManual");
+  const add = $("btnConfirmLiveSource");
+  const custom = $("liveSourceScreens")?.querySelector(".live-screen-custom");
+  man?.classList.toggle("hidden", !on);
+  add?.classList.toggle("hidden", !on);
+  custom?.classList.toggle("is-custom-open", !!on);
+  if (on) {
+    const list = $("liveSourceList");
+    if (list && !String(list.value || "").trim()) list.value = DEFAULT_LIVE_LIST;
+    $("liveSourcePath")?.focus();
+  }
+}
+function livePosterSrc(poster, stem, files) {
+  const images = files.filter((f) => LIVE_POSTER_EXT.test(f.name));
+  if (poster) {
+    const p = String(poster).trim();
+    if (/^(?:\/|https?:)/i.test(p)) return p;
+    const hit = images.find((f) => f.rel === p || f.name === p || f.rel.endsWith("/" + p));
+    if (hit) return hit.src;
+  }
+  const hit = images.find((f) => f.rel.replace(LIVE_POSTER_EXT, "") === stem);
+  return hit ? hit.src : "";
+}
+function normalizeLivePreset(raw, file, files) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const stem = String(file.rel || file.name || "").replace(/\.json$/i, "");
+  const pathOrUrl = String(raw.path || raw.livePath || stem.split("/").pop() || "").trim();
+  if (!pathOrUrl) return null;
+  let spec;
+  try { spec = parseLiveSourceInput(pathOrUrl, raw.list || raw.liveList || DEFAULT_LIVE_LIST); }
+  catch { return null; }
+  const name = String(raw.name || spec.name || stem.split("/").pop() || pathOrUrl).trim();
+  return {
+    name,
+    livePath: spec.livePath,
+    liveList: spec.liveList,
+    poster: livePosterSrc(raw.poster, stem, files),
+    order: Number.isFinite(+raw.order) ? +raw.order : 1000,
+  };
+}
+async function loadLivePresetList() {
+  const files = await fetchLibrary("live");
+  const jsons = files.filter((f) => /\.json$/i.test(f.name));
+  const out = [];
+  await Promise.all(jsons.map(async (file) => {
+    try {
+      const res = await fetch(file.src, { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const rows = Array.isArray(data) ? data : [data];
+      for (const raw of rows) {
+        const p = normalizeLivePreset(raw, file, files);
+        if (p) out.push(p);
+      }
+    } catch { }
+  }));
+  out.sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name) || a.livePath.localeCompare(b.livePath));
+  return out;
+}
+function makeLiveScreenButton(opts) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "live-screen" + (opts.custom ? " live-screen-custom" : "");
+  btn.setAttribute("role", "option");
+  btn.setAttribute("aria-label", opts.name);
+  btn.innerHTML = `
+    <span class="live-screen-bezel">
+      <span class="live-screen-glass">
+        ${opts.custom
+          ? "<span class=\"live-screen-plus\">+</span>"
+          : "<video muted loop playsinline></video><span class=\"live-screen-poster\"></span>"}
+        <span class="live-screen-status">${opts.custom ? "URL" : "…"}</span>
+      </span>
+    </span>
+    <span class="live-screen-name"></span>`;
+  btn.querySelector(".live-screen-name").textContent = opts.name;
+  const poster = btn.querySelector(".live-screen-poster");
+  if (poster && opts.poster) poster.style.backgroundImage = "url(" + JSON.stringify(opts.poster) + ")";
+  return btn;
+}
+async function previewLiveScreen(btn, preset, gen) {
+  const status = btn.querySelector(".live-screen-status");
+  const video = btn.querySelector("video");
+  const m = { live: true, livePath: preset.livePath, liveList: preset.liveList };
+  try {
+    const avail = liveAvailabilityFromList(await fetchLiveListJson(m));
+    if (gen !== runtime.liveSourceGen) return;
+    if (!avail || !(avail.duration > 0)) throw new Error("empty");
+    m.liveOrigin = avail.liveOrigin;
+    m.duration = avail.duration;
+    btn.classList.add("is-online");
+    btn.classList.remove("is-offline");
+    if (status) status.textContent = "Live";
+    const dur = Math.min(LIVE_PREVIEW_SEC, avail.duration);
+    const inn = Math.max(0, avail.duration - dur);
+    const ab = await fetchLiveGet(m, inn, Math.max(MIN_DUR, dur));
+    if (gen !== runtime.liveSourceGen) return;
+    const url = URL.createObjectURL(new Blob([ab], { type: "video/mp4" }));
+    runtime.liveSourceUrls.push(url);
+    if (video) {
+      video.src = url;
+      video.play().catch(() => {});
+    }
+  } catch {
+    if (gen !== runtime.liveSourceGen) return;
+    btn.classList.add("is-offline");
+    btn.classList.remove("is-online");
+    if (status) status.textContent = "Off";
+  }
+}
+async function renderLiveSourceScreens() {
+  const box = $("liveSourceScreens");
+  if (!box) return;
+  const keepManual = !$("liveSourceManual")?.classList.contains("hidden");
+  const pathVal = $("liveSourcePath")?.value;
+  const listVal = $("liveSourceList")?.value;
+  const activeIsManual = keepManual && ($("liveSourcePath") === document.activeElement
+    || $("liveSourceList") === document.activeElement);
+  stopLiveSourcePreviews();
+  const gen = runtime.liveSourceGen;
+  const presets = await loadLivePresetList();
+  if (gen !== runtime.liveSourceGen) return;
+  box.textContent = "";
+  for (const preset of presets) {
+    const btn = makeLiveScreenButton(preset);
+    btn.addEventListener("click", () => confirmLiveSource(preset));
+    box.appendChild(btn);
+    previewLiveScreen(btn, preset, gen);
+  }
+  const custom = makeLiveScreenButton({ name: "Custom URL", custom: true });
+  custom.addEventListener("click", () => {
+    const man = $("liveSourceManual");
+    showLiveSourceManual(!!man?.classList.contains("hidden"));
+  });
+  box.appendChild(custom);
+  showLiveSourceManual(keepManual);
+  if (pathVal != null && $("liveSourcePath")) $("liveSourcePath").value = pathVal;
+  if (listVal != null && $("liveSourceList")) $("liveSourceList").value = listVal;
+  if (!activeIsManual) box.querySelector(".live-screen")?.focus();
+}
 function openLiveSourceDialog() {
   const err = $("liveSourceErr");
   if (err) { err.textContent = ""; err.classList.add("hidden"); }
+  showLiveSourceManual(false);
   $("liveSourceOverlay").classList.remove("hidden");
-  $("liveSourcePath")?.focus();
+  renderLiveSourceScreens();
 }
 function closeLiveSourceDialog() {
+  stopLiveSourcePreviews();
+  showLiveSourceManual(false);
   $("liveSourceOverlay").classList.add("hidden");
 }
-async function confirmLiveSource() {
+async function confirmLiveSource(from) {
   const err = $("liveSourceErr");
   const showErr = (msg) => { if (err) { err.textContent = msg; err.classList.remove("hidden"); } else toast(msg); };
   if (!state.connected) { showErr("The editor server must be running to add a live source"); return; }
-  let spec;
-  try { spec = parseLiveSourceInput($("liveSourcePath")?.value, $("liveSourceList")?.value); }
-  catch (e) { showErr(e.message || String(e)); return; }
+  let spec = from && from.livePath ? { livePath: from.livePath, liveList: from.liveList, name: from.name } : null;
+  if (!spec) {
+    try { spec = parseLiveSourceInput($("liveSourcePath")?.value, $("liveSourceList")?.value); }
+    catch (e) { showErr(e.message || String(e)); return; }
+  }
   if (project.media.some((m) => isLiveMedia(m) && m.livePath === spec.livePath && m.liveList === spec.liveList)) {
     showErr("That live path is already in the project");
     return;
@@ -2323,12 +2491,15 @@ async function confirmLiveSource() {
 }
 
 /* ═══════════════════ ASSET LIBRARY (./library on the server) ═══════════════
-   Read-only default assets in four tabs: Elements (overlay art), Sound FX,
-   SVG (Claude-authored vector animations), plus fonts consumed by the font
-   editor. Files are used in place (src under /library/…) — never copied. */
+   Read-only default assets in four tabs: Elements, Sound FX, SVG, plus fonts
+   for the font editor. library/live JSON presets feed the + Live dialog
+   (mini-screens), not a bin tab. Files are used in place — never copied. */
 async function fetchLibrary(dir) {
-  try { runtime.library[dir] = await (await fetch("/api/library?dir=" + dir)).json(); }
-  catch { runtime.library[dir] = []; }
+  try {
+    const res = await fetch("/api/library?dir=" + dir);
+    const data = await res.json();
+    runtime.library[dir] = Array.isArray(data) ? data : [];
+  } catch { runtime.library[dir] = []; }
   return runtime.library[dir];
 }
 function libKind(name) {
@@ -8360,13 +8531,14 @@ $("btnConfirmLiveSource")?.addEventListener("click", () => confirmLiveSource());
 $("liveSourceOverlay")?.addEventListener("pointerdown", (e) => {
   if (e.target === $("liveSourceOverlay")) closeLiveSourceDialog();
 });
+$("liveSourceDialog")?.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); closeLiveSourceDialog(); }
+});
 $("liveSourcePath")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); confirmLiveSource(); }
-  if (e.key === "Escape") closeLiveSourceDialog();
 });
 $("liveSourceList")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); confirmLiveSource(); }
-  if (e.key === "Escape") closeLiveSourceDialog();
 });
 $("btnSplit").addEventListener("click", splitAtPlayhead);
 $("btnCloseGap").addEventListener("click", closeGapAtPlayhead);
@@ -8945,7 +9117,19 @@ window.addEventListener("keydown", (e) => {
     closeImportUrl();
     return;
   }
+  if (k === "Escape" && liveSourceOverlayOpen()) {
+    e.preventDefault();
+    closeLiveSourceDialog();
+    return;
+  }
   if (isTypingTarget(document.activeElement)) return;
+  if (liveSourceOverlayOpen()) {
+    if (k === " ") {
+      e.preventDefault();
+      if (document.activeElement?.classList.contains("live-screen")) document.activeElement.click();
+    }
+    return;
+  }
   if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
   else if ((k === "p" || k === "P") && !e.ctrlKey && !e.metaKey && !e.altKey && state.playing) {
     e.preventDefault();

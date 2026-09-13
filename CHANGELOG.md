@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **+ Live dialog mini-screens** — presets in `library/live/` (JSON + optional
+  poster) show as a camera wall; click a screen to add it. Manual path / list
+  URL is the Custom URL tile. Reachable MediaMTX paths play a short muted
+  preview in the tile.
 - Program Monitor transport: playhead as `current / sequence duration` on the
   left; when IN/OUT are set, a right-side stack of IN, marked duration, OUT.
 - Ctrl/Cmd-click an inspector **slider** to reset that property to its default

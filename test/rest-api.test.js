@@ -113,6 +113,11 @@ test("GET /api/library lists assets and validates the dir argument", async (t) =
   assert.match(one.headers.get("content-security-policy") || "", /sandbox/);
   await one.arrayBuffer();
 
+  const live = await fetch(base + "/api/library?dir=live");
+  assert.equal(live.status, 200);
+  const liveItems = await live.json();
+  assert.ok(liveItems.some((item) => item.name.endsWith(".json")), "shipped live presets should be seeded");
+
   for (const bad of ["", "bogus", "../..", "sfx/../../.."]) {
     const r = await fetch(base + "/api/library?dir=" + encodeURIComponent(bad));
     assert.equal(r.status, 400, `dir=${bad} should be refused`);
