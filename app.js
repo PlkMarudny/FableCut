@@ -929,9 +929,35 @@ function normalizeFolders(list) {
   for (const f of out) if (f.parentId && !seen.has(f.parentId)) f.parentId = null;
   return out;
 }
+/* After a save that omitted live flags (rebase / panSchema migration / compact
+   rewrite), the row still has a MediaMTX /get src. Rebuild livePath/list/origin
+   from that URL so preview uses the blob window again instead of a raw /get. */
+function recoverLiveMedia(m) {
+  if (m.live && m.livePath && m.liveList) return false;
+  let raw = String(m.src || "");
+  if (raw.startsWith("/api/media-proxy")) {
+    try { raw = new URL(raw, location.origin).searchParams.get("src") || raw; }
+    catch { /* keep raw */ }
+  }
+  let u;
+  try { u = new URL(raw); } catch { return false; }
+  if (!/\/get\/?$/i.test(u.pathname)) return false;
+  const livePath = u.searchParams.get("path");
+  if (!livePath) return false;
+  m.live = true;
+  if (!m.livePath) m.livePath = livePath;
+  if (!m.liveList) m.liveList = u.origin + "/list";
+  const start = u.searchParams.get("start");
+  if (start && !m.liveOrigin) {
+    const ms = Date.parse(start);
+    m.liveOrigin = Number.isFinite(ms) ? new Date(ms).toISOString() : start;
+  }
+  return true;
+}
 function normalizeMediaEntry(m) {
   if (!m || typeof m !== "object") return m;
   const out = { ...m, folderId: m.folderId || null };
+  recoverLiveMedia(out);
   if (out.live) {
     const d = finiteSec(out.duration);
     out.duration = d;
@@ -1397,6 +1423,10 @@ function applyProject(data) {
     exportFrame: normalizeExportFrame(data.exportFrame, data.width || 1280, data.height || 720),
     encodeProfile: data.encodeProfile || null,
   });
+  if ((data.media || []).some((raw, i) => {
+    const m = project.media[i];
+    return m && m.live && !(raw && raw.live && raw.livePath && raw.liveList);
+  })) scheduleSave();
   applyTracksFromProject(data.tracks);
   ensureTracksCoverClips();
   project.tracks = serializeTracks();
