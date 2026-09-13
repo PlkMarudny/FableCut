@@ -176,6 +176,9 @@ installs as a Claude Code plugin.
 - README: ASCII block wordmark, zh-CN / ja / es / pt-BR translations, DeepWiki
   link, community Discord link, and a Trendshift badge.
 
+### Fixed
+- Continuous playback no longer flashes a wrong first frame at hard cuts — upcoming video clips are pre-seeked to their In ~0.85 s before the playhead reaches them (frame-step already waited for seeks, so it looked fine).
+
 ## [1.6.0] - 2026-07-14
 
 ### Added
