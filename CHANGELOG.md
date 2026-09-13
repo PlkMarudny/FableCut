@@ -105,6 +105,7 @@ installs as a Claude Code plugin.
 - Project FPS select in the Program Monitor header (next to aspect presets) —
   pick 24 / 25 / 30 / 50 / 60 fps; writes `project.fps` and persists like canvas
   size. Non-preset rates appear as Custom.
+- **Source monitor** (Avid NewsCutter-style single viewer) — Source / Program toggle on the shared monitor. Double-click Project media or a timeline clip to load Source (timeline loads with that clip’s In/Out window). Transport, I/O marks, Space/JKL, and scrubbing follow the active mode; drag-to-timeline is unchanged.
 - Preview playback speed — a monitor toolbar toggle plus **J**/**K**/**L** shortcuts cycle the preview player through 1×, 1.5×, 2×, and 4× (L faster, J slower, K play/pause and reset to 1×). It rides on top of each clip's own speed and is forced back to 1× during export, so renders always come out at real time.
   (thanks @ur5fot, #18)
 - **Separate audio and video tracks.** Imported video now shows its audio as
