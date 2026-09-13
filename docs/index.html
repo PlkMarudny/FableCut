@@ -144,7 +144,7 @@
   ]
 }
 </script>
-<link rel="stylesheet" href="./styles.css?v=13">
+<link rel="stylesheet" href="./styles.css?v=25">
 </head>
 <body>
 
@@ -155,7 +155,6 @@
      All fixed, non-interactive, and disabled under reduced motion. -->
 <div class="fx" aria-hidden="true">
   <div class="fx-aurora"></div>
-  <div class="fx-grid"></div>
   <div class="fx-spot" id="fxSpot"></div>
   <div class="fx-grain"></div>
   <div class="fx-vignette"></div>
@@ -175,13 +174,15 @@
       <span>FableCut</span>
     </a>
     <nav class="nav-links" aria-label="Primary">
+      <a href="#playground">Playground</a>
       <a href="#demo">Demo</a>
       <a href="#how">How it works</a>
+      <a href="#mentions">Mentions</a>
       <a href="#start">Quick start</a>
       <a href="#faq">FAQ</a>
-      <a href="https://deepwiki.com/ronak-create/FableCut" rel="noopener">Docs</a>
-      <a href="https://discord.gg/EFMQH7d6Tv" rel="noopener">Discord</a>
-      <a class="nav-cta" href="https://github.com/ronak-create/FableCut" rel="noopener">
+      <a href="https://deepwiki.com/ronak-create/FableCut" rel="noopener" target="_blank">Docs</a>
+      <a href="https://discord.gg/EFMQH7d6Tv" rel="noopener" target="_blank">Discord</a>
+      <a class="nav-cta" href="https://github.com/ronak-create/FableCut" rel="noopener" target="_blank">
         <svg class="star-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .587l3.668 7.431 8.2 1.192-5.934 5.783 1.401 8.169L12 18.896l-7.335 3.866 1.401-8.169L.132 9.21l8.2-1.192z"/></svg>
         <span>GitHub</span>
         <span class="nav-star-count" data-gh-stars data-fallback="★">…</span>
@@ -204,7 +205,7 @@
       <h1 class="hero-title">The browser video editor<br>agents can drive.</h1>
       <p class="lede">A Premiere-style editor whose whole timeline is one JSON file. Any agent that writes JSON can edit video.</p>
       <div class="cta-row">
-        <a class="btn btn-primary" href="https://github.com/ronak-create/FableCut" rel="noopener">Get it on GitHub</a>
+        <a class="btn btn-primary" href="https://github.com/ronak-create/FableCut" rel="noopener" target="_blank">Get it on GitHub</a>
         <a class="hero-demo-link" href="#demo">Watch the demo <span aria-hidden="true">&rarr;</span></a>
       </div>
       <p class="hero-note">Zero npm dependencies. One <code>node server.js</code>. MIT licensed.</p>
@@ -218,17 +219,27 @@
         <span class="tokens">0</span>&nbsp;tokens
       </p>
     </div>
-    <div class="hero-shot reveal">
+    <div class="hero-shot reveal" id="playground">
+      <p class="play-label"><span class="tick"></span>Playground</p>
       <div class="window">
-        <div class="window-bar"><span></span><span></span><span></span></div>
-        <img src="./screenshot.png" width="1502" height="812" alt="The FableCut editor: a timeline with four video and four audio tracks, per-track and master audio meters, a preview monitor, and the inspector showing a clip's volume and pan." loading="eager">
+        <div class="play" id="play">
+          <div class="play-doc">
+            <div class="play-doc-head">
+              <span>project.json</span>
+              <button class="play-reset" id="playReset" type="button">Reset</button>
+            </div>
+            <textarea id="playJson" spellcheck="false" autocapitalize="off" autocomplete="off"
+              aria-label="The project document. Change a value and the editor beside it re-renders."></textarea>
+            <div class="play-mark" id="playMark" aria-hidden="true"></div>
+            <p class="play-status" id="playStatus" role="status" aria-live="polite"></p>
+          </div>
+          <ul class="play-clips" id="playClips" aria-label="Clips in this project"></ul>
+          <div class="play-frame">
+            <iframe id="playFrame" data-src="./demo/?embed=1" title="The FableCut editor, running on this page"></iframe>
+          </div>
+        </div>
       </div>
     </div>
-  </div>
-  <div class="ruler" aria-hidden="true">
-    <div class="playhead"></div>
-    <i class="mk" style="left:14%"></i><i class="mk" style="left:33%"></i>
-    <i class="mk" style="left:52%"></i><i class="mk" style="left:71%"></i><i class="mk" style="left:88%"></i>
   </div>
 </section>
 
@@ -237,14 +248,14 @@
   <div class="wrap">
     <div class="head demo-head reveal zoom">
       <span class="tick"></span>
-      <h2>This reel was edited by Claude Code, live.</h2>
+      <h2>This reel was edited by an AI agent, locally, live.</h2>
       <p class="sub">No timeline dragging, no keyframing by hand. An agent wrote <code class="tag-code">project.json</code> in a real session while the browser reloaded in real time. What you see is the actual output.</p>
     </div>
     <figure class="demo-video reveal">
       <video controls preload="metadata" poster="./screenshot.png"
              src="https://github.com/ronak-create/FableCut/releases/download/v1.3.0/fablecut-demo.mp4">
         Your browser cannot play this video.
-        <a href="https://github.com/ronak-create/FableCut/releases/tag/v1.3.0">Download the demo reel</a>.
+        <a href="https://github.com/ronak-create/FableCut/releases/tag/v1.3.0" rel="noopener" target="_blank">Download the demo reel</a>.
       </video>
       <figcaption>Music: Digital Lemonade by Kevin MacLeod, CC BY 4.0.</figcaption>
     </figure>
@@ -252,11 +263,11 @@
 </section>
 
 <!-- ── Primer: how does an AI edit my video? ── -->
-<section class="section line-top primer editorial" id="primer">
+<section class="section primer editorial" id="primer">
   <div class="wrap">
     <div class="head reveal zoom">
       <span class="tick"></span>
-      <h2>How does an AI actually edit my video?</h2>
+      <h2>How an AI actually edits a video.</h2>
       <p class="sub">If you cut video but have never let software do the cutting, here is the whole idea in three steps. No coding required to follow along.</p>
     </div>
     <div class="flow reveal">
@@ -286,7 +297,7 @@
 </section>
 
 <!-- ── How it works: control surfaces ── -->
-<section class="section line-top how" id="how">
+<section class="section how" id="how">
   <div class="wrap">
     <div class="how-grid">
       <div class="how-copy reveal zoom">
@@ -294,7 +305,7 @@
         <h2>The project file is the interface.</h2>
         <p class="sub">Most AI video tools hide the edit behind a black-box API. FableCut does the opposite: the timeline is a plain document, and anything that can write it can edit video. A human and an agent can work the same timeline at once.</p>
         <ul class="how-list">
-          <li><strong>MCP server</strong><span>Claude Code, Claude Desktop, or any MCP client drives it with typed tools.</span></li>
+          <li><strong>MCP server</strong><span>Claude Code, Claude Desktop, Cursor, VS Code, Codex, Gemini CLI, Cline, Zed, opencode. Any MCP client drives it with typed tools.</span></li>
           <li><strong>project.json</strong><span>Edit the file directly. The UI hot-reloads over server-sent events.</span></li>
           <li><strong>REST API</strong><span>Plain HTTP for media, analysis, live-reload and export.</span></li>
         </ul>
@@ -330,8 +341,166 @@
   </div>
 </div>
 
+<!-- ── Mentions: what other people said, elsewhere ── -->
+<section class="section mentions" id="mentions">
+  <div class="wrap">
+    <div class="head mentions-head reveal zoom">
+      <span class="tick"></span>
+      <h2>Other people, talking about it.</h2>
+      <p class="sub">Creators, reviewers, registries and commenters. Every card below is someone else&rsquo;s words, not the maintainer&rsquo;s. Click any card to read the source.</p>
+    </div>
+
+    <div class="hn-badge reveal">
+      <span class="hn-badge-label">Show HN</span>
+      <a class="hn-badge-card" href="https://news.ycombinator.com/item?id=48845422" target="_blank" rel="noopener">
+        <span class="hn-badge-y" aria-hidden="true">Y</span>
+        <span class="hn-badge-text">
+          <b>Front page of Hacker News</b>
+          <i>98 points</i>
+        </span>
+      </a>
+    </div>
+
+    <div class="mgrid reveal" id="mgrid">
+
+      <a class="mention" href="https://www.youtube.com/shorts/DjNNV9vb62k" target="_blank" rel="noopener">
+        <span class="mthumb">
+          <img src="https://i.ytimg.com/vi/DjNNV9vb62k/hqdefault.jpg" alt="" loading="lazy" width="480" height="360">
+          <span class="mplay" aria-hidden="true"></span>
+        </span>
+        <span class="mrow"><b class="mplat">YouTube</b><i class="mstat">Short</i></span>
+        <p class="mquote">&ldquo;AI edits videos while you sleep. FableCut review.&rdquo;</p>
+        <p class="msrc">AI Flash</p>
+      </a>
+
+      <a class="mention" href="https://www.youtube.com/shorts/XttVPJiR2B0" target="_blank" rel="noopener">
+        <span class="mthumb">
+          <img src="https://i.ytimg.com/vi/XttVPJiR2B0/hqdefault.jpg" alt="" loading="lazy" width="480" height="360">
+          <span class="mplay" aria-hidden="true"></span>
+        </span>
+        <span class="mrow"><b class="mplat">YouTube</b><i class="mstat">Short</i></span>
+        <p class="mquote">&ldquo;FableCut: the AI video editor where the AI actually edits.&rdquo;</p>
+        <p class="msrc">Evgenii Arsentev</p>
+      </a>
+
+      <a class="mention" href="https://www.youtube.com/shorts/-qDuO9Floyo" target="_blank" rel="noopener">
+        <span class="mthumb">
+          <img src="https://i.ytimg.com/vi/-qDuO9Floyo/hqdefault.jpg" alt="" loading="lazy" width="480" height="360">
+          <span class="mplay" aria-hidden="true"></span>
+        </span>
+        <span class="mrow"><b class="mplat">YouTube</b><i class="mstat">Short</i></span>
+        <p class="mquote">&ldquo;AI&rsquo;s editing video? Meet FableCut!&rdquo;</p>
+        <p class="msrc">AI Override</p>
+      </a>
+
+      <a class="mention" href="https://x.com/QCXINT_/status/2075525663168115016" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word is-x"><span class="mword">X</span></span>
+        <span class="mrow"><b class="mplat">X</b><i class="mstat">3.3K views</i></span>
+        <p class="mquote">&ldquo;FableCut isn&rsquo;t trying to be another AI video editor. It&rsquo;s trying to become a video editor that AI agents can fully control.&rdquo;</p>
+        <p class="msrc">QCXINT</p>
+      </a><a class="mention" href="https://x.com/QingQ77/status/2077384184838909954" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word is-x"><span class="mword">X</span></span>
+        <span class="mrow"><b class="mplat">X</b><i class="mstat">1.7K views</i></span>
+        <p class="mquote">&ldquo;Open a video editor in the browser, where the entire timeline is a JSON file, letting AI agents like Claude edit it for you directly via MCP or REST.&rdquo;</p>
+        <p class="msrc">Geek Lite</p>
+      </a><a class="mention" href="https://x.com/kon_coder/status/2080412644498898998" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word is-x"><span class="mword">X</span></span>
+        <span class="mrow"><b class="mplat">X</b><i class="mstat">583 views</i></span>
+        <p class="mquote">&ldquo;&#12479;&#12452;&#12512;&#12521;&#12452;&#12531;&#20840;&#20307;&#12364;JSON&#12394;&#12398;&#12391;&#12289;AI&#12363;&#12425;&#19968;&#25324;&#32232;&#38598;&#12391;&#12365;&#12427;&#12290;&#32232;&#38598;&#32080;&#26524;&#12364;&#12502;&#12521;&#12454;&#12470;&#12408;&#21363;&#21453;&#26144;&#12373;&#12428;&#12427;&#12290;&rdquo;</p>
+        <p class="msrc">Yuuki Kon</p>
+      </a><a class="mention" href="https://x.com/SedraLab/status/2077710669235839413" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word is-x"><span class="mword">X</span></span>
+        <span class="mrow"><b class="mplat">X</b><i class="mstat">237 views</i></span>
+        <p class="mquote">&ldquo;Video kurguyu AI ajan&#305;na devret. Taray&#305;c&#305;nda. FableCut, s&#305;f&#305;r ba&#287;&#305;ml&#305;l&#305;kla &#231;al&#305;&#351;an a&#231;&#305;k kaynak bir video edit&#246;r&#252;.&rdquo;</p>
+        <p class="msrc">Sedra</p>
+      </a><a class="mention" href="https://x.com/weele_dev/status/2076549907603660932" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word is-x"><span class="mword">X</span></span>
+        <span class="mrow"><b class="mplat">X</b><i class="mstat">Public post</i></span>
+        <p class="mquote" dir="rtl" lang="ar">&ldquo;&#1605;&#1581;&#1585;&#1585; &#1601;&#1610;&#1583;&#1610;&#1608; &#1605;&#1601;&#1578;&#1608;&#1581; &#1575;&#1604;&#1605;&#1589;&#1583;&#1585; &#1575;&#1604;&#1604;&#1610; AI agents &#1578;&#1587;&#1608;&#1602;&#1607; &#1593;&#1576;&#1585; JSON. &#1603;&#1604; &#1575;&#1604;&#1578;&#1575;&#1610;&#1605;&#1604;&#1575;&#1610;&#1606; project.json.&rdquo;</p>
+        <p class="msrc">weele.dev</p>
+      </a><a class="mention" href="https://www.linkedin.com/feed/update/urn:li:activity:7482448475331354624/" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word is-li"><span class="mword">in</span></span>
+        <span class="mrow"><b class="mplat">LinkedIn</b><i class="mstat">21 reactions</i></span>
+        <p class="mquote">&ldquo;Across Daydream, FableCut, OpenCut, Palmier Pro, and Verlon, the same pattern is emerging. The human and the agent operate the same project.&rdquo;</p>
+        <p class="msrc">Olivier Legris</p>
+      </a>
+
+      <a class="mention" href="https://www.linkedin.com/posts/sriranga-tangella-71477a90_videoediting-agenticai-buildinpublic-activity-7480984621187457024-GQj9" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word is-li"><span class="mword">in</span></span>
+        <span class="mrow"><b class="mplat">LinkedIn</b><i class="mstat">Public post</i></span>
+        <p class="mquote">&ldquo;FableCut is a browser video editor that AI agents can drive, and it has zero npm dependencies.&rdquo;</p>
+        <p class="msrc">Sriranga Tangella</p>
+      </a><a class="mention" href="https://trendshift.io/repositories/77702" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word is-star"><span class="mword">Trend<br>shift</span></span>
+        <span class="mrow"><b class="mplat">Trending</b><i class="mstat">#8 daily</i></span>
+        <p class="mquote">Ranked #8 on the daily JavaScript trending list on 9 July 2026.</p>
+        <p class="msrc">Trendshift</p>
+      </a><a class="mention" href="https://kompozy.io/reviews/fablecut" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word"><span class="mword">Kompozy</span></span>
+        <span class="mrow"><b class="mplat">Review</b><i class="mstat">3.8 / 5</i></span>
+        <p class="mquote">&ldquo;The entire project, every clip and track and keyframe, is one project.json file, so anything that can write JSON can edit video.&rdquo;</p>
+        <p class="msrc">Moe Ameen &middot; Kompozy</p>
+      </a>
+
+      <a class="mention is-extra" href="https://kompozy.io/alternatives/fablecut" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word"><span class="mword">Kompozy</span></span>
+        <span class="mrow"><b class="mplat">Press</b><i class="mstat">Comparison</i></span>
+        <p class="mquote">&ldquo;A genuinely clever architecture: the whole timeline is one JSON file, so any agent that can write JSON can edit video.&rdquo;</p>
+        <p class="msrc">Kompozy</p>
+      </a>
+
+      <a class="mention is-extra" href="https://www.getreadyforagents.com/news/fablecut-browser-native-agentic-video-editor/" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word"><span class="mword">Agentic<br>Ready</span></span>
+        <span class="mrow"><b class="mplat">Press</b><i class="mstat">Feature</i></span>
+        <p class="mquote">&ldquo;An emerging pattern of browser-native agentic UIs enabling agents to drive creative and media workflows.&rdquo;</p>
+        <p class="msrc">Agentic Ready</p>
+      </a>
+
+      <a class="mention is-extra" href="https://www.everydev.ai/tools/fablecut" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word"><span class="mword">Every<br>Dev</span></span>
+        <span class="mrow"><b class="mplat">Directory</b><i class="mstat">Listed</i></span>
+        <p class="mquote">&ldquo;A zero-dependency browser-based non-linear video editor with a JSON timeline that AI agents can drive via MCP, REST, or direct file editing.&rdquo;</p>
+        <p class="msrc">EveryDev.ai</p>
+      </a>
+
+      <a class="mention is-extra" href="https://linkloot.io/loot/edit-agent-made-videos-through-a-json-timeline-with-fablecut" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word"><span class="mword">Link<br>Loot</span></span>
+        <span class="mrow"><b class="mplat">Press</b><i class="mstat">Pick</i></span>
+        <p class="mquote">&ldquo;Agents can work through MCP or REST instead of trying to click through a traditional nonlinear editor.&rdquo;</p>
+        <p class="msrc">LinkLoot</p>
+      </a>
+
+      <a class="mention is-extra" href="https://selfhostedworld.com/software/fablecut" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word"><span class="mword">Self<br>Hosted</span></span>
+        <span class="mrow"><b class="mplat">Directory</b><i class="mstat">Listed</i></span>
+        <p class="mquote">&ldquo;A browser-based video editor designed around a JSON project file rather than a hidden internal state.&rdquo;</p>
+        <p class="msrc">SelfHostedWorld</p>
+      </a>
+
+      <a class="mention is-extra" href="https://glama.ai/mcp/servers/@ronak-create/FableCut" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word is-mcp"><span class="mword">Glama</span></span>
+        <span class="mrow"><b class="mplat">Registry</b><i class="mstat">Indexed</i></span>
+        <p class="mquote">&ldquo;A browser video editor that AI agents can drive.&rdquo; Indexed under multimedia processing and agent orchestration.</p>
+        <p class="msrc">Glama</p>
+      </a>
+
+      <a class="mention is-extra" href="https://alternativeto.net/software/fablecut/" target="_blank" rel="noopener">
+        <span class="mthumb mthumb-word"><span class="mword">Alt<br>To</span></span>
+        <span class="mrow"><b class="mplat">Directory</b><i class="mstat">51 alts</i></span>
+        <p class="mquote">Tracked as a video editor in its own right, with 51 alternatives listed against it: Kdenlive, Shotcut, Avidemux.</p>
+        <p class="msrc">AlternativeTo</p>
+      </a>
+
+    </div>
+
+    <div class="mtoggle-row">
+      <button class="mtoggle" id="mToggle" aria-expanded="false" aria-controls="mgrid">Show all mentions</button>
+    </div>
+  </div>
+</section>
+
 <!-- ── Quick start ── -->
-<section class="section line-top start" id="start">
+<section class="section start" id="start">
   <div class="wrap">
     <div class="head start-head reveal zoom">
       <span class="tick"></span>
@@ -347,7 +516,7 @@ cd FableCut
 node server.js</code></pre>
           <button class="copy" data-target="cmd1" aria-label="Copy commands">Copy</button>
         </div>
-        <p class="cmd-note">Opens at <code>http://localhost:7777</code>. Since v1.3.1 it binds to localhost only.</p>
+        <p class="cmd-note">Opens at <code>http://localhost:7777</code>.</p>
       </div>
       <div class="cmd-card reveal">
         <h3>Let an agent drive it</h3>
@@ -360,16 +529,14 @@ node server.js</code></pre>
       </div>
     </div>
     <div class="start-links reveal">
-      <a class="btn btn-primary" href="https://github.com/ronak-create/FableCut" rel="noopener">Star it on GitHub</a>
-      <a class="btn btn-ghost" href="https://github.com/ronak-create/FableCut/blob/main/CLAUDE.md" rel="noopener">Read the full manual</a>
-      <a class="btn btn-ghost" href="https://deepwiki.com/ronak-create/FableCut" rel="noopener">Browse the docs on DeepWiki</a>
-      <a class="btn btn-ghost" href="https://discord.gg/EFMQH7d6Tv" rel="noopener">Join the Discord</a>
+      <a class="btn btn-ghost" href="https://github.com/ronak-create/FableCut/blob/main/CLAUDE.md" rel="noopener" target="_blank">Read the full manual</a>
+      <a class="btn btn-ghost" href="https://deepwiki.com/ronak-create/FableCut" rel="noopener" target="_blank">Browse the docs on DeepWiki</a>
     </div>
   </div>
 </section>
 
 <!-- ── Agents: the MCP server is client-neutral, so show the real setup line ── -->
-<section class="section line-top agents" id="agents">
+<section class="section agents" id="agents">
   <div class="wrap">
     <div class="head reveal zoom">
       <span class="tick"></span>
@@ -445,7 +612,7 @@ node server.js</code></pre>
 </section>
 
 <!-- ── FAQ: plain answers to the questions people actually type ── -->
-<section class="section line-top faq" id="faq">
+<section class="section faq" id="faq">
   <div class="wrap">
     <div class="head reveal zoom">
       <span class="tick"></span>
@@ -481,7 +648,7 @@ node server.js</code></pre>
 </section>
 
 <!-- ── Live status ── -->
-<section class="section line-top status" id="status">
+<section class="section status" id="status">
   <div class="wrap">
     <div class="status-card reveal" id="statusCard">
       <div class="status-main">
@@ -489,8 +656,8 @@ node server.js</code></pre>
         <p class="sub" id="relMeta">Fetching the newest version from GitHub.</p>
       </div>
       <div class="status-links">
-        <a id="relLink" href="https://github.com/ronak-create/FableCut/releases" rel="noopener">Release notes</a>
-        <a href="https://github.com/ronak-create/FableCut/blob/main/CHANGELOG.md" rel="noopener">Changelog</a>
+        <a id="relLink" href="https://github.com/ronak-create/FableCut/releases" rel="noopener" target="_blank">Release notes</a>
+        <a href="https://github.com/ronak-create/FableCut/blob/main/CHANGELOG.md" rel="noopener" target="_blank">Changelog</a>
       </div>
     </div>
   </div>
@@ -509,18 +676,18 @@ node server.js</code></pre>
       <span>FableCut</span>
     </div>
     <nav class="foot-links" aria-label="Footer">
-      <a href="https://github.com/ronak-create/FableCut" rel="noopener">GitHub</a>
-      <a href="https://deepwiki.com/ronak-create/FableCut" rel="noopener">Docs</a>
-      <a href="https://discord.gg/EFMQH7d6Tv" rel="noopener">Discord</a>
-      <a href="https://github.com/ronak-create/FableCut/issues" rel="noopener">Issues</a>
-      <a href="https://news.ycombinator.com/item?id=48845422" rel="noopener">Show HN</a>
-      <a href="https://github.com/ronak-create/FableCut/blob/main/SECURITY.md" rel="noopener">Security</a>
-      <a href="https://github.com/ronak-create/FableCut/blob/main/LICENSE" rel="noopener">MIT License</a>
+      <a href="https://github.com/ronak-create/FableCut" rel="noopener" target="_blank">GitHub</a>
+      <a href="https://deepwiki.com/ronak-create/FableCut" rel="noopener" target="_blank">Docs</a>
+      <a href="https://discord.gg/EFMQH7d6Tv" rel="noopener" target="_blank">Discord</a>
+      <a href="https://github.com/ronak-create/FableCut/issues" rel="noopener" target="_blank">Issues</a>
+      <a href="https://news.ycombinator.com/item?id=48845422" rel="noopener" target="_blank">Show HN</a>
+      <a href="https://github.com/ronak-create/FableCut/blob/main/SECURITY.md" rel="noopener" target="_blank">Security</a>
+      <a href="https://github.com/ronak-create/FableCut/blob/main/LICENSE" rel="noopener" target="_blank">MIT License</a>
     </nav>
   </div>
   <p class="foot-fine">Built in the browser. Drivable by any agent that speaks JSON.</p>
 </footer>
 
-<script src="./main.js?v=4"></script>
+<script src="./main.js?v=12"></script>
 </body>
 </html>

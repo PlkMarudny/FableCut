@@ -64,6 +64,289 @@
     });
   });
 
+  /* ── The playground: the textarea is the project document, the iframe is the
+     real editor reading it. The bridge is the same shape as the real thing:
+     write the document, the editor picks up the new revision and re-renders.
+     Everything stays in this browser tab - no server, nothing shared. ── */
+  (function () {
+    var frame = document.getElementById("playFrame");
+    var box = document.getElementById("playJson");
+    var status = document.getElementById("playStatus");
+    var resetBtn = document.getElementById("playReset");
+    if (!frame || !box || !status) return;
+
+    var original = null;      // the document as the editor first handed it over
+    var sendTimer = null;
+    var quiet = false;        // ignore our own echo while writing the textarea
+
+    /* The clip list beside the document. It is built from whatever is in the
+       textarea, so it tracks edits; clicking an entry selects the clip in the
+       editor and selects that clip's block in the document. */
+    var list = document.getElementById("playClips");
+
+    function clipBlock(id) {
+      // the range of characters covering this clip's object, by brace matching
+      var text = box.value;
+      var at = text.indexOf('"id": "' + id + '"');
+      if (at < 0) return null;
+      var open = text.lastIndexOf("{", at);
+      if (open < 0) return null;
+      var depth = 0;
+      for (var i = open; i < text.length; i++) {
+        if (text[i] === "{") depth++;
+        else if (text[i] === "}") { depth--; if (!depth) return [open, i + 1]; }
+      }
+      return null;
+    }
+
+    /* Flash a box over the clip’s lines and let it fade. No text selection:
+       a textarea cannot paint ranges, but the block’s line numbers are enough
+       to place an overlay over it. */
+    var mark = document.getElementById("playMark");
+    var markRange = null;
+
+    function placeMark() {
+      if (!mark || !markRange) return;
+      var cs = getComputedStyle(box);
+      var lineH = parseFloat(cs.lineHeight) || 16;
+      var padT = parseFloat(cs.paddingTop) || 0;
+      var top = box.offsetTop + padT + (markRange[0] - 1) * lineH - box.scrollTop;
+      var height = (markRange[1] - markRange[0] + 1) * lineH;
+      // clip the box to the visible part of the document pane
+      var minTop = box.offsetTop;
+      var maxBottom = box.offsetTop + box.clientHeight;
+      var bottom = Math.min(top + height, maxBottom);
+      top = Math.max(top, minTop);
+      mark.style.top = Math.round(top) + "px";
+      mark.style.height = Math.max(0, Math.round(bottom - top)) + "px";
+    }
+
+    function flash(id) {
+      var range = clipBlock(id);
+      if (!range || !mark) return;
+      var startLine = box.value.slice(0, range[0]).split(String.fromCharCode(10)).length;
+      var endLine = box.value.slice(0, range[1]).split(String.fromCharCode(10)).length;
+      markRange = [startLine, endLine];
+      // bring the block into view without stealing focus
+      var lineH = parseFloat(getComputedStyle(box).lineHeight) || 16;
+      var wantTop = Math.max(0, (startLine - 2) * lineH);
+      var wantBottom = endLine * lineH;
+      if (wantTop < box.scrollTop || wantBottom > box.scrollTop + box.clientHeight) box.scrollTop = wantTop;
+      placeMark();
+      mark.classList.remove("show");
+      void mark.offsetWidth;            // restart the fade
+      mark.classList.add("show");
+    }
+
+    box.addEventListener("scroll", placeMark);
+
+    function pick(id) {
+      if (frame.contentWindow) frame.contentWindow.postMessage({ type: "fc:select", id: id }, "*");
+      [].forEach.call(list.querySelectorAll(".play-clip"), function (b) {
+        b.classList.toggle("on", b.getAttribute("data-id") === id);
+      });
+      flash(id);
+    }
+
+    function drawList() {
+      if (!list) return;
+      var doc;
+      try { doc = JSON.parse(box.value); } catch (e) { return; }
+      var clips = (doc && doc.clips) || [];
+      var current = (list.querySelector(".play-clip.on") || {}).getAttribute
+        ? list.querySelector(".play-clip.on").getAttribute("data-id") : null;
+      list.innerHTML = '<li class="play-clips-head">clips</li>';
+      clips.forEach(function (c) {
+        var li = document.createElement("li");
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "play-clip" + (c.id === current ? " on" : "");
+        b.setAttribute("data-id", c.id);
+        var len = (c.duration != null ? (+c.duration).toFixed(1) + "s" : "");
+        b.innerHTML = "<b></b><i></i>";
+        b.firstChild.textContent = c.name || c.id;
+        b.lastChild.textContent = (c.track || "") + " · " + c.kind + (len ? " · " + len : "");
+        b.addEventListener("click", function () { pick(c.id); });
+        li.appendChild(b);
+        list.appendChild(li);
+      });
+    }
+
+    function say(msg, kind) {
+      status.textContent = msg;
+      status.classList.toggle("bad", kind === "bad");
+      status.classList.toggle("good", kind === "good");
+    }
+
+    /* load the editor only once it is about to be seen */
+    function boot() {
+      if (frame.src) return;
+      frame.src = frame.getAttribute("data-src");
+    }
+    if ("IntersectionObserver" in window) {
+      var io = new IntersectionObserver(function (entries) {
+        if (entries[0].isIntersecting) { boot(); io.disconnect(); }
+      }, { rootMargin: "200px" });
+      io.observe(frame);
+    } else { boot(); }
+
+    window.addEventListener("message", function (e) {
+      if (e.source !== frame.contentWindow) return;
+      var d = e.data;
+      if (!d || typeof d.type !== "string") return;
+      if (d.type === "fc:ready") {
+        original = d.json;
+        quiet = true; box.value = d.json; quiet = false;
+        say("");
+        drawList();
+      } else if (d.type === "fc:project") {
+        // the editor itself changed the project (inspector, drag, playhead)
+        if (document.activeElement !== box) {
+          quiet = true; box.value = d.json; quiet = false;
+        }
+      } else if (d.type === "fc:ok") {
+        say("");
+        drawList();
+      } else if (d.type === "fc:error") {
+        say(d.message || "That does not parse yet.", "bad");
+      }
+    });
+
+    function send() {
+      if (!frame.contentWindow) return;
+      try { JSON.parse(box.value); }
+      catch (err) {
+        say(String(err.message || err).replace(/^JSON\.parse:\s*/, ""), "bad");
+        return;
+      }
+      frame.contentWindow.postMessage({ type: "fc:set", json: box.value }, "*");
+    }
+
+    box.addEventListener("input", function () {
+      if (quiet) return;
+
+      clearTimeout(sendTimer);
+      sendTimer = setTimeout(send, 140);
+    });
+
+    /* Cmd/Ctrl+Enter applies straight away, without waiting for the pause */
+    box.addEventListener("keydown", function (e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); clearTimeout(sendTimer); send(); }
+    });
+
+    /* keep Tab inside the document instead of losing focus to the page */
+    box.addEventListener("keydown", function (e) {
+      if (e.key !== "Tab") return;
+      e.preventDefault();
+      var s = box.selectionStart, t = box.selectionEnd;
+      box.value = box.value.slice(0, s) + "  " + box.value.slice(t);
+      box.selectionStart = box.selectionEnd = s + 2;
+      box.dispatchEvent(new Event("input"));
+    });
+
+    if (resetBtn) resetBtn.addEventListener("click", function () {
+      if (original == null) return;
+      quiet = true; box.value = original; quiet = false;
+      send();
+      say("");
+    });
+  })();
+
+  /* Mentions wall: reveal the overflow rows */
+  var mToggle = document.getElementById("mToggle");
+  var mGrid = document.getElementById("mgrid");
+  if (mToggle && mGrid) {
+    mToggle.addEventListener("click", function () {
+      var open = mGrid.classList.toggle("open");
+      mToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      mToggle.textContent = open ? "Show fewer mentions" : "Show all mentions";
+    });
+  }
+
+  /* Marquee type shuffle: every letter cycles through the editor's font
+     library, a few at a time - the same trick a title sequence uses. The
+     two marquee copies are kept in lockstep so the scroll seam stays
+     invisible, and each letter is pinned to its measured width so swapping
+     faces never reflows the track. */
+  (function () {
+    var track = document.querySelector(".marquee-track");
+    if (!track || reduce) return;
+
+    var FACES = ["sw-anton", "sw-bebas", "sw-abril", "sw-oswald",
+                 "sw-playfair", "sw-archivo", "sw-caveat", "sw-mono"];
+    var words = [].filter.call(track.children, function (el) {
+      return el.tagName === "SPAN";
+    });
+    if (words.length < 2) return;
+    var half = words.length / 2;
+
+    function split(word) {
+      var text = word.textContent;
+      var out = [];
+      word.textContent = "";
+      for (var i = 0; i < text.length; i++) {
+        if (text[i] === " ") { word.appendChild(document.createTextNode(" ")); continue; }
+        var s = document.createElement("span");
+        s.className = "ltr";
+        s.textContent = text[i];
+        word.appendChild(s);
+        out.push(s);
+      }
+      return out;
+    }
+
+    var pairs = [];   // [letterInCopyA, letterInCopyB]
+    for (var w = 0; w < half; w++) {
+      var a = split(words[w]);
+      var b = split(words[w + half]);
+      for (var i = 0; i < a.length && i < b.length; i++) pairs.push([a[i], b[i]]);
+    }
+    if (!pairs.length) return;
+
+    function pinWidths() {
+      var widths = pairs.map(function (p) { return p[0].getBoundingClientRect().width; });
+      pairs.forEach(function (p, i) {
+        var px = (Math.ceil(widths[i] * 100) / 100) + "px";
+        p[0].style.width = px;
+        p[1].style.width = px;
+      });
+    }
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(pinWidths);
+    else pinWidths();
+
+    var live = [];    // letters currently wearing a borrowed face
+    function set(pair, cls) {
+      pair[0].className = cls ? "ltr hot " + cls : "ltr";
+      pair[1].className = cls ? "ltr hot " + cls : "ltr";
+    }
+
+    var timer = null;
+    function tick() {
+      // retire the oldest swaps, then borrow a few new faces
+      while (live.length > 5) set(live.shift(), null);
+      for (var n = 0; n < 3; n++) {
+        var pair = pairs[(Math.random() * pairs.length) | 0];
+        set(pair, FACES[(Math.random() * FACES.length) | 0]);
+        live.push(pair);
+      }
+    }
+    function start() { if (!timer) timer = setInterval(tick, 130); }
+    function stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+      while (live.length) set(live.shift(), null);
+    }
+
+    // only run while the strip is actually on screen
+    if ("IntersectionObserver" in window) {
+      new IntersectionObserver(function (es) {
+        if (es[0].isIntersecting) start(); else stop();
+      }, { threshold: 0 }).observe(track.parentNode);
+    } else { start(); }
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) stop();
+    });
+  })();
+
   /* Live latest-release badge from the public GitHub API */
   var tagEl = document.getElementById("relTag");
   var metaEl = document.getElementById("relMeta");
@@ -180,23 +463,12 @@
   if (!reduce && !coarse) {
     var root = document.documentElement;
     var spot = document.getElementById("fxSpot");
-    var shot = document.querySelector(".hero-shot");
-    var win = shot ? shot.querySelector(".window") : null;
     var cells = document.querySelectorAll(".cell");
     var px = 0, py = 0, queued = false;
 
     var apply = function () {
       queued = false;
       if (spot) { spot.style.setProperty("--mx", px + "px"); spot.style.setProperty("--my", py + "px"); }
-      if (win) {
-        var r = shot.getBoundingClientRect();
-        if (r.bottom > 0 && r.top < window.innerHeight) {
-          var cx = (px - (r.left + r.width / 2)) / r.width;
-          var cy = (py - (r.top + r.height / 2)) / r.height;
-          win.style.setProperty("--ty", (cx * 5).toFixed(2) + "deg");
-          win.style.setProperty("--tx", (-cy * 4).toFixed(2) + "deg");
-        }
-      }
     };
     window.addEventListener("pointermove", function (e) {
       px = e.clientX; py = e.clientY;
