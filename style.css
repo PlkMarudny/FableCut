@@ -319,6 +319,13 @@ body.track-size-s .clip.selected {
   border-color: #3c3c46;
 }
 
+.btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  pointer-events: none;
+}
+}
+
 .btn:active {
   transform: translateY(1px);
 }
@@ -1668,6 +1675,7 @@ input[type=range] {
   cursor: grab;
   min-width: 8px;
   box-shadow: 0 1px 3px #0006;
+  z-index: 2;
 }
 
 /* rounded clip content — trans wedges sit outside this so corners stay sharp */
@@ -1686,6 +1694,52 @@ input[type=range] {
   outline: 2px solid #b9baff;
   outline-offset: -1px;
   box-shadow: 0 0 0 3px #7b6cff55;
+  z-index: 4;
+}
+.clip:has(.live-ghost) {
+  z-index: 1;
+}
+.clip.selected:has(.live-ghost) {
+  z-index: 4;
+}
+.clip .live-ghost {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 100%;
+  margin-left: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border: 1px dashed #ffffff44;
+  border-left: none;
+  border-radius: 0 5px 5px 0;
+  background: repeating-linear-gradient(-45deg, #4c66ff28, #4c66ff28 6px, #4c66ff10 6px, #4c66ff10 12px);
+  color: #ffffffc4;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  z-index: 1;
+  pointer-events: auto;
+}
+.clip .live-ghost:hover {
+  color: #fff;
+  background: repeating-linear-gradient(-45deg, #4c66ff44, #4c66ff44 6px, #4c66ff22 6px, #4c66ff22 12px);
+}
+.clip .live-ghost-label {
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.bin-item.live .bin-sub {
+  color: #9ad0ff;
 }
 
 .clip.selected.primary {
@@ -1968,6 +2022,28 @@ body.track-size-s .clip .clip-kf-n {
 
 .dialog p {
   margin-bottom: 16px;
+}
+
+.dialog .live-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted, #aaa);
+  margin-bottom: 12px;
+}
+.dialog .live-field input {
+  background: var(--panel-2, #1c1c22);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  color: #fff;
+  padding: 7px 9px;
+  font: inherit;
+  user-select: text;
+}
+.dialog .live-source-err {
+  color: #ff8a8a;
+  margin-top: -4px;
 }
 
 .progress {

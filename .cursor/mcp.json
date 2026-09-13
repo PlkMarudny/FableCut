@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fablecut": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["C:\\Users\\tomasz.plonka\\Documents\\js\\FableCut\\mcp-server.js"]
+    }
+  }
+}

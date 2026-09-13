@@ -268,7 +268,7 @@ async function callTool(name, args) {
         (doc.background ? ` bg:${doc.background}` : "") +
         (doc.markers?.length ? ` markers:${doc.markers.length} [${doc.markers.slice(0, 12).map((m) => m.t).join(",")}${doc.markers.length > 12 ? ",…" : ""}]` : ""),
         `MEDIA (${doc.media.length}):`,
-        ...doc.media.map((m) => `  ${m.id} ${m.kind} "${m.name}"${m.duration ? " " + m.duration + "s" : ""}`),
+        ...doc.media.map((m) => `  ${m.id} ${m.kind}${m.live ? " live" : ""} "${m.name}"${m.duration ? " " + m.duration + "s" : ""}`),
         `CLIPS (${doc.clips.length}), by track/time:`,
         ...doc.clips
           .slice()
@@ -331,10 +331,26 @@ async function callTool(name, args) {
           }
           case "addMedia": {
             const m = op.media;
-            if (!m || !m.src || !m.kind) throw new Error("addMedia needs media{src, kind}");
+            if (!m || !m.kind) throw new Error("addMedia needs media{kind} and src (or livePath+liveList)");
+            const live = !!(m.live && m.livePath && m.liveList);
+            if (!m.src && !live) throw new Error("addMedia needs media{src, kind}");
             m.id = m.id || "m_" + uid();
             if (proj.media.some((x) => x.id === m.id)) throw new Error("addMedia: duplicate media id " + m.id);
-            m.name = m.name || path.basename(decodeURIComponent(m.src));
+            m.name = m.name || path.basename(decodeURIComponent(m.src || m.livePath || "live"));
+            if (live && !m.src) {
+              try {
+                const u = new URL(m.liveList);
+                u.pathname = "/get";
+                u.search = "";
+                u.searchParams.set("path", m.livePath);
+                if (m.liveOrigin) u.searchParams.set("start", m.liveOrigin);
+                if (m.duration) u.searchParams.set("duration", String(m.duration));
+                u.searchParams.set("format", "fmp4");
+                m.src = u.toString();
+              } catch {
+                throw new Error("addMedia: liveList must be an absolute URL");
+              }
+            }
             proj.media.push(m);
             notes.push("+" + m.id);
             break;

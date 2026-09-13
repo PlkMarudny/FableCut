@@ -112,6 +112,10 @@ same time.
   **Browse file…** to import and replace in one step. A video's linked L/R
   audio companions are swapped along with it; a shorter replacement clamps the
   trim to fit and toasts that it did so.
+- **Live recordings (MediaMTX)** — **+ Live** in the Project bin registers a
+  playback path (`/list` + `/get` fMP4). Timeline clips keep normal in/out; a
+  ghosted tail shows how much more is already recorded. Click it to extend the
+  clip to the recorded head.
 - **Multi-channel video audio** — a video with more than 2 audio channels gets
   a linked audio clip per channel, not just L/R (5.1, 7.1…). Extra audio
   tracks (A5, A6, …, capped at 16) are created automatically as needed;

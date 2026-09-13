@@ -16,6 +16,14 @@ function fmt(t, fps) {
   const p = (n) => String(n).padStart(2, "0");
   return `${p(m)}:${p(s)}:${p(f)}`;
 }
+function fmtHMS(t) {
+  t = Math.max(0, Math.floor(+t || 0));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(h)}:${p(m)}:${p(s)}`;
+}
 
 function draw(msg) {
   if (!g) return;
@@ -24,8 +32,8 @@ function draw(msg) {
   if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; }
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
-  const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
-  const step = steps.find((s) => s * pps >= 70) || 600;
+  const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400];
+  const step = steps.find((s) => s * pps >= 70) || 21600;
   const minor = step / 5;
   const i0 = Math.max(0, Math.floor(sl / pps / minor));
   // ticks + time labels first so IN/OUT can difference-blend over them
@@ -38,7 +46,7 @@ function draw(msg) {
     const x = Math.round(t * pps - sl) + 0.5;
     const isMajor = i % 5 === 0;
     g.moveTo(x, isMajor ? 8 : 17); g.lineTo(x, h);
-    if (isMajor) g.fillText(fmt(Math.round(t * 1000) / 1000, fps).slice(0, 5), x + 4, 12);
+    if (isMajor) g.fillText(step >= 3600 ? fmtHMS(t) : fmt(Math.round(t * 1000) / 1000, fps).slice(0, 5), x + 4, 12);
   }
   g.stroke();
   // dim timeline outside the IN–OUT work area

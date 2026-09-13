@@ -16,6 +16,7 @@
    ═══════════════════════════════════════════════════════════════════════════ */
 "use strict";
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const { spawn, spawnSync, execFile } = require("child_process");
@@ -133,6 +134,64 @@ function sendJSON(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { "Content-Type": "application/json", "Cache-Control": "no-store" });
   res.end(body);
+}
+
+/* Same-origin proxy for MediaMTX playback (/list, /get fMP4). Only loopback /
+   FABLECUT_ALLOWED_HOSTS — this must not become an open proxy. */
+const PROXY_MAX_REDIRECTS = 3;
+const PROXY_TIMEOUT_MS = 30_000;
+function parseProxyTarget(raw) {
+  if (!raw || typeof raw !== "string") return { error: "src is required", status: 400 };
+  let u;
+  try { u = new URL(raw); } catch { return { error: "src must be an absolute URL", status: 400 }; }
+  if (u.protocol !== "http:" && u.protocol !== "https:")
+    return { error: "src must be http or https", status: 400 };
+  if (u.username || u.password)
+    return { error: "src must not include credentials", status: 400 };
+  if (!hostAllowed(u.host))
+    return { error: "src host is not allowed", status: 403 };
+  return { url: u };
+}
+function proxyGet(req, res, targetUrl, redirects = 0) {
+  const lib = targetUrl.protocol === "https:" ? https : http;
+  const headers = { "Accept": req.headers.accept || "*/*" };
+  if (req.headers.range) headers.Range = req.headers.range;
+  const pReq = lib.request(targetUrl, { method: "GET", headers, timeout: PROXY_TIMEOUT_MS }, (pRes) => {
+    const loc = pRes.headers.location;
+    if (pRes.statusCode >= 300 && pRes.statusCode < 400 && loc) {
+      pRes.resume();
+      if (redirects >= PROXY_MAX_REDIRECTS) {
+        sendJSON(res, 502, { error: "too many redirects" });
+        return;
+      }
+      let next;
+      try { next = new URL(loc, targetUrl); } catch {
+        sendJSON(res, 502, { error: "bad redirect" });
+        return;
+      }
+      const check = parseProxyTarget(next.toString());
+      if (check.error) { sendJSON(res, check.status, { error: check.error }); return; }
+      proxyGet(req, res, check.url, redirects + 1);
+      return;
+    }
+    const out = { "Cache-Control": "no-store" };
+    if (pRes.headers["content-type"]) out["Content-Type"] = pRes.headers["content-type"];
+    if (pRes.headers["content-length"]) out["Content-Length"] = pRes.headers["content-length"];
+    if (pRes.headers["content-range"]) out["Content-Range"] = pRes.headers["content-range"];
+    if (pRes.headers["accept-ranges"]) out["Accept-Ranges"] = pRes.headers["accept-ranges"];
+    res.writeHead(pRes.statusCode, out);
+    pRes.pipe(res);
+  });
+  pReq.on("timeout", () => {
+    pReq.destroy();
+    if (!res.headersSent) sendJSON(res, 504, { error: "proxy timeout" });
+  });
+  pReq.on("error", (e) => {
+    if (!res.headersSent) sendJSON(res, 502, { error: String(e.message || e) });
+    else res.destroy();
+  });
+  req.on("close", () => { if (!res.writableEnded) pReq.destroy(); });
+  pReq.end();
 }
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -429,6 +488,14 @@ const server = http.createServer(async (req, res) => {
         .map((f) => ({ name: f, src: "/media/" + encodeURIComponent(f), size: fs.statSync(path.join(MEDIA_DIR, f)).size }));
       sendJSON(res, 200, files);
     } catch (e) { sendJSON(res, 500, { error: String(e) }); }
+    return;
+  }
+
+  /* API: localhost media proxy (MediaMTX /list + /get fMP4) */
+  if (p === "/api/media-proxy" && req.method === "GET") {
+    const parsed = parseProxyTarget(url.searchParams.get("src"));
+    if (parsed.error) { sendJSON(res, parsed.status, { error: parsed.error }); return; }
+    proxyGet(req, res, parsed.url);
     return;
   }
 

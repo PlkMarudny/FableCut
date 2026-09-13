@@ -50,6 +50,9 @@ re-read after a moment instead of shelling out to ffprobe.
 - A cut is just two clips: the first with `duration: t`, the second with
   `start: +t, in: +t×speed, duration: rest`.
 - Video and audio clips must satisfy `in + duration×speed ≤ media.duration`.
+- Live MediaMTX sources are `addMedia` with `live:true`, `livePath`, `liveList`
+  (and `liveOrigin` / `duration` from `/list`). Clips keep normal in/out; do not
+  auto-grow duration on a poll loop — the UI ghost handle is how the user extends.
 - Crossfades are same-track overlap plus `transitionIn: {type:"fade"}` on the
   later clip — not a separate object.
 - Vary the font per title. Reusing one typeface across a whole edit is the

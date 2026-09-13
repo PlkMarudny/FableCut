@@ -45,6 +45,7 @@
         <span class="panel-head-actions">
           <button type="button" class="btn tiny" id="btnTitle" title="Add a title card at the playhead">+ Title</button>
           <button type="button" class="btn tiny" id="btnAdjust" title="Add an adjustment layer (grades everything below it)">+ Adjust</button>
+          <button type="button" class="btn tiny" id="btnLive" title="Add a live MediaMTX recording (playback /list + /get)">+ Live</button>
           <label class="btn tiny accent" id="btnImport" for="fileInput" title="Import media files">+ Import</label>
           <button type="button" class="btn tiny" id="btnImportUrl" title="Download media from an HTTPS URL into the project">+ URL</button>
         </span>
@@ -59,7 +60,7 @@
       <div class="bin-list" id="binList">
         <div class="bin-empty" id="binEmpty">
           <div class="bin-empty-icon">🎬</div>
-          <p>Drop video, audio or images here<br>or click <b>+ Import</b> / <b>+ URL</b></p>
+          <p>Drop video, audio or images here<br>or click <b>+ Import</b> / <b>+ URL</b> / <b>+ Live</b></p>
           <p class="hint">Then drag media onto the timeline below.</p>
         </div>
       </div>
@@ -162,7 +163,9 @@
       <button class="btn tiny toggle" id="btnAudioHold" title="Audio Hold — while paused, loop one frame of audio at the playhead. Play/Stop turns it off."><svg class="ico" viewBox="0 0 16 16" width="13" height="13" style="vertical-align:-3px" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square" d="M1.75 2.75V13.25M14.25 2.75V13.25"/><path fill="currentColor" d="M5.2 5.85h1.15v4.3H5.2V5.85zM7.05 5.85h0.55l2.85-2.2v8.7l-2.85-2.2H7.05V5.85z"/></svg> Audio hold</button>
       <span class="flex-spacer"></span>
       <span class="dim tiny-label">Zoom</span>
+      <button class="btn tiny" id="btnZoomOut" title="Zoom timeline out (−) — double the visible time">−</button>
       <input type="range" id="zoomSlider" min="1" max="300" value="60">
+      <button class="btn tiny" id="btnZoomIn" title="Zoom timeline in (+) — half the visible time">+</button>
       <button class="btn tiny" id="btnZoomFit" title="Zoom timeline to fit (⇧Z)"><span class="fit-icon">│<span class="fit-arrow">↔</span>│</span> Fit</button>
     </div>
     <div class="timeline">
@@ -271,6 +274,25 @@
   </div>
 </div>
 
+<!-- ══════════ LIVE SOURCE OVERLAY ══════════ -->
+<div class="overlay hidden" id="liveSourceOverlay">
+  <div class="dialog" id="liveSourceDialog" role="dialog" aria-modal="true" aria-labelledby="liveSourceTitle">
+    <h2 id="liveSourceTitle">Add live source</h2>
+    <p class="dim">MediaMTX playback: availability from <code>/list</code>, video from <code>/get</code> fMP4. Clips keep normal in/out; extra recorded time shows as a ghost tail on the timeline.</p>
+    <label class="live-field">Path
+      <input id="liveSourcePath" type="text" spellcheck="false" placeholder="stream or http://localhost:9996/list?path=stream" autocomplete="off">
+    </label>
+    <label class="live-field">List URL
+      <input id="liveSourceList" type="text" spellcheck="false" value="http://localhost:9996/list" autocomplete="off">
+    </label>
+    <p class="dim live-source-err hidden" id="liveSourceErr" role="status"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="btnCancelLiveSource">Cancel</button>
+      <button type="button" class="btn primary" id="btnConfirmLiveSource">Add</button>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════ SETTINGS OVERLAY ══════════ -->
 <div class="overlay hidden" id="settingsOverlay">
   <div class="dialog settings" id="settingsDialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" tabindex="-1">
@@ -297,6 +319,7 @@
     <div class="keys-cols">
       <table class="keys">
         <tr><td><kbd>Space</kbd></td><td>Play / pause</td></tr>
+        <tr><td><kbd>P</kbd></td><td>While playing — page the timeline so the playhead sits at the left of the view</td></tr>
         <tr><td><kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd></td><td>Shuttle preview — <kbd>L</kbd> faster / <kbd>J</kbd> slower (1× · 1.5× · 2× · 4×); <kbd>K</kbd> play/pause + reset to 1×</td></tr>
         <tr><td><kbd>S</kbd></td><td>Split clip(s) at playhead</td></tr>
         <tr><td><kbd>G</kbd></td><td>Find next shared gap (wraps; respects IN/OUT)</td></tr>
@@ -324,7 +347,7 @@
         <tr><td><kbd>⇧</kbd>+<kbd>T</kbd></td><td>Trim clips to IN/OUT (remove heads/tails)</td></tr>
         <tr><td>Limit (toolbar)</td><td>Play stops at OUT; Home/End use IN/OUT</td></tr>
         <tr><td><kbd>N</kbd></td><td>Toggle snapping</td></tr>
-        <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom timeline</td></tr>
+        <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom timeline in / out (halve / double visible time)</td></tr>
         <tr><td><kbd>Z</kbd></td><td>Zoom to selected clip(s)</td></tr>
         <tr><td><kbd>Alt</kbd>+<kbd>Z</kbd></td><td>Zoom to IN–OUT work area</td></tr>
         <tr><td><kbd>⇧</kbd>+<kbd>Z</kbd></td><td>Zoom timeline to fit</td></tr>

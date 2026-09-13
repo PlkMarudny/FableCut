@@ -77,6 +77,28 @@ test("fablecut_patch_project applies a batch atomically and bumps the revision o
   assert.equal(doc.media.find((m) => m.id === "m_b").name, "whoosh.mp3");
 });
 
+test("addMedia accepts a live MediaMTX source without a pre-built src", async (t) => {
+  const { dir, mcp } = await boot(t);
+  const { text, isError } = await mcp.callTool("fablecut_patch_project", {
+    ops: [{
+      op: "addMedia",
+      media: {
+        id: "m_live", kind: "video", live: true, livePath: "stream",
+        liveList: "http://localhost:9996/list", liveOrigin: "2024-01-14T16:33:17.000Z",
+        duration: 42.1,
+      },
+    }],
+  });
+  assert.equal(isError, false, text);
+  const m = readProject(dir).media.find((x) => x.id === "m_live");
+  assert.equal(m.live, true);
+  assert.equal(m.livePath, "stream");
+  assert.match(m.src, /\/get\?/);
+  assert.match(m.src, /path=stream/);
+  const compact = await mcp.callTool("fablecut_get_project", { compact: true });
+  assert.match(compact.text, /m_live video live/);
+});
+
 test("updateClip merges into props, and null deletes a key", async (t) => {
   const project = seedProject();
   project.clips[0].props = { filterPreset: "noir", scale: 2 };

@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and BT.709 tags are written into both the bitstream and the container.
   Abandoned sessions are reclaimed by an idle sweeper, and SIGINT / SIGTERM
   clean up in-flight ffmpeg processes and temp dirs.
+- **Live MediaMTX recordings** — Project bin **+ Live** registers a playback
+  path (`livePath` / `liveList`). Clips use normal in/out; a ghost tail shows
+  extra recorded time from `/list` and click-extends via `/get` fMP4. Localhost
+  `/api/media-proxy` avoids CORS. (`media.live`, `livePath`, `liveList`, `liveOrigin`)
 - A real test suite (`npm test`, zero dependencies, `node:test`): MCP protocol
   negotiation and framing, MCP tool semantics including the conflict rules, the
   REST API with its Host/Origin and path-traversal guards, and the shipped SVG

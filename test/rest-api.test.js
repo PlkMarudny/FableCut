@@ -162,6 +162,38 @@ test("GET /api/media lists the media folder", async (t) => {
   assert.ok(Array.isArray(await res.json()));
 });
 
+test("GET /api/media-proxy fetches localhost URLs and refuses the rest", async (t) => {
+  const { base } = await boot(t);
+
+  const missing = await fetch(base + "/api/media-proxy");
+  assert.equal(missing.status, 400);
+  await missing.text();
+
+  const remote = await fetch(base + "/api/media-proxy?src=" + encodeURIComponent("http://example.com/secret"));
+  assert.equal(remote.status, 403);
+  await remote.text();
+
+  const fileUrl = await fetch(base + "/api/media-proxy?src=" + encodeURIComponent("file:///etc/passwd"));
+  assert.equal(fileUrl.status, 400);
+  await fileUrl.text();
+
+  const http = require("node:http");
+  const stub = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify([
+      { start: "2024-01-14T16:33:17Z", duration: 12.5, url: "http://127.0.0.1/get" },
+    ]));
+  });
+  await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+  t.after(() => new Promise((r) => stub.close(r)));
+  const stubPort = stub.address().port;
+  const src = `http://127.0.0.1:${stubPort}/list?path=stream`;
+  const ok = await fetch(base + "/api/media-proxy?src=" + encodeURIComponent(src));
+  assert.equal(ok.status, 200, await ok.clone().text());
+  const spans = await ok.json();
+  assert.equal(spans[0].duration, 12.5);
+});
+
 test("GET /api/export/ffmpeg reports encoder availability", async (t) => {
   const { base } = await boot(t);
   const body = await (await fetch(base + "/api/export/ffmpeg")).json();

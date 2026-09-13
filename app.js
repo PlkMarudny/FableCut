@@ -40,9 +40,15 @@ const RULER_H = 26;
 const SNAP_PX = 8;
 const MIN_DUR = 0.05;
 const ZOOM_MIN = 1;
+const ZOOM_ABS_MIN = 0.01; // long sequences / live tails need << 1 px/s
 const ZOOM_MAX = 300;
 const TIMELINE_PAD_SEC = 15; // trailing empty seconds in the scrollable content
 const TIMELINE_FIT_FILL = 0.95; // ⇧Z / Fit — clip content fills this fraction of the viewport
+const DEFAULT_LIVE_LIST = "http://localhost:9996/list";
+const LIVE_POLL_MS = 1500;
+const LIVE_SAVE_MS = 5000;
+const LIVE_DEFAULT_TAIL_SEC = 10 * 60; // new live clips are a 10 min window ending at the recorded head
+const LIVE_BLOB_SEC = 45;              // /get is not Range-seekable over HTTP — fetch this many seconds as a blob
 
 const DEFAULT_PROPS = {
   x: 0, y: 0, scale: 1, rotation: 0, opacity: 1, volume: 1, pan: 0,
@@ -368,7 +374,7 @@ const project = {
   background: "#000000",
   revision: 0,
   folders: [], // {id, name, parentId:null|string, open:true} — Project-bin tree (virtual)
-  media: [],   // {id, name, kind, src, duration, width?, height?, folderId?}
+  media: [],   // {id, name, kind, src, duration, width?, height?, folderId?, live?, livePath?, liveList?, liveOrigin?}
   clips: [],   // {id, mediaId, kind, track, start, in, duration, name, props:{}}
   markers: [], // {t, label?} — beat/cue markers on the ruler; snap targets
   inPoint: null,  // timeline work-area IN (seconds), or null
@@ -493,6 +499,12 @@ const runtime = {
   importFolderId: null, // Project-bin folder to place the next import into
   binDragFolderId: null, // folder id currently being dragged (cycle checks)
   binCtxMenu: null,     // Project-tab context menu element
+  livePollTimer: null,  // interval while any live MediaMTX media is in the project
+  liveSaveTimer: null,  // debounce persist of growing media.duration
+  liveDirty: false,
+  livePlayWin: new Map(), // clipId -> {in, dur} of the blob currently on the element
+  livePendingWin: new Map(), // clipId -> pinned {in, dur} fetch while the blob is in flight
+  liveBlobs: new Map(),   // "mediaId@in x dur" -> {url, promise, in, dur}
 };
 
 /* ── DOM ───────────────────────────────────────────────────────────────── */
@@ -551,6 +563,15 @@ function fmt(t) {
     f = Math.floor((t % 1) * projectFps());
   const p = (n) => String(n).padStart(2, "0");
   return `${p(m)}:${p(s)}:${p(f)}`;
+}
+/* Clock duration (not timeline timecode). Hours never wrap. */
+function fmtHMS(t) {
+  t = Math.max(0, Math.floor(+t || 0));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(h)}:${p(m)}:${p(s)}`;
 }
 const getMedia = (id) => project.media.find((m) => m.id === id);
 const getClip = (id) => project.clips.find((c) => c.id === id);
@@ -794,6 +815,18 @@ function mediaTimeAt(c, t) {
     : e.cum[i0] + (e.cum[i0 + 1] - e.cum[i0]) * frac;
   return c.in + v;
 }
+/* Live /get is a short window around the playhead — the element clock is
+   local to that window, not clip.in (the fMP4 often isn't seekable). */
+function elementTimeAt(c, t) {
+  const mt = mediaTimeAt(c, t);
+  const m = getMedia(c.mediaId);
+  if (isLiveMedia(m)) {
+    const win = runtime.livePlayWin.get(c.id);
+    const base = win ? win.in : (c.in || 0);
+    return Math.max(0, mt - base);
+  }
+  return mt;
+}
 let toastTimer = null;
 function toast(msg) {
   if (!els.toast) return;
@@ -898,7 +931,300 @@ function normalizeFolders(list) {
 }
 function normalizeMediaEntry(m) {
   if (!m || typeof m !== "object") return m;
-  return { ...m, folderId: m.folderId || null };
+  const out = { ...m, folderId: m.folderId || null };
+  if (out.live) {
+    const d = finiteSec(out.duration);
+    out.duration = d;
+  }
+  return out;
+}
+
+function finiteSec(v) {
+  const n = +v;
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+function isLiveMedia(m) {
+  return !!(m && m.live && m.livePath && m.liveList);
+}
+function proxiedSrc(raw) {
+  if (!raw) return raw;
+  if (raw.startsWith("/api/media-proxy") || raw.startsWith("/media/") || raw.startsWith("/library/") || raw.startsWith("blob:"))
+    return raw;
+  try {
+    const u = new URL(raw, location.href);
+    if (u.origin === location.origin) return raw;
+    return "/api/media-proxy?src=" + encodeURIComponent(u.href);
+  } catch { return raw; }
+}
+function normalizeListUrl(raw) {
+  const fallback = DEFAULT_LIVE_LIST;
+  try {
+    const u = new URL((raw || "").trim() || fallback);
+    u.pathname = "/list";
+    u.search = "";
+    u.hash = "";
+    return u.origin + "/list";
+  } catch { return fallback; }
+}
+function parseLiveSourceInput(pathOrUrl, listUrl) {
+  const listFallback = normalizeListUrl(listUrl);
+  const raw = String(pathOrUrl || "").trim();
+  if (!raw) throw new Error("Enter a MediaMTX path (e.g. stream)");
+  try {
+    const u = new URL(raw);
+    const qPath = u.searchParams.get("path");
+    const isPlayback = /\/(list|get)\/?$/i.test(u.pathname) || !!qPath;
+    const segs = u.pathname.split("/").filter(Boolean);
+    const last = segs[segs.length - 1] || "";
+    const fromPath = (last && last !== "list" && last !== "get" && last !== "index.m3u8")
+      ? last : (segs[0] && segs[0] !== "list" && segs[0] !== "get" ? segs[0] : "");
+    const livePath = qPath || fromPath;
+    if (!livePath) throw new Error("Could not read a path from that URL");
+    return { livePath, liveList: isPlayback ? u.origin + "/list" : listFallback, name: livePath };
+  } catch (e) {
+    if (e instanceof TypeError) {
+      const livePath = raw.replace(/^\/+/, "");
+      if (!livePath) throw new Error("Enter a MediaMTX path (e.g. stream)");
+      return { livePath, liveList: listFallback, name: livePath };
+    }
+    throw e;
+  }
+}
+function liveStartRFC3339(m, inn) {
+  const t0 = Date.parse(m.liveOrigin);
+  if (!Number.isFinite(t0)) return m.liveOrigin;
+  return new Date(t0 + Math.max(0, inn || 0) * 1000).toISOString();
+}
+function buildLiveGetUrl(m, inn, dur) {
+  const u = new URL(normalizeListUrl(m.liveList));
+  u.pathname = "/get";
+  u.search = "";
+  u.searchParams.set("path", m.livePath);
+  if (m.liveOrigin) u.searchParams.set("start", liveStartRFC3339(m, inn || 0));
+  u.searchParams.set("duration", String(Math.max(MIN_DUR, finiteSec(dur) || MIN_DUR)));
+  u.searchParams.set("format", "fmp4");
+  return u.toString();
+}
+function liveBlobKey(mediaId, inn, dur) {
+  return mediaId + "@" + inn.toFixed(3) + "x" + dur.toFixed(3);
+}
+function liveWinSpec(inn, dur) {
+  return {
+    in: Math.max(0, +(+inn).toFixed(3)),
+    dur: Math.max(MIN_DUR, +(+dur).toFixed(3)),
+  };
+}
+function liveWinCovers(win, mt, tail = 0.08) {
+  return !!(win && mt >= win.in - 1e-3 && mt < win.in + win.dur - tail);
+}
+function liveMediaTime(c) {
+  const inn = c.in || 0;
+  const speed = clipSpeed(c);
+  const local = clamp(state.time - c.start, 0, Math.max(0, c.duration - 1e-4));
+  return inn + local * speed;
+}
+function liveBlobWindow(c) {
+  const inn0 = c.in || 0;
+  const speed = clipSpeed(c);
+  const mt = liveMediaTime(c);
+  const end = inn0 + c.duration * speed;
+  const remain = Math.max(MIN_DUR, end - mt);
+  const prev = runtime.livePlayWin.get(c.id);
+  if (liveWinCovers(prev, mt)) {
+    runtime.livePendingWin.delete(c.id);
+    const left = prev.in + prev.dur - mt;
+    if (state.playing && left < 10) {
+      const next = liveWinSpec(prev.in + prev.dur - 1, Math.min(LIVE_BLOB_SEC, Math.max(MIN_DUR, end - (prev.in + prev.dur - 1))));
+      const m = getMedia(c.mediaId);
+      if (m && next.in < end - MIN_DUR) {
+        const rec = ensureLiveBlob(m, next.in, next.dur);
+        if (left < 0.3 && rec.url) return { in: rec.in, dur: rec.dur };
+      }
+    }
+    return prev;
+  }
+  /* Playhead left the loaded blob. Pin ONE fetch at the jump time — using
+     live mt here every frame (while playing) minted a new /get key each rAF
+     and never let livePlayWin commit. Pause-move-play worked only because
+     pause froze mt so the same key could finish. */
+  let pending = runtime.livePendingWin.get(c.id);
+  if (liveWinCovers(pending, mt)) return pending;
+  pending = liveWinSpec(mt, Math.min(LIVE_BLOB_SEC, remain));
+  runtime.livePendingWin.set(c.id, pending);
+  return pending;
+}
+/* MediaMTX /get is muxed on the fly — no Accept-Ranges — so <video src=http>
+   cannot seek and Chrome's Range requests stall it. fetch() + blob URL works. */
+function ensureLiveBlob(m, inn, dur) {
+  inn = Math.max(0, +(+inn).toFixed(3));
+  dur = Math.max(MIN_DUR, +(+dur).toFixed(3));
+  const key = liveBlobKey(m.id, inn, dur);
+  let rec = runtime.liveBlobs.get(key);
+  if (rec) return rec;
+  rec = { key, id: m.id, in: inn, dur, url: null, promise: null };
+  rec.promise = fetch(buildLiveGetUrl(m, inn, dur), { cache: "no-store" })
+    .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+    .then((blob) => {
+      rec.url = URL.createObjectURL(blob);
+      return rec;
+    })
+    .catch((e) => {
+      runtime.liveBlobs.delete(key);
+      if (!runtime.liveBlobErr) {
+        runtime.liveBlobErr = true;
+        toast("Live playback failed — " + (e.message || e));
+        setTimeout(() => { runtime.liveBlobErr = false; }, 5000);
+      }
+      return rec;
+    });
+  runtime.liveBlobs.set(key, rec);
+  return rec;
+}
+function liveClipSrc(c, m) {
+  const t = state.time;
+  if (!activeAt(c, t) && !(state.playing && t < clipEnd(c) && t + 0.5 >= c.start)) {
+    const el = runtime.clipEls.get(c.id);
+    return (el && el.dataset.fcSrc) || null;
+  }
+  const want = liveBlobWindow(c);
+  const rec = ensureLiveBlob(m, want.in, want.dur);
+  if (!rec.url) {
+    const el = runtime.clipEls.get(c.id);
+    return (el && el.dataset.fcSrc) || null;
+  }
+  runtime.livePlayWin.set(c.id, { in: rec.in, dur: rec.dur });
+  runtime.livePendingWin.delete(c.id);
+  return rec.url;
+}
+function playbackSrc(m, c, opts) {
+  if (!m) return "";
+  if (!isLiveMedia(m)) return m.src;
+  if (!c) return buildLiveGetUrl(m, 0, Math.max(MIN_DUR, Math.min(finiteSec(m.duration) || 5, 5)));
+  return buildLiveGetUrl(m, c.in || 0, c.duration);
+}
+function liveAvailabilityFromList(spans) {
+  if (!Array.isArray(spans) || !spans.length) return null;
+  const parsed = spans.map((s) => ({
+    startMs: Date.parse(s && s.start),
+    duration: finiteSec(s && s.duration) || 0,
+  })).filter((s) => Number.isFinite(s.startMs) && s.duration > 0)
+    .sort((a, b) => a.startMs - b.startMs);
+  if (!parsed.length) return null;
+  const origin = parsed[0].startMs;
+  const last = parsed[parsed.length - 1];
+  const duration = (last.startMs + last.duration * 1000 - origin) / 1000;
+  if (!Number.isFinite(duration) || duration < 0) return null;
+  return { liveOrigin: new Date(origin).toISOString(), duration };
+}
+function liveListDirectUrl(m) {
+  const u = new URL(normalizeListUrl(m.liveList));
+  u.searchParams.set("path", m.livePath);
+  return u.toString();
+}
+async function fetchLiveListJson(m) {
+  const direct = liveListDirectUrl(m);
+  const attempts = [
+    { url: direct, label: "MediaMTX" },
+    { url: proxiedSrc(direct), label: "editor proxy" },
+  ];
+  const errors = [];
+  for (const { url, label } of attempts) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) {
+        errors.push(label + " HTTP " + res.status);
+        continue;
+      }
+      const data = await res.json();
+      if (!Array.isArray(data)) { errors.push(label + " returned non-list JSON"); continue; }
+      return data;
+    } catch (e) {
+      errors.push(label + ": " + (e.message || e));
+    }
+  }
+  throw new Error("Could not read " + direct + " — " + errors.join("; "));
+}
+async function refreshLiveMedia(m) {
+  if (!isLiveMedia(m)) return false;
+  const avail = liveAvailabilityFromList(await fetchLiveListJson(m));
+  if (!avail) return false;
+  let changed = false;
+  if (m.liveOrigin !== avail.liveOrigin) { m.liveOrigin = avail.liveOrigin; changed = true; }
+  if (m.duration !== avail.duration) { m.duration = avail.duration; changed = true; }
+  if (!m.src && m.liveOrigin) m.src = buildLiveGetUrl(m, 0, Math.min(m.duration || 5, 5));
+  return changed;
+}
+function scheduleLivePersist() {
+  runtime.liveDirty = true;
+  clearTimeout(runtime.liveSaveTimer);
+  runtime.liveSaveTimer = setTimeout(() => {
+    runtime.liveSaveTimer = null;
+    if (!runtime.liveDirty) return;
+    runtime.liveDirty = false;
+    scheduleSave();
+  }, LIVE_SAVE_MS);
+}
+async function pollLiveMedia() {
+  if (state.gesture || state.exporting || state.rendering) return;
+  const lives = project.media.filter(isLiveMedia);
+  if (!lives.length) { stopLivePoller(); return; }
+  let changed = false;
+  for (const m of lives) {
+    try { if (await refreshLiveMedia(m)) changed = true; } catch { }
+  }
+  if (!changed) return;
+  state.dirtyTimeline = true;
+  renderBin();
+  scheduleLivePersist();
+}
+function ensureLivePoller() {
+  if (!project.media.some(isLiveMedia)) { stopLivePoller(); return; }
+  if (runtime.livePollTimer) return;
+  runtime.livePollTimer = setInterval(pollLiveMedia, LIVE_POLL_MS);
+  pollLiveMedia();
+}
+function stopLivePoller() {
+  if (runtime.livePollTimer) { clearInterval(runtime.livePollTimer); runtime.livePollTimer = null; }
+}
+/* New live clips are a subclip ending at the recorded head: in-point = wall
+   clock now − 10 min (or 0 if the recording is shorter). */
+function liveClipWindow(m) {
+  const dur = finiteSec(m.duration) || 0;
+  if (!(dur > 0)) return { in: 0, duration: 5 };
+  const origin = Date.parse(m.liveOrigin);
+  if (!Number.isFinite(origin)) return { in: 0, duration: dur };
+  const wantIn = (Date.now() - LIVE_DEFAULT_TAIL_SEC * 1000 - origin) / 1000;
+  const inn = clamp(wantIn, 0, Math.max(0, dur - MIN_DUR));
+  return { in: inn, duration: Math.max(MIN_DUR, dur - inn) };
+}
+function liveClipTail(c) {
+  const m = getMedia(c.mediaId);
+  if (!isLiveMedia(m) || !(m.duration > 0)) return 0;
+  const used = (c.in || 0) + c.duration * clipSpeed(c);
+  return Math.max(0, m.duration - used);
+}
+function clipShowsLiveGhost(c) {
+  return c.kind === "video" && liveClipTail(c) > 1 / Math.max(1, project.fps);
+}
+function refreshLiveClipEls(c) {
+  for (const x of withLinked([c])) releaseClipEl(x.id);
+}
+function extendLiveClipToHead(c) {
+  const m = getMedia(c.mediaId);
+  if (!isLiveMedia(m) || !(m.duration > 0)) return;
+  const maxDur = Math.max(MIN_DUR, (m.duration - (c.in || 0)) / clipSpeed(c));
+  if (c.duration >= maxDur - 1e-4) return;
+  pushUndo();
+  c.duration = maxDur;
+  syncLinkedTiming(c);
+  m.src = buildLiveGetUrl(m, c.in || 0, c.duration);
+  refreshLiveClipEls(c);
+  state.dirtyTimeline = true;
+  scheduleSave();
+  renderInspector();
+}
+function liveTimelineHead(c) {
+  return clipEnd(c) + liveClipTail(c) / clipSpeed(c);
 }
 function folderChildren(parentId) {
   return project.folders
@@ -1107,6 +1433,7 @@ function applyProject(data) {
   // clearing the maps — otherwise nodes stay wired to live track buses and leak.
   for (const id of new Set([...runtime.clipEls.keys(), ...runtime.clipGain.keys()]))
     releaseClipEl(id);
+  runtime.livePlayWin.clear(); runtime.livePendingWin.clear();
   if (runtime.audio) syncAudioGraphTracks();
   els.preview.width = project.width; els.preview.height = project.height;
   updateMonitorRes();
@@ -1124,6 +1451,7 @@ function applyProject(data) {
   syncExportRangeSelect();
   syncExportRangeUi();
   syncAllTrackDisabledUI();
+  ensureLivePoller();
 }
 function scheduleSave() {
   state.dirtyTimeline = true;
@@ -1151,8 +1479,20 @@ function projectJSON() {
     folders: (folders || []).map(({ id, name, parentId, open }) =>
       ({ id, name, parentId: parentId || null, open: open !== false })),
     tracks: serializeTracks(),
-    media: media.filter((m) => !m.transient).map(({ id, name, kind, src, duration, width, height, folderId }) =>
-      ({ id, name, kind, src, duration, width, height, folderId: folderId || null })),
+    media: media.filter((m) => !m.transient).map((m) => {
+      const row = {
+        id: m.id, name: m.name, kind: m.kind, src: m.src,
+        duration: m.duration, width: m.width, height: m.height,
+        folderId: m.folderId || null,
+      };
+      if (m.live) {
+        row.live = true;
+        if (m.livePath) row.livePath = m.livePath;
+        if (m.liveList) row.liveList = m.liveList;
+        if (m.liveOrigin) row.liveOrigin = m.liveOrigin;
+      }
+      return row;
+    }),
     clips: clips.map(({ id, mediaId, kind, track, start, in: inn, duration, name, props, keyframes, transitionIn, transitionOut, linkedId, linkGroup }) => {
       const clipOut = { id, mediaId, kind, track, start, in: inn, duration, name, props, keyframes, transitionIn, transitionOut };
       if (linkGroup) clipOut.linkGroup = linkGroup;
@@ -1212,6 +1552,7 @@ async function syncFromServer(force) {
  * Throws on failure — callers decide whether that's fatal or best-effort.
  * Shared by importFiles, addLibraryItem and probeMissingMeta. */
 async function loadMediaMetadata(m) {
+  if (isLiveMedia(m)) { await refreshLiveMedia(m); return; }
   if (m.kind === "svg") { await loadSvgMedia(m); return; }
   if (m.kind === "image") {
     const img = await loadImage(m.src);
@@ -1225,6 +1566,11 @@ async function loadMediaMetadata(m) {
 async function probeMissingMeta() {
   let changed = false;
   for (const m of project.media) {
+    if (isLiveMedia(m)) {
+      try { if (await refreshLiveMedia(m)) changed = true; } catch { }
+      if (m.kind === "video" && !runtime.mediaAux.get(m.id)?.thumb) grabThumb(m).catch(() => { });
+      continue;
+    }
     if (m.kind === "svg") {
       if (!runtime.mediaAux.get(m.id)?.svgText) { try { await loadMediaMetadata(m); changed = true; } catch { } }
       continue;
@@ -1242,13 +1588,14 @@ async function probeMissingMeta() {
   }
   if (changed) { renderBin(); scheduleSave(); }
   state.dirtyTimeline = true;
+  ensureLivePoller();
 }
 function probeAV(src, kind) {
   return new Promise((resolve, reject) => {
     const el = document.createElement(kind === "audio" ? "audio" : "video");
     el.preload = "metadata"; el.src = src;
     el.onloadedmetadata = () => resolve({
-      duration: el.duration,
+      duration: Number.isFinite(el.duration) && el.duration > 0 ? el.duration : undefined,
       width: el.videoWidth || undefined, height: el.videoHeight || undefined,
     });
     el.onerror = reject;
@@ -1268,15 +1615,30 @@ function loadImage(src) {
 async function grabThumb(m) {
   const v = document.createElement("video");
   v.muted = true; v.preload = "auto";
-  if (isCrossOriginSrc(m.src)) v.crossOrigin = "anonymous";
-  v.src = m.src;
-  await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = rej; });
-  v.currentTime = Math.min(0.5, (v.duration || 1) / 2);
-  await new Promise((res) => { v.onseeked = res; setTimeout(res, 1500); });
+  if (isLiveMedia(m)) {
+    const rec = ensureLiveBlob(m, 0, Math.max(MIN_DUR, Math.min(finiteSec(m.duration) || 5, 5)));
+    const url = rec.url || (await rec.promise).url;
+    if (!url) throw new Error("thumb");
+    v.src = url;
+  } else {
+    if (isCrossOriginSrc(m.src)) v.crossOrigin = "anonymous";
+    v.src = m.src;
+  }
+  await new Promise((res, rej) => {
+    const tm = setTimeout(() => v.readyState >= 2 ? res() : rej(new Error("thumb")), 8000);
+    v.addEventListener("loadeddata", () => { clearTimeout(tm); res(); });
+    v.addEventListener("error", () => { clearTimeout(tm); rej(new Error("thumb")); });
+  });
+  if (mediaElCanSeek(v)) {
+    v.currentTime = Math.min(0.5, (v.duration || 1) / 2);
+    await new Promise((res) => { v.onseeked = res; setTimeout(res, 1500); });
+  }
   const c = document.createElement("canvas");
   c.width = 160; c.height = 90;
   c.getContext("2d").drawImage(v, 0, 0, 160, 90);
-  runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), thumb: c.toDataURL("image/jpeg", 0.6) });
+  try {
+    runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), thumb: c.toDataURL("image/jpeg", 0.6) });
+  } catch { }
   v.src = "";
   renderBin(); state.dirtyTimeline = true;
 }
@@ -1287,6 +1649,7 @@ function getDecodeCtx() {
   return decodeCtx || (decodeCtx = new (window.AudioContext || window.webkitAudioContext)());
 }
 function getAudioBuffer(m) {
+  if (isLiveMedia(m)) return Promise.reject(new Error("live media has no full-file audio buffer"));
   let p = runtime.audioBufs.get(m.id);
   if (!p) {
     p = fetch(m.src).then((r) => r.arrayBuffer())
@@ -1298,6 +1661,7 @@ function getAudioBuffer(m) {
 }
 function ensureWave(m) {
   // Also decode peaks from video files when their audio is placed on an A track
+  if (isLiveMedia(m)) return;
   if ((m.kind !== "audio" && m.kind !== "video") || runtime.wavePeaks.has(m.id)) return;
   runtime.wavePeaks.set(m.id, null); // pending
   getAudioBuffer(m).then((buf) => {
@@ -1523,7 +1887,7 @@ function renderBin() {
 
   const makeMediaItem = (m, depth) => {
     const item = document.createElement("div");
-    item.className = "bin-item";
+    item.className = "bin-item" + (m.live ? " live" : "");
     item.draggable = true;
     item.dataset.mediaId = m.id;
     item.style.setProperty("--bin-depth", depth);
@@ -1534,7 +1898,7 @@ function renderBin() {
       <div class="bin-thumb"></div>
       <div class="bin-meta">
         <div class="bin-name"></div>
-        <div class="bin-sub">${m.kind}${m.duration ? " · " + fmt(m.duration) : ""}</div>
+        <div class="bin-sub">${m.live ? "live · " : ""}${m.kind}${m.duration ? " · " + (m.live ? fmtHMS(m.duration) : fmt(m.duration)) : ""}</div>
       </div>
       <span class="bin-del" title="Remove (and its clips)">✕</span>`;
     const thumbEl = item.querySelector(".bin-thumb");
@@ -1662,6 +2026,51 @@ els.binList.addEventListener("click", (e) => {
   e.preventDefault();
   openFileImport(e.clientX, e.clientY);
 });
+
+function openLiveSourceDialog() {
+  const err = $("liveSourceErr");
+  if (err) { err.textContent = ""; err.classList.add("hidden"); }
+  $("liveSourceOverlay").classList.remove("hidden");
+  $("liveSourcePath")?.focus();
+}
+function closeLiveSourceDialog() {
+  $("liveSourceOverlay").classList.add("hidden");
+}
+async function confirmLiveSource() {
+  const err = $("liveSourceErr");
+  const showErr = (msg) => { if (err) { err.textContent = msg; err.classList.remove("hidden"); } else toast(msg); };
+  if (!state.connected) { showErr("The editor server must be running to add a live source"); return; }
+  let spec;
+  try { spec = parseLiveSourceInput($("liveSourcePath")?.value, $("liveSourceList")?.value); }
+  catch (e) { showErr(e.message || String(e)); return; }
+  if (project.media.some((m) => isLiveMedia(m) && m.livePath === spec.livePath && m.liveList === spec.liveList)) {
+    showErr("That live path is already in the project");
+    return;
+  }
+  const m = {
+    id: "m_" + uid(), name: spec.name, kind: "video", live: true,
+    livePath: spec.livePath, liveList: spec.liveList,
+    src: "", folderId: runtime.importFolderId || null,
+  };
+  try {
+    await refreshLiveMedia(m);
+  } catch (e) {
+    showErr(e.message || String(e));
+    return;
+  }
+  if (!(m.duration > 0) || !m.liveOrigin) {
+    showErr("No recordings listed for that path yet");
+    return;
+  }
+  m.src = buildLiveGetUrl(m, 0, Math.min(m.duration, 5));
+  pushUndo();
+  project.media.push(m);
+  closeLiveSourceDialog();
+  renderBin(); scheduleSave();
+  ensureLivePoller();
+  grabThumb(m).catch(() => {});
+  toast("Live source added — drag it onto the timeline");
+}
 
 /* ═══════════════════ ASSET LIBRARY (./library on the server) ═══════════════
    Read-only default assets in four tabs: Elements (overlay art), Sound FX,
@@ -1964,11 +2373,13 @@ function addClipFromMedia(m, trackId, at) {
   const tr = TRACKS.find((t) => t.id === trackId);
   if (!tr || (kind === "audio") !== (tr.kind === "audio")) trackId = defaultTrackFor(kind);
   const start = Math.max(0, at ?? state.time);
-  const duration = m.duration || 5;
+  const win = isLiveMedia(m) ? liveClipWindow(m) : { in: 0, duration: m.duration || 5 };
+  const duration = win.duration;
+  const inn = win.in;
   const name = m.name.replace(/\.[^.]+$/, "");
   const c = {
     id: "c_" + uid(), mediaId: m.id, kind, track: trackId,
-    start, in: 0, duration, name,
+    start, in: inn, duration, name,
     props: { ...DEFAULT_PROPS },
   };
   project.clips.push(c);
@@ -1999,6 +2410,7 @@ function addClipFromMedia(m, trackId, at) {
    does. Shares the getAudioBuffer() cache, so this never decodes twice. */
 async function detectChannelCount(m) {
   if (m.channels != null) return m.channels;
+  if (isLiveMedia(m)) { m.channels = 2; return 2; }
   try {
     const buf = await getAudioBuffer(m);
     if (m.channels == null) m.channels = buf.numberOfChannels;
@@ -2439,6 +2851,12 @@ function ensurePlayheadVisible() {
     sc.scrollLeft = Math.max(0, px - sc.clientWidth / 3);
   }
 }
+const PLAYHEAD_VIEW_PAD = 48; // px inset from the left when parking the playhead
+function scrollPlayheadToViewStart() {
+  const sc = els.timelineScroll;
+  if (!sc) return;
+  sc.scrollLeft = Math.max(0, state.time * state.pps - PLAYHEAD_VIEW_PAD);
+}
 /* Jump playhead to the middle of the next aligned gap (wraps). */
 function goToNextGap() {
   const { t0, t1 } = gapSearchRange();
@@ -2758,9 +3176,36 @@ els.timelineScroll.addEventListener("scroll", () => {
   const inner = $("trackHeadInner");
   if (inner) inner.style.transform = `translateY(${-els.timelineScroll.scrollTop}px)`;
 });
+function timelineSpan() {
+  let mx = projDur();
+  for (const c of project.clips) {
+    if (!clipShowsLiveGhost(c)) continue;
+    mx = Math.max(mx, liveTimelineHead(c));
+  }
+  return Math.max(mx, MIN_DUR);
+}
 function contentWidth() {
   const minSec = (els.timelineScroll.clientWidth || 800) / state.pps;
-  return Math.max(projDur() + TIMELINE_PAD_SEC, minSec) * state.pps;
+  return Math.max(timelineSpan() + TIMELINE_PAD_SEC, minSec) * state.pps;
+}
+/* 1 px/s is the floor for short edits. On a long sequence the floor drops so
+   Fit / wheel can put the whole timeline (including live ghost tails) on screen. */
+function zoomFloor() {
+  const w = els.timelineScroll.clientWidth || 800;
+  const fit = (TIMELINE_FIT_FILL * w) / (timelineSpan() + TIMELINE_PAD_SEC);
+  return clamp(Math.min(ZOOM_MIN, fit), ZOOM_ABS_MIN, ZOOM_MIN);
+}
+function syncZoomSlider(pps) {
+  const sl = els.zoomSlider;
+  if (!sl) return;
+  const lo = zoomFloor();
+  sl.min = String(lo);
+  sl.max = String(ZOOM_MAX);
+  sl.step = lo < 1 ? "any" : "1";
+  sl.value = pps;
+  const out = $("btnZoomOut"), inn = $("btnZoomIn");
+  if (out) out.disabled = pps <= lo * 1.02;
+  if (inn) inn.disabled = pps >= ZOOM_MAX * 0.98;
 }
 function clipTransitionDur(tr) {
   if (!tr || tr.type === "none") return 0;
@@ -2831,6 +3276,7 @@ function clipKeyframesHtml(c) {
   return html + `</div>`;
 }
 function rebuildClips() {
+  syncZoomSlider(state.pps);
   const w = contentWidth();
   els.tracksContent.style.width = w + "px";
   els.ruler.style.width = els.timelineScroll.clientWidth + "px";
@@ -2867,6 +3313,10 @@ function rebuildClips() {
     let inner = `<div class="clip-body">${body}</div>`;
     inner += transitionMarksHtml(c, tr.h);
     inner += `<div class="handle l"></div><div class="handle r"></div>`;
+    if (clipShowsLiveGhost(c)) {
+      const tailTl = liveClipTail(c) / clipSpeed(c);
+      inner += `<button type="button" class="live-ghost" style="width:${Math.max(36, tailTl * state.pps)}px" title="${fmtHMS(tailTl)} available — click to extend to head" data-live-extend="${c.id}"><span class="live-ghost-label">${fmtHMS(tailTl)}</span></button>`;
+    }
     div.innerHTML = inner;
     if (hasWave) div.classList.add("has-wave");
     row.appendChild(div);
@@ -2981,8 +3431,8 @@ function drawRulerMainThread(w, h, dpr) {
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
   const sl = els.timelineScroll.scrollLeft, pps = state.pps;
-  const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
-  const step = steps.find((s) => s * pps >= 70) || 600;
+  const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400];
+  const step = steps.find((s) => s * pps >= 70) || 21600;
   const minor = step / 5;
   const i0 = Math.max(0, Math.floor(sl / pps / minor));
   // ticks + time labels first so IN/OUT can difference-blend over them
@@ -2995,7 +3445,7 @@ function drawRulerMainThread(w, h, dpr) {
     const x = Math.round(t * pps - sl) + 0.5;
     const isMajor = i % 5 === 0;
     g.moveTo(x, isMajor ? 8 : 17); g.lineTo(x, h);
-    if (isMajor) g.fillText(fmt(Math.round(t * 1000) / 1000).slice(0, 5), x + 4, 12);
+    if (isMajor) g.fillText(step >= 3600 ? fmtHMS(t) : fmt(Math.round(t * 1000) / 1000).slice(0, 5), x + 4, 12);
   }
   g.stroke();
   // dim timeline outside the IN–OUT work area
@@ -3100,6 +3550,14 @@ els.tracksContent.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     selectClip(c.id);
     setTime(c.start + (+kfMark.dataset.t || 0));
+    return;
+  }
+  const liveGhost = e.target.closest(".live-ghost");
+  if (liveGhost) {
+    e.preventDefault();
+    e.stopPropagation();
+    selectClip(c.id);
+    extendLiveClipToHead(c);
     return;
   }
   const transHandle = e.target.closest(".trans-dur-handle");
@@ -3511,18 +3969,16 @@ function setZoom(pps, anchorClientX) {
   const rect = scroller.getBoundingClientRect();
   const ax = anchorClientX != null ? anchorClientX - rect.left : rect.width / 2;
   const tAtAnchor = (scroller.scrollLeft + ax) / state.pps;
-  state.pps = clamp(pps, ZOOM_MIN, ZOOM_MAX);
-  els.zoomSlider.value = state.pps;
+  state.pps = clamp(pps, zoomFloor(), ZOOM_MAX);
+  syncZoomSlider(state.pps);
   state.dirtyTimeline = true;
   rebuildClips();
   scroller.scrollLeft = Math.max(0, tAtAnchor * state.pps - ax);
 }
-/* Fit clip content into 95% of the viewport, then scroll to the start.
-   TIMELINE_PAD_SEC is scroll room added by contentWidth(), not part of the fit. */
+/* Fit the whole timeline (clips + live ghost tails) into 95% of the viewport. */
 function zoomToFit() {
   const w = els.timelineScroll.clientWidth || 800;
-  const span = Math.max(projDur(), 1);
-  setZoom((TIMELINE_FIT_FILL * w) / span);
+  setZoom((TIMELINE_FIT_FILL * w) / timelineSpan());
   els.timelineScroll.scrollLeft = 0;
 }
 /* Zoom so the selection fills 90% of the timeline width and is centered.
@@ -3546,15 +4002,25 @@ function zoomToWorkArea() {
 function zoomToRange(t0, t1) {
   const dur = Math.max(t1 - t0, MIN_DUR);
   const w = els.timelineScroll.clientWidth || 800;
-  const pps = clamp((0.9 * w) / dur, ZOOM_MIN, ZOOM_MAX);
+  const pps = clamp((0.9 * w) / dur, zoomFloor(), ZOOM_MAX);
   state.pps = pps;
-  els.zoomSlider.value = pps;
+  syncZoomSlider(pps);
   rebuildClips();
   const center = (t0 + t1) / 2;
   const maxScroll = Math.max(0, contentWidth() - w);
   els.timelineScroll.scrollLeft = clamp(center * pps - w / 2, 0, maxScroll);
 }
+/* Halve / double the visible time span. Uses viewport width so a click is
+   the same “see twice as much / half as much” at 0.05 px/s and at 200 px/s. */
+function zoomTimeline(dir) {
+  const w = els.timelineScroll.clientWidth || 800;
+  const visible = w / Math.max(state.pps, 1e-6);
+  const next = dir > 0 ? visible / 2 : visible * 2;
+  setZoom(w / Math.max(next, 1e-6));
+}
 els.zoomSlider.addEventListener("input", () => setZoom(+els.zoomSlider.value));
+$("btnZoomOut")?.addEventListener("click", () => zoomTimeline(-1));
+$("btnZoomIn")?.addEventListener("click", () => zoomTimeline(1));
 $("btnZoomFit").addEventListener("click", zoomToFit);
 $("btnAddV").addEventListener("click", () => addTimelineTrack("video"));
 $("btnAddA").addEventListener("click", () => addTimelineTrack("audio"));
@@ -3846,7 +4312,16 @@ function renderInspector(lite) {
       if (k === "font") ensureFont(String(v));
       if (k === "name") { c.name = String(v); state.dirtyTimeline = true; }
       else if (k === "start") { c.start = Math.max(0, +v || 0); state.dirtyTimeline = true; inspPropGen++; }
-      else if (k === "duration") { c.duration = Math.max(MIN_DUR, +v || MIN_DUR); state.dirtyTimeline = true; inspPropGen++; }
+      else if (k === "duration") {
+        let d = Math.max(MIN_DUR, +v || MIN_DUR);
+        const media = getMedia(c.mediaId);
+        if ((c.kind === "video" || c.kind === "audio") && media?.duration != null)
+          d = Math.min(d, Math.max(MIN_DUR, (media.duration - (c.in || 0)) / clipSpeed(c)));
+        c.duration = d;
+        if (isLiveMedia(media)) { syncLinkedTiming(c); refreshLiveClipEls(c); }
+        state.dirtyTimeline = true;
+        inspPropGen++;
+      }
       else if (k === "transIn" || k === "transOut") {
         const key = k === "transIn" ? "transitionIn" : "transitionOut";
         const side = k === "transIn" ? "in" : "out";
@@ -4194,13 +4669,37 @@ function drawKfGraph(cv, c, key) {
 }
 
 /* ═══════════════════════════ PLAYBACK ENGINE ═══════════════════════════ */
+/* fMP4 /get often has no duration / seek range until the whole window
+   downloads. Seeking before that aborts decode and the Program Monitor stays blank. */
+function mediaElCanSeek(el) {
+  if (!el || el.readyState < 1) return false;
+  const d = el.duration;
+  if (!Number.isFinite(d) || d <= 0) return false;
+  try { return el.seekable.length > 0; } catch { return false; }
+}
+function seekMediaEl(el, mt, slop) {
+  if (!mediaElCanSeek(el)) return;
+  const max = Math.max(0, el.duration - 0.05);
+  const t = clamp(mt, 0, max);
+  if (Math.abs(el.currentTime - t) > slop) {
+    try { el.currentTime = t; } catch { }
+  }
+}
 function getClipEl(c) {
-  let el = runtime.clipEls.get(c.id);
-  if (el) return el;
   const m = getMedia(c.mediaId);
   if (!m) return null;
+  const src = isLiveMedia(m) ? liveClipSrc(c, m) : playbackSrc(m, c);
+  let el = runtime.clipEls.get(c.id);
+  if (!src) return el || null;
+  if (el) {
+    if (el.dataset.fcSrc === src) return el;
+    releaseClipEl(c.id);
+  }
   el = document.createElement(c.kind === "audio" ? "audio" : "video");
-  el.preload = "auto"; el.src = m.src; el.playsInline = true;
+  el.preload = "auto"; el.playsInline = true;
+  if (c.kind === "video" && isLiveMedia(m)) el.muted = true;
+  el.src = src;
+  el.dataset.fcSrc = src;
   runtime.clipEls.set(c.id, el);
   hookAudio(c, el);
   return el;
@@ -5009,6 +5508,14 @@ function stepPreviewRate(dir) { // clamp at the ends — for the J/L shortcuts
 }
 
 function activeAt(c, t) { return t >= c.start && t < clipEnd(c); }
+/* True when the blob on the element actually covers the playhead. While a new
+   live window is in flight, elementTimeAt is still mapped into the OLD blob —
+   seeking that to EOF is the looped-last-frame bug. */
+function liveSrcReady(c, t) {
+  const m = getMedia(c.mediaId);
+  if (!isLiveMedia(m)) return true;
+  return liveWinCovers(runtime.livePlayWin.get(c.id), mediaTimeAt(c, t), 0.05);
+}
 
 function syncMedia() {
   const t = state.time;
@@ -5016,17 +5523,21 @@ function syncMedia() {
     if (c.kind === "text" || c.kind === "image" || c.kind === "svg" || c.kind === "adjust") continue;
     const el = getClipEl(c); if (!el) continue;
     const enabled = isTrackEnabled(c.track);
-    const mt = mediaTimeAt(c, t);
+    const mt = elementTimeAt(c, t);
     if (state.playing && enabled && activeAt(c, t)) {
       // Only the active-under-playhead branch needs the full evaluated props
       // (speed/volume incl. keyframes+transitions) — skip that work for every
       // other clip on the timeline, which is the common case each frame.
+      if (!liveSrcReady(c, t)) {
+        if (!el.paused) el.pause();
+        continue;
+      }
       const p = evalProps(c, t);
       const sp = clamp(+p.speed || 1, 0.1, 8);
       const eff = clamp(sp * playRate(), 0.0625, 16); // preview speed rides on top of clip speed
       if (el.playbackRate !== eff) { try { el.playbackRate = eff; } catch {} }
       if (el.paused) el.play().catch(() => {});
-      if (Math.abs(el.currentTime - mt) > 0.25 * eff) { try { el.currentTime = mt; } catch {} }
+      seekMediaEl(el, mt, 0.25 * eff);
       const vol = clamp(p.volume, 0, 4);
       const g = runtime.clipGain.get(c.id);
       if (g) {
@@ -5040,10 +5551,8 @@ function syncMedia() {
       if (g) g.gain.value = 0;
       // Paused preview: keep decode head on the frame under the playhead.
       // Needed when clips move/trim without setTime (drag does not scrub time).
-      if (!state.playing && enabled && c.kind === "video" && activeAt(c, t) &&
-          Math.abs(el.currentTime - mt) > 0.04) {
-        try { el.currentTime = mt; } catch {}
-      }
+      if (!state.playing && enabled && c.kind === "video" && activeAt(c, t) && liveSrcReady(c, t))
+        seekMediaEl(el, mt, 0.04);
     }
   }
 }
@@ -5054,9 +5563,9 @@ function seekMediaWhilePaused() {
     if (c.kind !== "video") continue;
     if (!isTrackEnabled(c.track)) continue;
     if (!activeAt(c, t)) continue;
+    if (!liveSrcReady(c, t)) continue;
     const el = getClipEl(c); if (!el) continue;
-    const mt = mediaTimeAt(c, t);
-    if (Math.abs(el.currentTime - mt) > 0.04) { try { el.currentTime = mt; } catch { } }
+    seekMediaEl(el, elementTimeAt(c, t), 0.04);
   }
 }
 
@@ -7031,11 +7540,11 @@ function prefetchExportVideos(t) {
     if (c.start > t + EXPORT_PREFETCH_S || clipEnd(c) <= t) continue;
     const el = getClipEl(c);
     if (!el) continue;
-    const mt = mediaTimeAt(c, Math.max(t, c.start));
+    const mt = elementTimeAt(c, Math.max(t, c.start));
     if (Math.abs(el.currentTime - mt) < 0.08) continue;
     try {
       if (!el.paused) el.pause();
-      assignVideoTime(el, mt);
+      if (mediaElCanSeek(el)) assignVideoTime(el, mt);
     } catch { }
   }
 }
@@ -7064,7 +7573,7 @@ async function seekVideosTo(t) {
       if (g) g.gain.value = clamp(evalProps(c, t).volume, 0, 4);
       continue;
     }
-    const mt = mediaTimeAt(c, t);
+    const mt = elementTimeAt(c, t);
     const local = clamp(t - c.start, 0, c.duration);
     const sp = clamp(kfChannel(c, "speed", local, clipSpeed(c)), 0.1, 8);
     // One timeline frame in media-time; half-frame = “already on the right frame”
@@ -7079,6 +7588,16 @@ async function seekVideosTo(t) {
     }
     // Keep-playing path: a slightly late displayed frame is cheaper than a seek
     if (keepPlaying && !el.paused && err > 0 && err <= eps * 2) continue;
+    // fMP4 /get often has no seek range until the window finishes downloading.
+    if (!mediaElCanSeek(el)) {
+      if (el.readyState >= 2) continue;
+      waits.push(new Promise((res) => {
+        const done = () => { clearTimeout(tm); el.removeEventListener("loadeddata", done); res(); };
+        const tm = setTimeout(done, 4000);
+        el.addEventListener("loadeddata", done);
+      }));
+      continue;
+    }
 
     const g = runtime.clipGain.get(c.id);
     if (g) {
@@ -7132,6 +7651,14 @@ async function renderAudioMix(t0, t1) {
     if (c.kind !== "audio" && c.kind !== "video") continue;
     if (!isTrackEnabled(c.track)) continue;
     const m = getMedia(c.mediaId); if (!m) continue;
+    if (isLiveMedia(m)) {
+      jobs.push(
+        fetch(playbackSrc(m, c, { full: true })).then((r) => { if (!r.ok) throw 0; return r.arrayBuffer(); })
+          .then((ab) => getDecodeCtx().decodeAudioData(ab))
+          .then((buf) => ({ c, buf })).catch(() => null)
+      );
+      continue;
+    }
     jobs.push(getAudioBuffer(m).then((buf) => ({ c, buf })).catch(() => null));
   }
   const sources = (await Promise.all(jobs)).filter(Boolean);
@@ -7563,6 +8090,20 @@ els.importUrlOverlay?.addEventListener("click", (e) => {
 });
 $("btnTitle").addEventListener("click", addTitle);
 $("btnAdjust").addEventListener("click", addAdjust);
+$("btnLive")?.addEventListener("click", openLiveSourceDialog);
+$("btnCancelLiveSource")?.addEventListener("click", closeLiveSourceDialog);
+$("btnConfirmLiveSource")?.addEventListener("click", () => confirmLiveSource());
+$("liveSourceOverlay")?.addEventListener("pointerdown", (e) => {
+  if (e.target === $("liveSourceOverlay")) closeLiveSourceDialog();
+});
+$("liveSourcePath")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); confirmLiveSource(); }
+  if (e.key === "Escape") closeLiveSourceDialog();
+});
+$("liveSourceList")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); confirmLiveSource(); }
+  if (e.key === "Escape") closeLiveSourceDialog();
+});
 $("btnSplit").addEventListener("click", splitAtPlayhead);
 $("btnCloseGap").addEventListener("click", closeGapAtPlayhead);
 $("btnNextGap").addEventListener("click", goToNextGap);
@@ -8142,6 +8683,10 @@ window.addEventListener("keydown", (e) => {
   }
   if (isTypingTarget(document.activeElement)) return;
   if (k === " ") { e.preventDefault(); state.playing ? pause() : play(); }
+  else if ((k === "p" || k === "P") && !e.ctrlKey && !e.metaKey && !e.altKey && state.playing) {
+    e.preventDefault();
+    scrollPlayheadToViewStart();
+  }
   // JKL shuttle — bare keys only, so Cmd/Ctrl+J/K/L stay with the browser
   else if ((k === "k" || k === "K") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault(); setPreviewRate(1); state.playing ? pause() : play(); // stop + reset to 1×
@@ -8203,8 +8748,8 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     setSelection(project.clips.map((c) => c.id));
   }
-  else if (k === "+" || k === "=") setZoom(state.pps * 1.25);
-  else if (k === "-") setZoom(state.pps / 1.25);
+  else if (k === "+" || k === "=") zoomTimeline(1);
+  else if (k === "-") zoomTimeline(-1);
   else if (e.code === "KeyZ" && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
     if (e.altKey) zoomToWorkArea();

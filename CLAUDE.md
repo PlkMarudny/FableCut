@@ -205,9 +205,15 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
   ],
   "media": [
     { "id": "m_abc", "name": "intro.mp4", "kind": "video",  // video|audio|image|svg
-      "src": "/media/intro.mp4",             // path under ./media or ./library (never a raw https:// URL)
+      "src": "/media/intro.mp4",             // path under ./media or ./library (never a raw https:// URL), or a live /get URL
       "duration": 12.4, "width": 1920, "height": 1080,
-      "folderId": null }                     // optional: id of a folders[] entry
+      "folderId": null },                    // optional: id of a folders[] entry
+    { "id": "m_live", "name": "stream", "kind": "video", "live": true,
+      "livePath": "stream", "liveList": "http://localhost:9996/list",
+      "liveOrigin": "2024-01-14T16:33:17.000Z", "duration": 42.1,
+      "src": "http://localhost:9996/get?path=stream&start=…&duration=…&format=fmp4" }
+      // ^ MediaMTX playback: /list is the recorded head; clips use normal in/out.
+      // Extra available time is a ghost tail on the video clip — click to extend.
   ],
   "clips": [
     {
@@ -379,6 +385,16 @@ glitch (RGB split + jitter) · pop (overshoot scale — stickers/captions).
   rotation → flips apply.
 - `props` keys are all optional — missing keys get the defaults above.
 - Video/audio clips must satisfy `in + duration×speed ≤ media.duration`.
+- **Live MediaMTX sources** (`live: true` + `livePath` / `liveList`): `media.duration` is
+  the recorded span from `/list` (first timespan start = `liveOrigin` = media time 0).
+  Clips are normal in/out windows — they do **not** auto-extend. Dropping a live
+  asset onto the timeline places a **10-minute subclip** ending at the recorded
+  head (`in` = wall-clock now − 10 min, or 0 if the recording is shorter). A ghost
+  handle on the video clip shows extra recorded time beyond the out-point. Click it
+  (or right-trim) to pull the out-point to the recorded head. Preview **fetches**
+  `/get` into a blob (MediaMTX muxes on the fly and does not honor HTTP Range, so a
+  raw `<video src>` cannot seek and will stall). Skip full-file waveform decode.
+  Export uses the **committed** clip window.
 - Keyframes fully override the static prop value while present; they are
   clip-local and are re-based automatically when clips are split or trimmed.
 - Transitions modulate the evaluated props (fade also fades audio); they render
@@ -444,6 +460,9 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
   Append `?force=1` to overwrite unconditionally. Writes are atomic (tmp file +
   rename), so a crashed write never corrupts the file.
 - `GET  /api/media`   — list files in ./media (name, src, size)
+- `GET  /api/media-proxy?src=<absolute URL>` — same-origin proxy for MediaMTX
+  `/list` and `/get` (fMP4). **Loopback / `FABLECUT_ALLOWED_HOSTS` only** — not an
+  open proxy. The UI uses this so `:7777` can play `:9996` without CORS.
 - `GET  /api/library?dir=sfx|elements|svg|fonts` — list library assets
 - `POST /api/upload?name=foo.mp4` — raw body saved into ./media, returns `{src}`.
   MP4/MOV/M4V uploads are auto-remuxed with `+faststart` (needs ffmpeg on PATH).
@@ -481,6 +500,12 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
   · `POST /api/export/end?id=[&discard=1]` → `{src}` under `/exports/`
 
 ## Recipes
+
+**Live MediaMTX recording**: `addMedia` with
+`{kind:"video", live:true, livePath:"stream", liveList:"http://localhost:9996/list",
+liveOrigin:"…Z", duration:<seconds from /list>}`. Drop/add a clip as usual. Do not
+grow `clip.duration` from the agent on every poll — the user extends via the ghost
+handle. After they extend, `in + duration` matches the new head.
 
 **Assemble a rough cut**: clips back-to-back on V1; each `start` = running sum
 of previous durations.
