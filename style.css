@@ -1542,6 +1542,7 @@ input[type=range] {
 
 .timeline-scroll {
   flex: 1;
+  min-height: 0;
   overflow-x: auto;
   overflow-y: auto;
   position: relative;
@@ -1560,6 +1561,9 @@ input[type=range] {
 
 .tracks-content {
   position: relative;
+  /* clip so abspos playhead `left` cannot grow the scroller's overflow */
+  overflow: clip;
+  overflow-clip-margin: 8px;
 }
 .work-dim {
   position: absolute;
@@ -1868,30 +1872,21 @@ body.track-size-s .clip .clip-kf-n {
 }
 
 /* ── Playhead ── */
-/* 13px wrapper (cap box) so we don't compositor-scale a 1px layer. Line at x=6. */
 .playhead {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -6px;
-  width: 13px;
-  z-index: 4;
-  pointer-events: none;
-}
-
-.playhead-line {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 6px;
   width: 1px;
   background: #ff4d6a;
+  z-index: 4;
+  pointer-events: none;
+  contain: layout;
 }
 
 .playhead-cap {
   position: absolute;
   top: 0;
-  left: 0;
+  left: -6px;
   width: 13px;
   height: 14px;
   background: #ff4d6a;

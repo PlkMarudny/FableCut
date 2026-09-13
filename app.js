@@ -6280,6 +6280,7 @@ function ensureFont(name) {
 
 /* ── Main loop ── */
 let lastTs = null;
+let playheadPx = -1;
 function loop(ts) {
   if (lastTs == null) lastTs = ts;
   const dt = Math.min(0.1, (ts - lastTs) / 1000);
@@ -6305,9 +6306,11 @@ function loop(ts) {
     drawFrame();
   }
   if (state.dirtyTimeline) rebuildClips();
-  // device-pixel snap — CSS-pixel round still AA-pulses at 125%/150% DPR
-  const dpr = devicePixelRatio || 1;
-  els.playhead.style.transform = `translateX(${Math.round(state.time * state.pps * dpr) / dpr}px)`;
+  const phX = Math.round(state.time * state.pps);
+  if (phX !== playheadPx) {
+    playheadPx = phX;
+    els.playhead.style.left = phX + "px";
+  }
   drawRuler();
   updateSafeOverlay();
   updateKfGraphs();
