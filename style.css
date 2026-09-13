@@ -1593,6 +1593,7 @@ input[type=range] {
 
 .timeline-scroll {
   flex: 1;
+  min-height: 0;
   overflow-x: auto;
   overflow-y: auto;
   position: relative;
@@ -1611,6 +1612,9 @@ input[type=range] {
 
 .tracks-content {
   position: relative;
+  /* clip so abspos playhead `left` cannot grow the scroller's overflow */
+  overflow: clip;
+  overflow-clip-margin: 8px;
 }
 .work-dim {
   position: absolute;
@@ -1927,6 +1931,7 @@ body.track-size-s .clip .clip-kf-n {
   background: #ff4d6a;
   z-index: 4;
   pointer-events: none;
+  contain: layout;
 }
 
 .playhead-cap {

@@ -6359,6 +6359,7 @@ function ensureFont(name) {
 /* ── Main loop ── */
 let lastTs = null;
 let exportWindow = null;
+let playheadPx = -1;
 function loop(ts) {
   if (lastTs == null) lastTs = ts;
   const dt = Math.min(0.1, (ts - lastTs) / 1000);
@@ -6385,7 +6386,11 @@ function loop(ts) {
     drawFrame();
   }
   if (state.dirtyTimeline) rebuildClips();
-  els.playhead.style.left = state.time * state.pps + "px";
+  const phX = Math.round(state.time * state.pps);
+  if (phX !== playheadPx) {
+    playheadPx = phX;
+    els.playhead.style.left = phX + "px";
+  }
   drawRuler();
   updateSafeOverlay();
   updateKfGraphs();
