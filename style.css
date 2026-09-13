@@ -751,25 +751,30 @@ body.track-size-s .clip.selected {
   background: #7b6cff44;
   border-radius: 4px;
   pointer-events: none;
+  will-change: transform, width;
 }
 .source-scrub-mark {
   position: absolute;
   top: -2px; bottom: -2px;
+  left: 0;
   width: 2px;
   margin-left: -1px;
   background: #ffd166;
   pointer-events: none;
+  will-change: transform;
 }
 .source-scrub-mark.out { background: #ff8a65; }
 .source-scrub-head {
   position: absolute;
   top: -3px; bottom: -3px;
+  left: 0;
   width: 3px;
   margin-left: -1.5px;
   background: #fff;
   border-radius: 1px;
   pointer-events: none;
   box-shadow: 0 0 0 1px #0008;
+  will-change: transform;
 }
 
 .monitor-stage {
