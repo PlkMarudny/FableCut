@@ -46,7 +46,6 @@ const TIMELINE_PAD_SEC = 15; // trailing empty seconds in the scrollable content
 const TIMELINE_FIT_FILL = 0.95; // ⇧Z / Fit — clip content fills this fraction of the viewport
 const DEFAULT_LIVE_LIST = "http://localhost:9996/list";
 const LIVE_POLL_MS = 1500;
-const LIVE_SAVE_MS = 5000;
 const LIVE_DEFAULT_TAIL_SEC = 10 * 60; // new live clips are a 10 min window ending at the recorded head
 const LIVE_BLOB_SEC = 45;              // /get is not Range-seekable over HTTP — fetch this many seconds as a blob
 
@@ -500,11 +499,10 @@ const runtime = {
   binDragFolderId: null, // folder id currently being dragged (cycle checks)
   binCtxMenu: null,     // Project-tab context menu element
   livePollTimer: null,  // interval while any live MediaMTX media is in the project
-  liveSaveTimer: null,  // debounce persist of growing media.duration
-  liveDirty: false,
   livePlayWin: new Map(), // clipId -> {in, dur} of the blob currently on the element
   livePendingWin: new Map(), // clipId -> pinned {in, dur} fetch while the blob is in flight
   liveBlobs: new Map(),   // "mediaId@in x dur" -> {url, promise, in, dur}
+  selfRevisions: new Set(), // revisions written by this tab — SSE echoes of these can be ignored
 };
 
 /* ── DOM ───────────────────────────────────────────────────────────────── */
@@ -1180,16 +1178,6 @@ async function refreshLiveMedia(m) {
   if (!m.src && m.liveOrigin) m.src = buildLiveGetUrl(m, 0, Math.min(m.duration || 5, 5));
   return changed;
 }
-function scheduleLivePersist() {
-  runtime.liveDirty = true;
-  clearTimeout(runtime.liveSaveTimer);
-  runtime.liveSaveTimer = setTimeout(() => {
-    runtime.liveSaveTimer = null;
-    if (!runtime.liveDirty) return;
-    runtime.liveDirty = false;
-    scheduleSave();
-  }, LIVE_SAVE_MS);
-}
 async function pollLiveMedia() {
   if (state.gesture || state.exporting || state.rendering) return;
   const lives = project.media.filter(isLiveMedia);
@@ -1201,7 +1189,10 @@ async function pollLiveMedia() {
   if (!changed) return;
   state.dirtyTimeline = true;
   renderBin();
-  scheduleLivePersist();
+  // Live duration/origin updates are kept in memory only. Auto-persisting them
+  // writes project.json every few seconds, which floods the tab with SSE echoes,
+  // triggers conflict toasts, and tears down clip elements during playback.
+  // The duration is still saved whenever the user extends the clip or edits.
 }
 function ensureLivePoller() {
   if (!project.media.some(isLiveMedia)) { stopLivePoller(); return; }
@@ -1423,10 +1414,6 @@ function applyProject(data) {
     exportFrame: normalizeExportFrame(data.exportFrame, data.width || 1280, data.height || 720),
     encodeProfile: data.encodeProfile || null,
   });
-  if ((data.media || []).some((raw, i) => {
-    const m = project.media[i];
-    return m && m.live && !(raw && raw.live && raw.livePath && raw.liveList);
-  })) scheduleSave();
   applyTracksFromProject(data.tracks);
   ensureTracksCoverClips();
   project.tracks = serializeTracks();
@@ -1490,16 +1477,26 @@ function scheduleSave() {
   runtime.saveTimer = setTimeout(async () => {
     runtime.saveTimer = null;
     project.revision++;
+    const nextRev = project.revision;
+    runtime.selfRevisions.add(nextRev);
+    trimSelfRevisions();
     const body = JSON.stringify(projectJSON(), null, 2);
     try {
       const res = await fetch("/api/project", { method: "PUT", headers: { "Content-Type": "application/json" }, body });
       if (res.status === 409) {
         // an external tool saved a newer revision while this change was pending
+        runtime.selfRevisions.delete(nextRev);
         await syncFromServer(true);
         toast("Project was updated externally — your last change may need redoing.");
       }
     } catch { }
   }, 400);
+}
+function trimSelfRevisions() {
+  // Keep only revisions around the current one so the set doesn't grow forever
+  // in a long session, while still covering any in-flight SSE echo.
+  const floor = Math.max(0, project.revision - 20);
+  for (const r of runtime.selfRevisions) if (r < floor) runtime.selfRevisions.delete(r);
 }
 function projectJSON() {
   const { name, width, height, fps, background, revision, folders, media, clips, markers, inPoint, outPoint, disabledTracks, encodeProfile } = project;
@@ -1559,21 +1556,29 @@ function listenSSE() {
 async function syncFromServer(force) {
   if (state.gesture || state.exporting) { runtime.pendingSync = true; return; }
   runtime.pendingSync = false;
-  if (state.binTab !== "project") fetchLibrary(state.binTab).then(renderLibrary);
-  loadLibraryFonts();
-  fetchEncodeProfiles();
   try {
     const res = await fetch("/api/project", { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
     if (!data || !Array.isArray(data.clips)) return;
     if (!force && (data.revision || 0) === (project.revision || 0)) return; // our own save
+    // Ignore SSE echoes of revisions written by this browser tab. Real external
+    // edits use revisions we did not write, so those still apply below.
+    if (!force && runtime.selfRevisions.has(data.revision || 0)) {
+      runtime.selfRevisions.delete(data.revision || 0);
+      // Keep project revision in sync so later equal-revision checks work.
+      project.revision = data.revision || project.revision;
+      return;
+    }
     if (runtime.saveTimer) { // unsaved local edit vs. external write: external wins, tell the user
       clearTimeout(runtime.saveTimer); runtime.saveTimer = null;
       toast("Project was updated externally — your last change may need redoing.");
     }
     applyProject(data);
     await probeMissingMeta();
+    if (state.binTab !== "project") fetchLibrary(state.binTab).then(renderLibrary);
+    loadLibraryFonts();
+    fetchEncodeProfiles();
   } catch { }
 }
 /** Populate a media entry's duration/dimensions (and cache preview assets) by
@@ -1597,7 +1602,11 @@ async function probeMissingMeta() {
   let changed = false;
   for (const m of project.media) {
     if (isLiveMedia(m)) {
-      try { if (await refreshLiveMedia(m)) changed = true; } catch { }
+      // Refresh the live head in memory for the bin label + ghost tail, but do
+      // NOT schedule a save here. The poller already dirties the UI; auto-saving
+      // growing durations writes project.json every poll cycle and causes SSE
+      // loops that tear down clip elements.
+      try { await refreshLiveMedia(m); } catch { }
       if (m.kind === "video" && !runtime.mediaAux.get(m.id)?.thumb) grabThumb(m).catch(() => { });
       continue;
     }
