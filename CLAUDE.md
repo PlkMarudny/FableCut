@@ -70,13 +70,13 @@ then `/plugin install fablecut@fablecut`) does the registration for you.
 
 ### Where the files are
 
-`project.json`, `media/`, `exports/`, `analysis/` and `library/` normally sit in
-the repo next to `server.js`. Set **`FABLECUT_DATA_DIR`** to move all five
-somewhere else; the code and the static app files stay in the install directory
-either way. The plugin sets this so a plugin update can replace the install
-directory without touching anyone's timeline or footage. **Don't assume
-`project.json` is beside `mcp-server.js`** — call `fablecut_status`, which
-reports the real paths.
+`project.json`, `live.json`, `media/`, `exports/`, `analysis/` and `library/`
+normally sit in the repo next to `server.js`. Set **`FABLECUT_DATA_DIR`** to
+move all six somewhere else; the code and the static app files stay in the
+install directory either way. The plugin sets this so a plugin update can
+replace the install directory without touching anyone's timeline or footage.
+**Don't assume `project.json` is beside `mcp-server.js`** — call
+`fablecut_status`, which reports the real paths.
 
 Tests (and nothing else) may set **`FABLECUT_NO_FS_WATCH=1`** to skip `fs.watch`.
 On Windows, libuv can abort the process when a file is created under a temp
@@ -214,6 +214,8 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
       "src": "http://localhost:9996/get?path=stream&start=…&duration=…&format=fmp4" }
       // ^ MediaMTX playback: /list is the recorded head; clips use normal in/out.
       // Extra available time is a ghost tail on the video clip — click to extend.
+      // Growing duration is NOT written back into this document on a poll loop;
+      // it lives on GET/PUT /api/live (live.json) so the edit does not reload.
   ],
   "clips": [
     {
@@ -386,15 +388,19 @@ glitch (RGB split + jitter) · pop (overshoot scale — stickers/captions).
 - `props` keys are all optional — missing keys get the defaults above.
 - Video/audio clips must satisfy `in + duration×speed ≤ media.duration`.
 - **Live MediaMTX sources** (`live: true` + `livePath` / `liveList`): `media.duration` is
-  the recorded span from `/list` (first timespan start = `liveOrigin` = media time 0).
-  Clips are normal in/out windows — they do **not** auto-extend. Dropping a live
-  asset onto the timeline places a **10-minute subclip** ending at the recorded
-  head (`in` = wall-clock now − 10 min, or 0 if the recording is shorter). A ghost
-  handle on the video clip shows extra recorded time beyond the out-point. Click it
-  (or right-trim) to pull the out-point to the recorded head. Preview **fetches**
-  `/get` into a blob (MediaMTX muxes on the fly and does not honor HTTP Range, so a
-  raw `<video src>` cannot seek and will stall). Skip full-file waveform decode.
-  Export uses the **committed** clip window.
+  a snapshot of the recorded span from `/list` (first timespan start = `liveOrigin` =
+  media time 0). The **growing head** is a separate overlay: `GET/PUT /api/live`
+  (`live.json`) plus SSE event `live`. Do **not** patch `media.duration` or
+  `clip.duration` on a poll loop — that writes `project.json`, bumps `revision`,
+  and tears down playback in the open editor. Clips are normal in/out windows —
+  they do **not** auto-extend. Dropping a live asset onto the timeline places a
+  **10-minute subclip** ending at the recorded head (`in` = wall-clock now − 10 min,
+  or 0 if the recording is shorter). A ghost handle on the video clip shows extra
+  recorded time beyond the out-point. Click it (or right-trim) to pull the
+  out-point to the recorded head. Preview **fetches** `/get` into a blob (MediaMTX
+  muxes on the fly and does not honor HTTP Range, so a raw `<video src>` cannot
+  seek and will stall). Skip full-file waveform decode. Export uses the
+  **committed** clip window.
 - Keyframes fully override the static prop value while present; they are
   clip-local and are re-based automatically when clips are split or trimmed.
 - Transitions modulate the evaluated props (fade also fades audio); they render
@@ -459,6 +465,11 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
   the server rejects with **409** and returns `{"error":"…","revision":<current>}`.
   Append `?force=1` to overwrite unconditionally. Writes are atomic (tmp file +
   rename), so a crashed write never corrupts the file.
+- `GET  /api/live`    — growing MediaMTX recorded heads `{ media: { <id>: { duration, liveOrigin } } }`.
+  Does **not** bump `project.revision`. Empty `{ media: {} }` if nothing has been polled yet.
+- `PUT  /api/live`    — replace the live-head overlay (same shape). Atomic tmp+rename to
+  `live.json`. Broadcasts SSE event `live` (not `change`) so the UI paints ghost tails
+  without `applyProject`.
 - `GET  /api/media`   — list files in ./media (name, src, size)
 - `GET  /api/media-proxy?src=<absolute URL>` — same-origin proxy for MediaMTX
   `/list` and `/get` (fMP4). **Loopback / `FABLECUT_ALLOWED_HOSTS` only** — not an
@@ -484,7 +495,9 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
   its music into ./media. `GET /api/analyze?src=…` returns the cached blueprint.
 - `GET  /api/events`  — SSE: named event `change` when project.json, ./media or
   ./library changes; named event `profiles` when `encoding-profiles.json` changes
-  (UI refreshes the export-profile list only — no project reload)
+  (UI refreshes the export-profile list only — no project reload); named event
+  `live` when `live.json` changes (UI updates recorded heads / ghost tails only —
+  no project reload)
 - Fast / WebCodecs export (browser compositor → server ffmpeg):
   `GET /api/export/ffmpeg` → `{available}` · `GET /api/export/profiles[?detail=1]` →
   `{default, profiles, issues}` · `POST /api/export/begin`
@@ -504,7 +517,8 @@ obvious cuts were missed, raise it if motion is being misread as cuts.
 **Live MediaMTX recording**: `addMedia` with
 `{kind:"video", live:true, livePath:"stream", liveList:"http://localhost:9996/list",
 liveOrigin:"…Z", duration:<seconds from /list>}`. Drop/add a clip as usual. Do not
-grow `clip.duration` from the agent on every poll — the user extends via the ghost
+grow `clip.duration` or `media.duration` from the agent on every poll — read the
+head from `GET /api/live` if you need it, and let the user extend via the ghost
 handle. After they extend, `in + duration` matches the new head.
 
 **Assemble a rough cut**: clips back-to-back on V1; each `start` = running sum

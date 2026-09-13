@@ -53,6 +53,7 @@ re-read after a moment instead of shelling out to ffprobe.
 - Live MediaMTX sources are `addMedia` with `live:true`, `livePath`, `liveList`
   (and `liveOrigin` / `duration` from `/list`). Clips keep normal in/out; do not
   auto-grow duration on a poll loop — the UI ghost handle is how the user extends.
+  Growing recorded heads live on `GET /api/live`, not in `project.json`.
 - Crossfades are same-track overlap plus `transitionIn: {type:"fade"}` on the
   later clip — not a separate object.
 - Vary the font per title. Reusing one typeface across a whole edit is the

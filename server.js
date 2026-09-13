@@ -9,7 +9,9 @@
      • live reload             GET /api/events     (SSE: event "change" for
                                                     project/media/library;
                                                     event "profiles" for
-                                                    encoding-profiles.json)
+                                                    encoding-profiles.json;
+                                                    event "live" for live.json
+                                                    recorded-head updates)
 
    Automation: any tool (e.g. Claude Code) can edit project.json or drop files
    into ./media — the browser UI reloads instantly. Schema: see CLAUDE.md.
@@ -36,7 +38,7 @@ const { downloadImportUrl, maybeFaststart } = require("./import-url");
 
 const {
   APP_DIR, DATA_DIR, MEDIA_DIR, EXPORTS_DIR, ANALYSIS_DIR, LIBRARY_DIR,
-  PROJECT_FILE, LIBRARY_SUBDIRS, ensureDirs,
+  PROJECT_FILE, LIVE_FILE, LIBRARY_SUBDIRS, ensureDirs,
 } = require("./paths");
 
 /* Static app files are served from the install dir; everything the user creates
@@ -102,6 +104,7 @@ function broadcast(event = "change") {
 }
 let debounce = null;
 let profilesDebounce = null;
+let liveDebounce = null;
 function onFsChange() {
   clearTimeout(debounce);
   debounce = setTimeout(() => broadcast("change"), 150);
@@ -111,10 +114,46 @@ function onProfilesChange() {
   clearTimeout(profilesDebounce);
   profilesDebounce = setTimeout(() => broadcast("profiles"), 150);
 }
+function onLiveHeadsChange() {
+  clearTimeout(liveDebounce);
+  liveDebounce = setTimeout(() => broadcast("live"), 150);
+}
+function normalizeLiveHeads(data) {
+  const media = {};
+  const src = data && typeof data === "object" && data.media && typeof data.media === "object"
+    ? data.media : {};
+  for (const [id, head] of Object.entries(src)) {
+    if (!id || typeof head !== "object" || !head) continue;
+    const duration = +head.duration;
+    if (!Number.isFinite(duration) || duration < 0) continue;
+    media[id] = {
+      duration,
+      liveOrigin: typeof head.liveOrigin === "string" ? head.liveOrigin : "",
+    };
+  }
+  return { media };
+}
+function readLiveHeads() {
+  try {
+    return normalizeLiveHeads(JSON.parse(fs.readFileSync(LIVE_FILE, "utf8").replace(/^\uFEFF/, "")));
+  } catch {
+    return { media: {} };
+  }
+}
+function writeLiveHeads(doc) {
+  const tmp = LIVE_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(doc, null, 2));
+  fs.renameSync(tmp, LIVE_FILE);
+}
 /* watch the directory, not the file — atomic tmp+rename writes would detach a
    direct file watcher on Windows */
 if (process.env.FABLECUT_NO_FS_WATCH !== "1") {
-  try { fs.watch(DATA_DIR, (ev, f) => { if (f === "project.json") onFsChange(); }); } catch {}
+  try {
+    fs.watch(DATA_DIR, (ev, f) => {
+      if (f === "project.json") onFsChange();
+      else if (f === "live.json") onLiveHeadsChange();
+    });
+  } catch {}
   try {
     fs.watch(ROOT, (ev, f) => {
       if (f === path.basename(PROFILES_FILE)) onProfilesChange();
@@ -476,6 +515,24 @@ const server = http.createServer(async (req, res) => {
       fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
       fs.renameSync(tmp, PROJECT_FILE);
       sendJSON(res, 200, { ok: true, revision: data.revision });
+    } catch (e) { sendJSON(res, 400, { error: String(e) }); }
+    return;
+  }
+
+  /* API: live recorded heads — growing duration lives here, not in project.json.
+     Writes do not bump project.revision and the SSE event is "live", so the
+     editor can paint ghost tails without tearing down playback. */
+  if (p === "/api/live" && req.method === "GET") {
+    sendJSON(res, 200, readLiveHeads());
+    return;
+  }
+  if (p === "/api/live" && req.method === "PUT") {
+    try {
+      const body = await readBody(req);
+      const doc = normalizeLiveHeads(JSON.parse(body.toString("utf8")));
+      writeLiveHeads(doc);
+      onLiveHeadsChange();
+      sendJSON(res, 200, { ok: true });
     } catch (e) { sendJSON(res, 400, { error: String(e) }); }
     return;
   }

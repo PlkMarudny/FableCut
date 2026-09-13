@@ -115,7 +115,9 @@ same time.
 - **Live recordings (MediaMTX)** — **+ Live** in the Project bin registers a
   playback path (`/list` + `/get` fMP4). Timeline clips keep normal in/out; a
   ghosted tail shows how much more is already recorded. Click it to extend the
-  clip to the recorded head.
+  clip to the recorded head. The growing head is stored on `/api/live`
+  (`live.json`), not in `project.json`, so recording growth does not reload the
+  edit.
 - **Multi-channel video audio** — a video with more than 2 audio channels gets
   a linked audio clip per channel, not just L/R (5.1, 7.1…). Extra audio
   tracks (A5, A6, …, capped at 16) are created automatically as needed;
@@ -319,7 +321,8 @@ Three equivalent control surfaces:
    they need (`fablecut_docs {section:"props"}`).
 2. **The file** — read `project.json`, modify, bump `revision`, write. The UI
    live-reloads.
-3. **REST** — `GET/PUT /api/project`, `POST /api/upload`, `POST /api/import-url`,
+3. **REST** — `GET/PUT /api/project`, `GET/PUT /api/live` (growing MediaMTX
+   heads, no revision bump), `POST /api/upload`, `POST /api/import-url`,
    `GET /api/library`, `GET /api/export/profiles`, SSE at `/api/events`. See
    CLAUDE.md for the full list.
 
@@ -356,6 +359,7 @@ CLAUDE.md        the agent manual (schema + recipes) — also served by fablecut
 encoding-profiles.json
                  Fast-export ffmpeg presets (hot-reloaded)
 project.json     your timeline (created on first run; gitignored)
+live.json        growing live-media heads (created on first live poll; gitignored)
 media/           project footage (gitignored)
 analysis/        cached edit blueprints from /api/analyze (gitignored)
 library/         default assets: elements/ sfx/ svg/ fonts/

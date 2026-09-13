@@ -29,6 +29,7 @@ const EXPORTS_DIR = path.join(DATA_DIR, "exports");
 const ANALYSIS_DIR = path.join(DATA_DIR, "analysis");
 const LIBRARY_DIR = path.join(DATA_DIR, "library");
 const PROJECT_FILE = path.join(DATA_DIR, "project.json");
+const LIVE_FILE = path.join(DATA_DIR, "live.json");
 const LIBRARY_SUBDIRS = ["sfx", "elements", "svg", "fonts"];
 
 /* The asset library ships with the repo but users also drop their own files in
@@ -63,6 +64,6 @@ function ensureDirs() {
 
 module.exports = {
   APP_DIR, DATA_DIR, SPLIT,
-  MEDIA_DIR, EXPORTS_DIR, ANALYSIS_DIR, LIBRARY_DIR, PROJECT_FILE,
+  MEDIA_DIR, EXPORTS_DIR, ANALYSIS_DIR, LIBRARY_DIR, PROJECT_FILE, LIVE_FILE,
   LIBRARY_SUBDIRS, ensureDirs,
 };

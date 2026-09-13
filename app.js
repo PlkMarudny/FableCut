@@ -46,6 +46,7 @@ const TIMELINE_PAD_SEC = 15; // trailing empty seconds in the scrollable content
 const TIMELINE_FIT_FILL = 0.95; // ⇧Z / Fit — clip content fills this fraction of the viewport
 const DEFAULT_LIVE_LIST = "http://localhost:9996/list";
 const LIVE_POLL_MS = 1500;
+const LIVE_HEAD_SAVE_MS = 2000; // debounce PUT /api/live — not project.json
 const LIVE_DEFAULT_TAIL_SEC = 10 * 60; // new live clips are a 10 min window ending at the recorded head
 const LIVE_BLOB_SEC = 45;              // /get is not Range-seekable over HTTP — fetch this many seconds as a blob
 
@@ -499,6 +500,8 @@ const runtime = {
   binDragFolderId: null, // folder id currently being dragged (cycle checks)
   binCtxMenu: null,     // Project-tab context menu element
   livePollTimer: null,  // interval while any live MediaMTX media is in the project
+  liveHeadTimer: null,  // debounce persist of growing heads to /api/live
+  liveAvail: new Map(), // mediaId -> {duration, liveOrigin} overlay — not project.json
   livePlayWin: new Map(), // clipId -> {in, dur} of the blob currently on the element
   livePendingWin: new Map(), // clipId -> pinned {in, dur} fetch while the blob is in flight
   liveBlobs: new Map(),   // "mediaId@in x dur" -> {url, promise, in, dur}
@@ -856,6 +859,7 @@ async function connectServer() {
     state.connected = true;
     els.projectName.textContent = project.name + "  ·  🟢 connected";
     listenSSE();
+    syncLiveHeads();
     fetch("/api/export/ffmpeg").then((r) => r.json())
       .then((j) => { state.ffmpeg = !!j.available; }).catch(() => { });
     fetchEncodeProfiles();
@@ -1014,9 +1018,57 @@ function parseLiveSourceInput(pathOrUrl, listUrl) {
     throw e;
   }
 }
+function liveMediaDuration(m) {
+  const head = m && runtime.liveAvail.get(m.id);
+  const d = finiteSec(head && head.duration);
+  if (d != null) return d;
+  return finiteSec(m && m.duration) || 0;
+}
+function liveMediaOrigin(m) {
+  const head = m && runtime.liveAvail.get(m.id);
+  return (head && head.liveOrigin) || (m && m.liveOrigin) || "";
+}
+function commitLiveHeadToMedia(m) {
+  if (!m) return;
+  const d = liveMediaDuration(m);
+  const o = liveMediaOrigin(m);
+  if (d > 0) m.duration = d;
+  if (o) m.liveOrigin = o;
+}
+/* Growing recorded head stays on runtime.liveAvail (and /api/live). Mutating
+   media.duration here would leak into the next project save and reload the
+   editor. writeMedia is for explicit user actions (add source, extend clip). */
+function setLiveAvail(m, head, opts = {}) {
+  if (!m || !m.id || !head) return false;
+  const writeMedia = !!opts.writeMedia;
+  const authoritative = !!opts.authoritative;
+  let origin = typeof head.liveOrigin === "string" ? head.liveOrigin : "";
+  if (m.liveOrigin && origin && origin !== m.liveOrigin) origin = m.liveOrigin;
+  origin = m.liveOrigin || origin;
+  const dur = finiteSec(head.duration);
+  if (!(dur >= 0)) return false;
+  const prev = runtime.liveAvail.get(m.id);
+  if (!authoritative && !writeMedia && prev && dur + 0.05 < (prev.duration || 0))
+    return false;
+  if (prev && Math.abs((prev.duration || 0) - dur) < 0.05 && prev.liveOrigin === origin)
+    return false;
+  runtime.liveAvail.set(m.id, { duration: dur, liveOrigin: origin });
+  if (writeMedia) {
+    m.duration = dur;
+    if (origin) m.liveOrigin = origin;
+  } else if (!m.liveOrigin && origin) {
+    m.liveOrigin = origin;
+  }
+  return true;
+}
+function pruneLiveAvail() {
+  const ids = new Set(project.media.filter(isLiveMedia).map((m) => m.id));
+  for (const id of [...runtime.liveAvail.keys()]) if (!ids.has(id)) runtime.liveAvail.delete(id);
+}
 function liveStartRFC3339(m, inn) {
-  const t0 = Date.parse(m.liveOrigin);
-  if (!Number.isFinite(t0)) return m.liveOrigin;
+  const origin = liveMediaOrigin(m);
+  const t0 = Date.parse(origin);
+  if (!Number.isFinite(t0)) return origin || m.liveOrigin;
   return new Date(t0 + Math.max(0, inn || 0) * 1000).toISOString();
 }
 function buildLiveGetUrl(m, inn, dur) {
@@ -1024,7 +1076,7 @@ function buildLiveGetUrl(m, inn, dur) {
   u.pathname = "/get";
   u.search = "";
   u.searchParams.set("path", m.livePath);
-  if (m.liveOrigin) u.searchParams.set("start", liveStartRFC3339(m, inn || 0));
+  if (liveMediaOrigin(m)) u.searchParams.set("start", liveStartRFC3339(m, inn || 0));
   u.searchParams.set("duration", String(Math.max(MIN_DUR, finiteSec(dur) || MIN_DUR)));
   u.searchParams.set("format", "fmp4");
   return u.toString();
@@ -1086,10 +1138,9 @@ function ensureLiveBlob(m, inn, dur) {
   let rec = runtime.liveBlobs.get(key);
   if (rec) return rec;
   rec = { key, id: m.id, in: inn, dur, url: null, promise: null };
-  rec.promise = fetch(buildLiveGetUrl(m, inn, dur), { cache: "no-store" })
-    .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
-    .then((blob) => {
-      rec.url = URL.createObjectURL(blob);
+  rec.promise = fetchLiveGet(m, inn, dur)
+    .then((ab) => {
+      rec.url = URL.createObjectURL(new Blob([ab], { type: "video/mp4" }));
       return rec;
     })
     .catch((e) => {
@@ -1124,7 +1175,36 @@ function playbackSrc(m, c, opts) {
   if (!m) return "";
   if (!isLiveMedia(m)) return m.src;
   if (!c) return buildLiveGetUrl(m, 0, Math.max(MIN_DUR, Math.min(finiteSec(m.duration) || 5, 5)));
-  return buildLiveGetUrl(m, c.in || 0, c.duration);
+  const win = liveClipSourceWindow(c, m);
+  if (!win) return buildLiveGetUrl(m, c.in || 0, c.duration);
+  return buildLiveGetUrl(m, win.in, win.dur);
+}
+/* Source seconds a live clip consumes from /get (already a sub-window starting
+   at clip.in). Clamp to the recorded head so MediaMTX does not 404. */
+function liveClipSourceWindow(c, m) {
+  const inn = Math.max(0, c.in || 0);
+  let dur = Math.max(MIN_DUR, c.duration * clipSpeed(c));
+  const head = liveMediaDuration(m);
+  if (head > 0) {
+    if (inn >= head - 1e-3) return null;
+    dur = Math.min(dur, Math.max(MIN_DUR, head - inn));
+  }
+  return { in: inn, dur };
+}
+async function fetchLiveGet(m, inn, dur) {
+  const direct = buildLiveGetUrl(m, inn, dur);
+  const attempts = [direct, proxiedSrc(direct)].filter((u, i, arr) => arr.indexOf(u) === i);
+  const errors = [];
+  for (const url of attempts) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) { errors.push("HTTP " + res.status); continue; }
+      return await res.arrayBuffer();
+    } catch (e) {
+      errors.push(e.message || String(e));
+    }
+  }
+  throw new Error(errors.join("; ") || "live /get failed");
 }
 function liveAvailabilityFromList(spans) {
   if (!Array.isArray(spans) || !spans.length) return null;
@@ -1168,15 +1248,97 @@ async function fetchLiveListJson(m) {
   }
   throw new Error("Could not read " + direct + " — " + errors.join("; "));
 }
-async function refreshLiveMedia(m) {
-  if (!isLiveMedia(m)) return false;
+async function refreshLiveMedia(m, opts) {
+  if (!m || !m.livePath || !m.liveList) return false;
   const avail = liveAvailabilityFromList(await fetchLiveListJson(m));
   if (!avail) return false;
-  let changed = false;
-  if (m.liveOrigin !== avail.liveOrigin) { m.liveOrigin = avail.liveOrigin; changed = true; }
-  if (m.duration !== avail.duration) { m.duration = avail.duration; changed = true; }
-  if (!m.src && m.liveOrigin) m.src = buildLiveGetUrl(m, 0, Math.min(m.duration || 5, 5));
+  const changed = setLiveAvail(m, avail, opts || { authoritative: true });
+  if (!m.src && liveMediaOrigin(m))
+    m.src = buildLiveGetUrl(m, 0, Math.min(liveMediaDuration(m) || 5, 5));
   return changed;
+}
+function liveHeadsJSON() {
+  const media = {};
+  for (const m of project.media) {
+    if (!isLiveMedia(m)) continue;
+    const duration = liveMediaDuration(m);
+    const liveOrigin = liveMediaOrigin(m);
+    if (duration > 0) media[m.id] = { duration, liveOrigin };
+  }
+  return { media };
+}
+function applyLiveHeadsDoc(doc) {
+  const media = doc && doc.media;
+  if (!media || typeof media !== "object") return false;
+  let changed = false;
+  for (const [id, head] of Object.entries(media)) {
+    const m = getMedia(id);
+    if (!isLiveMedia(m)) continue;
+    if (setLiveAvail(m, head)) changed = true;
+  }
+  if (changed) paintLiveHeads();
+  return changed;
+}
+async function syncLiveHeads() {
+  if (!state.connected) return;
+  try {
+    const res = await fetch("/api/live", { cache: "no-store" });
+    if (!res.ok) return;
+    applyLiveHeadsDoc(await res.json());
+  } catch { }
+}
+function scheduleLiveHeadsPersist() {
+  if (!state.connected) return;
+  clearTimeout(runtime.liveHeadTimer);
+  runtime.liveHeadTimer = setTimeout(() => {
+    runtime.liveHeadTimer = null;
+    persistLiveHeads();
+  }, LIVE_HEAD_SAVE_MS);
+}
+async function persistLiveHeads() {
+  if (!state.connected || !project.media.some(isLiveMedia)) return;
+  try {
+    await fetch("/api/live", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(liveHeadsJSON()),
+    });
+  } catch { }
+}
+function paintLiveHeads() {
+  if (els.tracksContent) els.tracksContent.style.width = contentWidth() + "px";
+  if (els.ruler && els.timelineScroll)
+    els.ruler.style.width = els.timelineScroll.clientWidth + "px";
+  for (const c of project.clips) {
+    const row = els.tracks && els.tracks.querySelector(`[data-track="${c.track}"]`);
+    const div = row && row.querySelector(`.clip[data-id="${c.id}"]`);
+    if (!div) continue;
+    let ghost = div.querySelector(".live-ghost");
+    if (clipShowsLiveGhost(c)) {
+      const tailTl = liveClipTail(c) / clipSpeed(c);
+      const gw = Math.max(36, tailTl * state.pps) + "px";
+      if (!ghost) {
+        ghost = document.createElement("button");
+        ghost.type = "button";
+        ghost.className = "live-ghost";
+        ghost.dataset.liveExtend = c.id;
+        ghost.innerHTML = `<span class="live-ghost-label"></span>`;
+        div.appendChild(ghost);
+      }
+      ghost.style.width = gw;
+      ghost.title = fmtHMS(tailTl) + " available — click to extend to head";
+      const lab = ghost.querySelector(".live-ghost-label");
+      if (lab) lab.textContent = fmtHMS(tailTl);
+    } else if (ghost) {
+      ghost.remove();
+    }
+  }
+  if (!els.binList) return;
+  for (const m of project.media) {
+    if (!isLiveMedia(m)) continue;
+    const sub = els.binList.querySelector(`[data-media-id="${m.id}"] .bin-sub`);
+    if (sub) sub.textContent = "live · " + m.kind + " · " + fmtHMS(liveMediaDuration(m));
+  }
 }
 async function pollLiveMedia() {
   if (state.gesture || state.exporting || state.rendering) return;
@@ -1184,15 +1346,13 @@ async function pollLiveMedia() {
   if (!lives.length) { stopLivePoller(); return; }
   let changed = false;
   for (const m of lives) {
-    try { if (await refreshLiveMedia(m)) changed = true; } catch { }
+    try { if (await refreshLiveMedia(m, { authoritative: true })) changed = true; } catch { }
   }
   if (!changed) return;
-  state.dirtyTimeline = true;
-  renderBin();
-  // Live duration/origin updates are kept in memory only. Auto-persisting them
-  // writes project.json every few seconds, which floods the tab with SSE echoes,
-  // triggers conflict toasts, and tears down clip elements during playback.
-  // The duration is still saved whenever the user extends the clip or edits.
+  // Extra path: paint ghost tails / bin labels in place. Do not dirty the
+  // timeline or write project.json — that tears down clip elements.
+  paintLiveHeads();
+  scheduleLiveHeadsPersist();
 }
 function ensureLivePoller() {
   if (!project.media.some(isLiveMedia)) { stopLivePoller(); return; }
@@ -1206,9 +1366,9 @@ function stopLivePoller() {
 /* New live clips are a subclip ending at the recorded head: in-point = wall
    clock now − 10 min (or 0 if the recording is shorter). */
 function liveClipWindow(m) {
-  const dur = finiteSec(m.duration) || 0;
+  const dur = liveMediaDuration(m) || 0;
   if (!(dur > 0)) return { in: 0, duration: 5 };
-  const origin = Date.parse(m.liveOrigin);
+  const origin = Date.parse(liveMediaOrigin(m));
   if (!Number.isFinite(origin)) return { in: 0, duration: dur };
   const wantIn = (Date.now() - LIVE_DEFAULT_TAIL_SEC * 1000 - origin) / 1000;
   const inn = clamp(wantIn, 0, Math.max(0, dur - MIN_DUR));
@@ -1216,9 +1376,10 @@ function liveClipWindow(m) {
 }
 function liveClipTail(c) {
   const m = getMedia(c.mediaId);
-  if (!isLiveMedia(m) || !(m.duration > 0)) return 0;
+  const dur = liveMediaDuration(m);
+  if (!isLiveMedia(m) || !(dur > 0)) return 0;
   const used = (c.in || 0) + c.duration * clipSpeed(c);
-  return Math.max(0, m.duration - used);
+  return Math.max(0, dur - used);
 }
 function clipShowsLiveGhost(c) {
   return c.kind === "video" && liveClipTail(c) > 1 / Math.max(1, project.fps);
@@ -1228,16 +1389,19 @@ function refreshLiveClipEls(c) {
 }
 function extendLiveClipToHead(c) {
   const m = getMedia(c.mediaId);
-  if (!isLiveMedia(m) || !(m.duration > 0)) return;
-  const maxDur = Math.max(MIN_DUR, (m.duration - (c.in || 0)) / clipSpeed(c));
+  const head = liveMediaDuration(m);
+  if (!isLiveMedia(m) || !(head > 0)) return;
+  const maxDur = Math.max(MIN_DUR, (head - (c.in || 0)) / clipSpeed(c));
   if (c.duration >= maxDur - 1e-4) return;
   pushUndo();
+  commitLiveHeadToMedia(m);
   c.duration = maxDur;
   syncLinkedTiming(c);
   m.src = buildLiveGetUrl(m, c.in || 0, c.duration);
   refreshLiveClipEls(c);
   state.dirtyTimeline = true;
   scheduleSave();
+  persistLiveHeads();
   renderInspector();
 }
 function liveTimelineHead(c) {
@@ -1460,6 +1624,7 @@ function applyProject(data) {
   updateExportFrameOverlay();
   els.btnExportFrame?.classList.toggle("on", state.exportFrameView && !!getExportFrame());
   pruneSelection(); // keep the selection across external reloads where possible
+  pruneLiveAvail();
   buildTrackDOM();
   state.dirtyTimeline = true;
   renderBin(); renderInspector();
@@ -1539,7 +1704,9 @@ function projectJSON() {
 function listenSSE() {
   const es = new EventSource("/api/events");
   // Named events: "change" = project/media/library; "profiles" = encoding-profiles.json only
+  // "live" = recorded-head overlay (live.json) — never applyProject
   es.addEventListener("change", () => syncFromServer());
+  es.addEventListener("live", () => syncLiveHeads());
   es.addEventListener("profiles", () => {
     fetchEncodeProfiles().then(() => {
       if (els.exportSetup && !els.exportSetup.classList.contains("hidden"))
@@ -1570,6 +1737,11 @@ async function syncFromServer(force) {
       project.revision = data.revision || project.revision;
       return;
     }
+    if (!force && isLiveHeadOnlyUpdate(data)) {
+      absorbRemoteLiveHeads(data);
+      project.revision = data.revision || project.revision;
+      return;
+    }
     if (runtime.saveTimer) { // unsaved local edit vs. external write: external wins, tell the user
       clearTimeout(runtime.saveTimer); runtime.saveTimer = null;
       toast("Project was updated externally — your last change may need redoing.");
@@ -1580,6 +1752,44 @@ async function syncFromServer(force) {
     loadLibraryFonts();
     fetchEncodeProfiles();
   } catch { }
+}
+/* True when the incoming document matches the in-memory edit except for live
+   media duration / origin / src — those belong on /api/live, not applyProject. */
+function isLiveHeadOnlyUpdate(remote) {
+  if (!remote || !Array.isArray(remote.clips) || !Array.isArray(remote.media)) return false;
+  const local = projectJSON();
+  if (JSON.stringify(local.clips) !== JSON.stringify(remote.clips)) return false;
+  if ((local.name || "") !== (remote.name || "")) return false;
+  if (local.width !== remote.width || local.height !== remote.height || local.fps !== remote.fps) return false;
+  if ((local.background || "") !== (remote.background || "")) return false;
+  if (JSON.stringify(local.markers || []) !== JSON.stringify(remote.markers || [])) return false;
+  if ((local.inPoint ?? null) !== (remote.inPoint ?? null) || (local.outPoint ?? null) !== (remote.outPoint ?? null)) return false;
+  if (JSON.stringify(local.disabledTracks || []) !== JSON.stringify(remote.disabledTracks || [])) return false;
+  if ((local.encodeProfile || null) !== (remote.encodeProfile || null)) return false;
+  if (JSON.stringify(local.exportFrame || null) !== JSON.stringify(remote.exportFrame || null)) return false;
+  if (JSON.stringify(local.folders || []) !== JSON.stringify(remote.folders || [])) return false;
+  if (JSON.stringify(local.tracks || []) !== JSON.stringify(remote.tracks || [])) return false;
+  const lm = local.media || [], rm = remote.media || [];
+  if (lm.length !== rm.length) return false;
+  for (let i = 0; i < lm.length; i++) {
+    const a = lm[i], b = rm[i];
+    if (!a || !b || a.id !== b.id || a.kind !== b.kind || a.name !== b.name) return false;
+    if (!!a.live !== !!b.live) return false;
+    if (a.live) {
+      if (a.livePath !== b.livePath || a.liveList !== b.liveList) return false;
+      if ((a.folderId || null) !== (b.folderId || null)) return false;
+    } else if (JSON.stringify(a) !== JSON.stringify(b)) return false;
+  }
+  return true;
+}
+function absorbRemoteLiveHeads(remote) {
+  for (const m of remote.media || []) {
+    if (!m || !m.live) continue;
+    const local = getMedia(m.id);
+    if (!isLiveMedia(local)) continue;
+    setLiveAvail(local, m);
+  }
+  paintLiveHeads();
 }
 /** Populate a media entry's duration/dimensions (and cache preview assets) by
  * dispatching on kind: svg loads its markup, image loads for width/height,
@@ -1600,13 +1810,12 @@ async function loadMediaMetadata(m) {
 /* Fill in duration/size for media entries added externally without metadata */
 async function probeMissingMeta() {
   let changed = false;
+  let liveChanged = false;
   for (const m of project.media) {
     if (isLiveMedia(m)) {
-      // Refresh the live head in memory for the bin label + ghost tail, but do
-      // NOT schedule a save here. The poller already dirties the UI; auto-saving
-      // growing durations writes project.json every poll cycle and causes SSE
-      // loops that tear down clip elements.
-      try { await refreshLiveMedia(m); } catch { }
+      // Overlay-only refresh. Never scheduleSave — growing heads belong on
+      // /api/live, not in project.json.
+      try { if (await refreshLiveMedia(m, { authoritative: true })) liveChanged = true; } catch { }
       if (m.kind === "video" && !runtime.mediaAux.get(m.id)?.thumb) grabThumb(m).catch(() => { });
       continue;
     }
@@ -1626,6 +1835,7 @@ async function probeMissingMeta() {
     ensureWave(m);
   }
   if (changed) { renderBin(); scheduleSave(); }
+  if (liveChanged) paintLiveHeads();
   state.dirtyTimeline = true;
   ensureLivePoller();
 }
@@ -1937,7 +2147,7 @@ function renderBin() {
       <div class="bin-thumb"></div>
       <div class="bin-meta">
         <div class="bin-name"></div>
-        <div class="bin-sub">${m.live ? "live · " : ""}${m.kind}${m.duration ? " · " + (m.live ? fmtHMS(m.duration) : fmt(m.duration)) : ""}</div>
+        <div class="bin-sub">${m.live ? "live · " : ""}${m.kind}${m.live ? (liveMediaDuration(m) ? " · " + fmtHMS(liveMediaDuration(m)) : "") : (m.duration ? " · " + fmt(m.duration) : "")}</div>
       </div>
       <span class="bin-del" title="Remove (and its clips)">✕</span>`;
     const thumbEl = item.querySelector(".bin-thumb");
@@ -2092,7 +2302,7 @@ async function confirmLiveSource() {
     src: "", folderId: runtime.importFolderId || null,
   };
   try {
-    await refreshLiveMedia(m);
+    await refreshLiveMedia(m, { writeMedia: true, authoritative: true });
   } catch (e) {
     showErr(e.message || String(e));
     return;
@@ -2106,6 +2316,7 @@ async function confirmLiveSource() {
   project.media.push(m);
   closeLiveSourceDialog();
   renderBin(); scheduleSave();
+  persistLiveHeads();
   ensureLivePoller();
   grabThumb(m).catch(() => {});
   toast("Live source added — drag it onto the timeline");
@@ -7685,20 +7896,29 @@ function encodeWAV(buf) {
 /* Mix all audio-bearing clips offline, honoring volume keyframes + fades.
    t0/t1 are timeline seconds (export window); mix time 0 is t0. */
 async function renderAudioMix(t0, t1) {
+  const liveDecodes = new Map(); // mediaId@in x dur -> Promise<AudioBuffer>
+  const decodeLive = (c, m) => {
+    const win = liveClipSourceWindow(c, m);
+    if (!win) return Promise.reject(new Error("live window empty"));
+    const key = m.id + "@" + win.in.toFixed(3) + "x" + win.dur.toFixed(3);
+    let p = liveDecodes.get(key);
+    if (!p) {
+      p = fetchLiveGet(m, win.in, win.dur).then((ab) => getDecodeCtx().decodeAudioData(ab));
+      liveDecodes.set(key, p);
+    }
+    // /get already starts at clip.in — buffer t=0 is the in-point, not media t=0.
+    return p.then((buf) => ({ c, buf, offset: 0 }));
+  };
   const jobs = [];
   for (const c of project.clips) {
     if (c.kind !== "audio" && c.kind !== "video") continue;
     if (!isTrackEnabled(c.track)) continue;
     const m = getMedia(c.mediaId); if (!m) continue;
     if (isLiveMedia(m)) {
-      jobs.push(
-        fetch(playbackSrc(m, c, { full: true })).then((r) => { if (!r.ok) throw 0; return r.arrayBuffer(); })
-          .then((ab) => getDecodeCtx().decodeAudioData(ab))
-          .then((buf) => ({ c, buf })).catch(() => null)
-      );
+      jobs.push(decodeLive(c, m).catch(() => null));
       continue;
     }
-    jobs.push(getAudioBuffer(m).then((buf) => ({ c, buf })).catch(() => null));
+    jobs.push(getAudioBuffer(m).then((buf) => ({ c, buf, offset: Math.max(0, c.in || 0) })).catch(() => null));
   }
   const sources = (await Promise.all(jobs)).filter(Boolean);
   if (!sources.length) return null;
@@ -7707,7 +7927,7 @@ async function renderAudioMix(t0, t1) {
   const sr = 48000;
   const off = new OfflineAudioContext(2, Math.ceil(dur * sr) + 1, sr);
   let scheduled = false;
-  for (const { c, buf } of sources) {
+  for (const { c, buf, offset } of sources) {
     const a = Math.max(c.start, t0), b = Math.min(c.start + c.duration, t1);
     if (b - a <= 1e-6) continue;
     const mixWhen = Math.max(0, a - t0);
@@ -7736,17 +7956,22 @@ async function renderAudioMix(t0, t1) {
       connectChannelIsolated(off, src, g, ch, Math.max(buf.numberOfChannels, ch + 1, 2));
     else src.connect(g);
     panner.connect(off.destination);
+    const offSec = Math.min(Math.max(0, offset || 0), Math.max(0, buf.duration - MIN_DUR));
+    const avail = buf.duration - offSec;
+    if (avail < MIN_DUR) continue;
+    // offset is the buffer time of clip.in (0 for live /get windows; c.in for files).
+    const bufT = (local) => Math.max(0, offSec + local);
     if (hasSpeedRamp(c)) {
       const rc = new Float32Array(n);
       for (let i = 0; i < n; i++)
         rc[i] = clamp(kfChannel(c, "speed", local0 + (i / (n - 1)) * mixDur, clipSpeed(c)), 0.1, 8);
       src.playbackRate.setValueCurveAtTime(rc, mixWhen, Math.max(0.01, mixDur));
-      src.start(mixWhen, Math.max(0, mediaTimeAt(c, a)));
+      src.start(mixWhen, bufT(Math.max(0, mediaTimeAt(c, a) - (c.in || 0))));
       src.stop(mixWhen + mixDur);
     } else {
       const sp = clipSpeed(c);
       src.playbackRate.value = sp;
-      src.start(mixWhen, Math.max(0, c.in + local0 * sp), mixDur * sp);
+      src.start(mixWhen, bufT(local0 * sp), Math.min(mixDur * sp, Math.max(0, avail - local0 * sp)));
     }
     scheduled = true;
   }

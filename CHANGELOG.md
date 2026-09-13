@@ -30,10 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and BT.709 tags are written into both the bitstream and the container.
   Abandoned sessions are reclaimed by an idle sweeper, and SIGINT / SIGTERM
   clean up in-flight ffmpeg processes and temp dirs.
-- **Live MediaMTX recordings** — Project bin **+ Live** registers a playback
-  path (`livePath` / `liveList`). Clips use normal in/out; a ghost tail shows
-  extra recorded time from `/list` and click-extends via `/get` fMP4. Localhost
-  `/api/media-proxy` avoids CORS. (`media.live`, `livePath`, `liveList`, `liveOrigin`)
+- **Live recorded heads** — `GET/PUT /api/live` stores growing MediaMTX
+  duration in `live.json` and broadcasts SSE event `live`, so recording growth
+  does not write `project.json` or reload the editor.
 - A real test suite (`npm test`, zero dependencies, `node:test`): MCP protocol
   negotiation and framing, MCP tool semantics including the conflict rules, the
   REST API with its Host/Origin and path-traversal guards, and the shipped SVG
@@ -74,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crossOrigin=anonymous` for the encode). A clip whose server omits
   `Access-Control-Allow-Origin` still cannot be JPEG-encoded — import it into
   `./media` instead.
+- **Live clip audio is included in Fast / WebCodecs export.** The offline mix
+  fetched a MediaMTX `/get` window starting at `clip.in`, then seeked the
+  decoded buffer to `clip.in` as if it were the full recording — so a 30 s
+  stem at in-point 24 h played from past EOF and dropped out. Windowed live
+  buffers now start at offset 0; `/get` is clamped to the recorded head.
+- **Live recorded-head updates no longer reload the project.** Growing
+  `/list` duration lives on `GET/PUT /api/live` (`live.json`) and an SSE `live`
+  event. The editor paints ghost tails in place instead of `applyProject`, so
+  playout and timeline edits are not torn down every poll.
 - MCP `initialize` no longer echoes an unsupported `protocolVersion`. Missing or unknown versions now negotiate to `2025-11-25` instead of claiming a revision the server does not speak (#58).
 - `CLAUDE.md` pointed agents at `fablecut_docs {section:"props"}`, which matches no `## ` heading and returns nothing useful; it now names a real section.
 - Audio graph teardown on project reload — clip chains

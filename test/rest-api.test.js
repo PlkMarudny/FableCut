@@ -69,6 +69,34 @@ test("PUT /api/project rejects malformed JSON without corrupting the file", asyn
   assert.deepEqual(readProject(dir), seedProject());
 });
 
+test("GET /api/live is empty until PUT, and writes do not bump project.revision", async (t) => {
+  const { dir, base } = await boot(t);
+  const empty = await fetch(base + "/api/live");
+  assert.equal(empty.status, 200);
+  assert.deepEqual(await empty.json(), { media: {} });
+
+  const revBefore = readProject(dir).revision;
+  const put = await fetch(base + "/api/live", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      media: { m_live: { duration: 12.5, liveOrigin: "2024-01-14T16:33:17.000Z" } },
+    }),
+  });
+  assert.equal(put.status, 200);
+  assert.deepEqual(await put.json(), { ok: true });
+  assert.equal(readProject(dir).revision, revBefore, "live heads must not touch project.json");
+
+  const got = await (await fetch(base + "/api/live")).json();
+  assert.equal(got.media.m_live.duration, 12.5);
+  assert.equal(got.media.m_live.liveOrigin, "2024-01-14T16:33:17.000Z");
+});
+
+test("PUT /api/live rejects malformed JSON", async (t) => {
+  const { base } = await boot(t);
+  const res = await fetch(base + "/api/live", { method: "PUT", body: "{not json" });
+  assert.equal(res.status, 400);
+});
+
 test("GET /api/library lists assets and validates the dir argument", async (t) => {
   const { base } = await boot(t);
   const res = await fetch(base + "/api/library?dir=svg");
