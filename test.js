@@ -1,7 +1,7 @@
-const fs = require('fs');
-try {
-  new Function(fs.readFileSync('app.js', 'utf8'));
-  console.log('Syntax OK');
-} catch (e) {
-  console.error(e);
+const { spawnSync } = require('child_process');
+
+const result = spawnSync(process.execPath, ['--check', 'app.js'], { stdio: 'inherit' });
+if (result.status !== 0) {
+  process.exit(result.status || 1);
 }
+console.log('Syntax OK');

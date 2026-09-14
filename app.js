@@ -2242,10 +2242,23 @@ function insertSourceAtPlayhead() {
   }
   if (state.playing) pause();
   if (state.source.playing) pauseSource();
-  const at = Math.max(0, state.time);
+  let at = Math.max(0, state.time);
+
+  const onTrack = (c) => isTrackEnabled(c.track);
+  const eps = 1e-6;
+
+  // Snap `at` to nearby cuts if it falls in the unsplittable MIN_DUR dead zone.
+  for (const c of project.clips) {
+    if (!onTrack(c)) continue;
+    if (at > c.start - eps && at <= c.start + MIN_DUR) {
+      at = c.start; break;
+    }
+    if (at >= clipEnd(c) - MIN_DUR && at < clipEnd(c) + eps) {
+      at = clipEnd(c); break;
+    }
+  }
 
   pushUndo();
-  const onTrack = (c) => isTrackEnabled(c.track);
   // Open a seam at the playhead so the ripple can push the right halves.
   const toSplit = withLinked(project.clips.filter((c) =>
     onTrack(c) && at > c.start + MIN_DUR && at < clipEnd(c) - MIN_DUR
@@ -2258,7 +2271,6 @@ function insertSourceAtPlayhead() {
     }
     relinkSplitRights(toSplit, newLink);
   }
-  const eps = 1e-6;
   // Sync lock: linked partners ride along even on disabled tracks.
   const movers = withLinked(project.clips.filter((c) => onTrack(c) && c.start >= at - eps));
   for (const c of movers) c.start = +(c.start + duration).toFixed(4);
