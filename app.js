@@ -4943,6 +4943,42 @@ function pauseSource() {
   syncPlayButton();
   updateSourceScrub();
 }
+/** Route a Source node's channels to per-track buses for metering.
+ *  audio → the first Source track's bus (or master); video → mono-split each
+ *  channel through gain → panner (default L/R) into the matching A-track bus.
+ *  `collect(node, role)` receives every created node ("splitter"|"gain"|"panner")
+ *  so callers can track them for disposal. Shared by live playback (hookSourceAudio)
+ *  and Source audio-hold (refreshAudioHold). */
+function routeSourceChannels(ctx, src, m, nCh, audio, collect) {
+  if (m.kind === "audio") {
+    const bus = audio.trackBus[sourceEditTracks(m)[0]] || audio.master;
+    src.connect(bus);
+    return;
+  }
+  const splitter = ctx.createChannelSplitter(nCh);
+  src.connect(splitter);
+  collect(splitter, "splitter");
+  const stemTracks = sourceEditTracks(m).slice(1);
+  for (let ch = 0; ch < nCh; ch++) {
+    const trackId = ch < stemTracks.length ? stemTracks[ch] : `A${ch + 1}`;
+    const bus = audio.trackBus[trackId];
+    if (!bus) continue;
+
+    const g = ctx.createGain();
+    splitter.connect(g, ch);
+    collect(g, "gain");
+
+    const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+    if (panner) {
+      panner.pan.value = defaultPanForChannel(ch);
+      g.connect(panner);
+      panner.connect(bus);
+      collect(panner, "panner");
+    } else {
+      g.connect(bus);
+    }
+  }
+}
 function hookSourceAudio(m, el, audio) {
   if (el._fcSrc) return;
   try {
@@ -4950,39 +4986,10 @@ function hookSourceAudio(m, el, audio) {
     const src = ctx.createMediaElementSource(el);
     el._fcSrc = src;
     el._fcNodes = [];
-
-    if (m.kind === "audio") {
-      const trackId = sourceEditTracks(m)[0];
-      const bus = audio.trackBus[trackId] || audio.master;
-      src.connect(bus);
-    } else if (m.kind === "video") {
-      const nCh = m.channels > 0 ? m.channels : 2;
-      try { src.channelInterpretation = "discrete"; } catch { }
-      const splitter = ctx.createChannelSplitter(nCh);
-      src.connect(splitter);
-      el._fcNodes.push(splitter);
-
-      const stemTracks = sourceEditTracks(m).slice(1);
-      for (let ch = 0; ch < nCh; ch++) {
-        const trackId = ch < stemTracks.length ? stemTracks[ch] : `A${ch + 1}`;
-        const bus = audio.trackBus[trackId];
-        if (!bus) continue;
-
-        const g = ctx.createGain();
-        splitter.connect(g, ch);
-
-        const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
-        if (panner) {
-          panner.pan.value = defaultPanForChannel(ch);
-          g.connect(panner);
-          panner.connect(bus);
-          el._fcNodes.push(g, panner);
-        } else {
-          g.connect(bus);
-          el._fcNodes.push(g);
-        }
-      }
-    }
+    if (m.kind !== "audio" && m.kind !== "video") return;
+    if (m.kind === "video") { try { src.channelInterpretation = "discrete"; } catch { } }
+    const nCh = m.channels > 0 ? m.channels : 2;
+    routeSourceChannels(ctx, src, m, nCh, audio, (n) => el._fcNodes.push(n));
   } catch (e) {
     el.volume = 1;
   }
@@ -6010,6 +6017,18 @@ function stopAudioHoldNodes() {
   for (const n of audioHoldNodes) disposeAudioHoldNode(n);
   audioHoldNodes = [];
 }
+/** An in-flight audio-hold build is stale once a newer refresh ran (`gen`),
+ *  hold turned off, or the relevant transport (`playing`) started. */
+function audioHoldStale(gen, playing) {
+  return gen !== audioHoldGen || !state.audioHold || playing;
+}
+/** start() a hold voice, then keep it only if the build is still current —
+ *  a newer refresh/stop or playback may have run while the graph was built. */
+function commitAudioHoldNode(node, gen, playing) {
+  try { node.src.start(0); } catch { disposeAudioHoldNode(node); return; }
+  if (audioHoldStale(gen, playing)) { disposeAudioHoldNode(node); return; }
+  audioHoldNodes.push(node);
+}
 function scheduleAudioHoldRefresh() {
   if (!state.audioHold || state.playing || state.source.playing) return;
   if (audioHoldRaf) return;
@@ -6048,58 +6067,20 @@ function refreshAudioHold() {
     const m = sourceMedia();
     if (!m || (m.kind !== "audio" && m.kind !== "video")) return;
     getAudioBuffer(m).then((buf) => {
-      if (gen !== audioHoldGen || !state.audioHold || state.source.playing) return;
+      if (audioHoldStale(gen, state.source.playing)) return;
       if (!(buf.duration > 0) || t >= buf.duration) return;
       const slice = sliceAudioFrame(audio.ctx, buf, t, frameDur);
       const src = audio.ctx.createBufferSource();
       src.buffer = slice;
       src.loop = true;
-      
-      if (m.kind === "audio") {
-        const trackId = sourceEditTracks(m)[0];
-        const bus = audio.trackBus[trackId] || audio.master;
-        src.connect(bus);
-        const node = { src };
-        try { src.start(0); } catch { disposeAudioHoldNode(node); return; }
-        if (gen !== audioHoldGen || !state.audioHold || state.source.playing) {
-          disposeAudioHoldNode(node);
-          return;
-        }
-        audioHoldNodes.push(node);
-      } else if (m.kind === "video") {
-        const nCh = Math.max(buf.numberOfChannels, 2);
-        const splitter = audio.ctx.createChannelSplitter(nCh);
-        src.connect(splitter);
-        const node = { src, split: splitter, gains: [], panners: [] };
-        
-        const stemTracks = sourceEditTracks(m).slice(1);
-        for (let ch = 0; ch < nCh; ch++) {
-          const trackId = ch < stemTracks.length ? stemTracks[ch] : `A${ch + 1}`;
-          const bus = audio.trackBus[trackId];
-          if (!bus) continue;
-          
-          const g = audio.ctx.createGain();
-          splitter.connect(g, ch);
-          node.gains.push(g);
-          
-          const panner = audio.ctx.createStereoPanner ? audio.ctx.createStereoPanner() : null;
-          if (panner) {
-            panner.pan.value = defaultPanForChannel(ch);
-            g.connect(panner);
-            panner.connect(bus);
-            node.panners.push(panner);
-          } else {
-            g.connect(bus);
-          }
-        }
-        
-        try { src.start(0); } catch { disposeAudioHoldNode(node); return; }
-        if (gen !== audioHoldGen || !state.audioHold || state.source.playing) {
-          disposeAudioHoldNode(node);
-          return;
-        }
-        audioHoldNodes.push(node);
-      }
+      const nCh = Math.max(buf.numberOfChannels, 2);
+      const node = { src, split: null, gains: [], panners: [] };
+      routeSourceChannels(audio.ctx, src, m, nCh, audio, (n, role) => {
+        if (role === "splitter") node.split = n;
+        else if (role === "gain") node.gains.push(n);
+        else if (role === "panner") node.panners.push(n);
+      });
+      commitAudioHoldNode(node, gen, state.source.playing);
     }).catch(() => { });
     return;
   }
@@ -6117,7 +6098,7 @@ function refreshAudioHold() {
     const vol = clamp(+p.volume || 0, 0, 4);
     if (vol <= 1e-4) continue; // skip muted picture track (linked stems carry the sound)
     getAudioBuffer(m).then((buf) => {
-      if (gen !== audioHoldGen || !state.audioHold || state.playing) return;
+      if (audioHoldStale(gen, state.playing)) return;
       const mt = mediaTimeAt(c, t);
       if (!(buf.duration > 0) || mt >= buf.duration) return;
       // Slice exactly one frame — looping the whole short buffer (not loopStart on
@@ -6137,13 +6118,7 @@ function refreshAudioHold() {
       const bus = audio.trackBus[c.track] || audio.master;
       panner.connect(bus);
       const node = { src, gain: g, panner, split };
-      try { src.start(0); } catch { disposeAudioHoldNode(node); return; }
-      // Re-check after start: a newer refresh/stop may have run while we built the graph.
-      if (gen !== audioHoldGen || !state.audioHold || state.playing) {
-        disposeAudioHoldNode(node);
-        return;
-      }
-      audioHoldNodes.push(node);
+      commitAudioHoldNode(node, gen, state.playing);
     }).catch(() => { });
   }
 }
