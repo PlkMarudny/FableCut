@@ -2144,7 +2144,29 @@ function punchTrackRange(trackId, t0, t1) {
     // Spans both edges → keep head + tail, drop middle
     if (c.start < t0 - eps && end > t1 + eps) {
       const right = splitClipAt(c, t0);
-      if (!right) continue;
+      if (!right) {
+        // Split refused — an edge sits within MIN_DUR of t0. Don't leave the
+        // clip covering the punched range; keep the substantial side.
+        if (t0 - c.start > MIN_DUR) {
+          // Tail past t0 is the stub → keep the head, end it at t0.
+          c.duration = +(t0 - c.start).toFixed(4);
+          c.transitionOut = undefined;
+          c.keyframes = shiftKF(c.keyframes, 0, c.duration);
+        } else if (end - t1 >= MIN_DUR) {
+          // Head is the stub → keep the tail, start it at t1.
+          const cut = t1 - c.start;
+          c.in = +(c.in + cut * clipSpeed(c)).toFixed(4);
+          c.duration = +(end - t1).toFixed(4);
+          c.start = +t1.toFixed(4);
+          c.transitionIn = undefined;
+          c.keyframes = shiftKF(c.keyframes, cut, c.duration);
+        } else {
+          // Stubs on both sides → effectively inside the window.
+          releaseClipEl(c.id);
+          project.clips = project.clips.filter((x) => x !== c);
+        }
+        continue;
+      }
       if (clipEnd(right) <= t1 + eps) {
         releaseClipEl(right.id);
         project.clips = project.clips.filter((x) => x !== right);
@@ -2605,6 +2627,8 @@ function rippleDeleteSelected() {
   for (const c of doomed) releaseClipEl(c.id);
   project.clips = project.clips.filter((x) => !ids.has(x.id));
   const eps = 1e-6;
+  // Merged removed ranges per enabled track.
+  const rangesByTrack = new Map();
   for (const [trackId, removed] of byTrack) {
     if (!isTrackEnabled(trackId)) continue;
     const ranges = removed.map((c) => [c.start, clipEnd(c)]).sort((a, b) => a[0] - b[0]);
@@ -2614,12 +2638,46 @@ function rippleDeleteSelected() {
       if (last && s <= last[1] + eps) last[1] = Math.max(last[1], e);
       else merged.push([s, e]);
     }
-    for (let i = merged.length - 1; i >= 0; i--) {
-      const [s, e] = merged[i];
-      const delta = e - s;
-      // Sync lock: partners of moving clips ride along, even on disabled tracks.
-      const movers = withLinked(project.clips.filter((c) => c.track === trackId && c.start >= e - eps));
-      for (const c of movers) c.start = Math.max(0, +(c.start - delta).toFixed(4));
+    rangesByTrack.set(trackId, merged);
+  }
+  const shiftFor = (ranges, p) => {
+    let d = 0;
+    for (const [s, e] of ranges) if (e <= p + eps) d += e - s;
+    return d;
+  };
+  // Sync lock: a linked group shifts ONCE by the union of its member tracks'
+  // ranges (partners on disabled tracks ride along) — never once per track.
+  // Unlinked clips use their own track's ranges.
+  const grouped = new Map(), groups = [], solo = [];
+  for (const c of project.clips) {
+    if (grouped.has(c.id)) continue;
+    const members = withLinked([c]);
+    if (members.length === 1) { solo.push(c); continue; }
+    const g = { tracks: new Set(members.map((x) => x.track)), clips: members };
+    groups.push(g);
+    for (const x of members) grouped.set(x.id, g);
+  }
+  for (const c of solo) {
+    const d = shiftFor(rangesByTrack.get(c.track) || [], c.start);
+    if (d > 0) c.start = Math.max(0, +(c.start - d).toFixed(4));
+  }
+  for (const g of groups) {
+    const all = [];
+    for (const tid of g.tracks) {
+      const r = rangesByTrack.get(tid);
+      if (r) all.push(...r);
+    }
+    if (!all.length) continue;
+    all.sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    for (const [s, e] of all) {
+      const last = merged[merged.length - 1];
+      if (last && s <= last[1] + eps) last[1] = Math.max(last[1], e);
+      else merged.push([s, e]);
+    }
+    for (const c of g.clips) {
+      const d = shiftFor(merged, c.start);
+      if (d > 0) c.start = Math.max(0, +(c.start - d).toFixed(4));
     }
   }
   setSelection([]);
@@ -5015,13 +5073,13 @@ function getSourceSvgImage(m, t) {
   const aux = runtime.mediaAux.get(m.id);
   if (!aux || !aux.svgText) return null;
   if (!aux.svgAnimated) return aux.img || null;
-  const q = Math.round(Math.max(0, t) * project.fps) / project.fps;
+  const q = Math.round(Math.max(0, t) * projectFps()) / projectFps();
   const hit = aux.svgFrames.get(q);
   if (hit) return hit;
   if (!aux.svgPending) {
     aux.svgPending = renderSvgFrame(aux, q).then((img) => {
       aux.svgFrames.set(q, img);
-      if (aux.svgFrames.size > 90) aux.svgFrames.delete(aux.svgFrames.keys().next().value);
+      pruneSvgFrames(aux);
       aux.lastImg = img;
     }).catch(() => { }).finally(() => { aux.svgPending = null; });
   }

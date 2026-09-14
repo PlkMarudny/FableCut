@@ -379,7 +379,10 @@ glitch (RGB split + jitter) · pop (overshoot scale — stickers/captions).
   Disabled tracks are omitted from preview and export, and timeline edit ops
   target enabled tracks only: split at playhead (S), insert ripple (`,`),
   ripple delete (⇧Del), close gap (⇧G), split/trim at IN/OUT (T / ⇧T) and
-  replace punches all skip disabled lanes. Insert/replace *placement* follows
+  replace punches all skip disabled lanes. (Ripple delete still *deletes* the
+  selection wherever it sits — clips on disabled tracks are removed too,
+  linked partners included; enablement only controls which later clips shift.)
+  Insert/replace *placement* follows
   the same rule, source-patching style: a disabled picture lane (V1) skips the
   picture, disabled stem lanes (A1/A2…) skip those stems; when every target
   lane is disabled the op no-ops with a toast.
