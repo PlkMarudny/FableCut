@@ -4950,27 +4950,27 @@ function hookSourceAudio(m, el, audio) {
     const src = ctx.createMediaElementSource(el);
     el._fcSrc = src;
     el._fcNodes = [];
-    
+
     if (m.kind === "audio") {
       const trackId = sourceEditTracks(m)[0];
       const bus = audio.trackBus[trackId] || audio.master;
       src.connect(bus);
     } else if (m.kind === "video") {
-      const nCh = Math.max(m.channels || 0, 2);
+      const nCh = m.channels > 0 ? m.channels : 2;
       try { src.channelInterpretation = "discrete"; } catch { }
       const splitter = ctx.createChannelSplitter(nCh);
       src.connect(splitter);
       el._fcNodes.push(splitter);
-      
+
       const stemTracks = sourceEditTracks(m).slice(1);
       for (let ch = 0; ch < nCh; ch++) {
         const trackId = ch < stemTracks.length ? stemTracks[ch] : `A${ch + 1}`;
         const bus = audio.trackBus[trackId];
         if (!bus) continue;
-        
+
         const g = ctx.createGain();
         splitter.connect(g, ch);
-        
+
         const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
         if (panner) {
           panner.pan.value = defaultPanForChannel(ch);
@@ -4988,7 +4988,7 @@ function hookSourceAudio(m, el, audio) {
   }
 }
 
-function playSource() {
+async function playSource() {
   if (!state.source.mediaId) {
     toast("Double-click a clip in Project or the timeline to load Source");
     return;
@@ -4999,9 +4999,16 @@ function playSource() {
   const end = state.source.out != null ? Math.min(state.source.out, dur) : dur;
   const start = state.source.in != null ? state.source.in : 0;
   if (state.source.time >= end - 0.01) setSourceTime(start);
-  const el = ensureSourceEl(sourceMedia());
+  const m = sourceMedia();
+  const el = ensureSourceEl(m);
   const audio = ensureAudio();
-  if (el) hookSourceAudio(sourceMedia(), el, audio);
+  if (el) {
+    if (m.kind === "video" && m.channels == null) {
+      // Resolve channels before hooking so the graph has the right count
+      await detectChannelCount(m);
+    }
+    hookSourceAudio(m, el, audio);
+  }
   audio.ctx.resume();
   state.source.playing = true;
   syncPlayButton();
