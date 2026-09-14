@@ -478,6 +478,8 @@ function toggleTrackEnabled(id) {
 }
 const runtime = {
   clipEls: new Map(),   // clipId -> HTMLMediaElement
+  exportDecoders: new Map(), // clipId -> export-only VideoDecoder session
+  exportFrames: new Map(),   // clipId -> immutable VideoFrame used by compositor
   clipGain: new Map(),  // clipId -> GainNode
   mediaAux: new Map(),  // mediaId -> {img?, thumb?, svgText?, svgAnimated?}
   audioBufs: new Map(), // mediaId -> Promise<AudioBuffer> (waveforms + export mix)
@@ -525,7 +527,9 @@ const els = {
   importUrlOverlay: $("importUrlOverlay"), importUrlInput: $("importUrlInput"),
   importUrlStatus: $("importUrlStatus"), importUrlProgress: $("importUrlProgress"),
 };
-const ctx2d = els.preview.getContext("2d");
+const previewCtx = els.preview.getContext("2d");
+let ctx2d = previewCtx;
+let composeCanvas = els.preview;
 
 /* ── Utils ─────────────────────────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -835,13 +839,19 @@ async function connectServer() {
   }
   await probeMissingMeta();
 }
-/* Main-profile AVC level by canvas height; Annex-B is required so ffmpeg
-   can ingest the elementary stream with `-f h264` and no avcC converter. */
+/* Main-profile AVC level from canvas size × fps; Annex-B is required so ffmpeg
+   can ingest the elementary stream with `-f h264` and no avcC converter.
+   Height-only picks were wrong for 1080p50/60 (needs L4.2, not L4.0). */
 function webCodecsAvcCodec() {
+  const w = project.width || 1280;
   const h = project.height || 720;
-  if (h > 1080) return "avc1.4D0032"; // Main@L5.0
-  if (h > 720) return "avc1.4D0028";  // Main@L4.0
-  return "avc1.4D001F";               // Main@L3.1
+  const fps = projectFps();
+  const pxps = w * h * fps;
+  if (h > 1080 || pxps > 1920 * 1080 * 60) return "avc1.4D0032"; // Main@L5.0
+  if (h > 720 && fps > 30) return "avc1.4D002A";                 // Main@L4.2 (1080p50/60)
+  if (h > 720) return "avc1.4D0028";                              // Main@L4.0 (1080p30)
+  if (fps > 30) return "avc1.4D0028";                             // 720p50/60
+  return "avc1.4D001F";                                           // Main@L3.1
 }
 async function detectWebCodecs() {
   state.webCodecs = false;
@@ -5094,7 +5104,7 @@ function evalProps(c, t) {
     }
   }
   applyFilterPreset(p);
-  const W = els.preview.width, H = els.preview.height;
+  const W = composeCanvas.width, H = composeCanvas.height;
   const tin = c.transitionIn, tout = c.transitionOut;
   if (tin && tin.duration > 0 && local < tin.duration)
     applyTransition(p, tin.type, 1 - EASE["ease-out"](clamp(local / tin.duration, 0, 1)), W, H, -1);
@@ -5328,7 +5338,7 @@ function requestMask(clipId, el, force = false) {
   if (!force && bgSeg.pending > 0) return Promise.resolve();
   bgSeg.pending++;
   bgSeg.queue = bgSeg.queue.then(async () => {
-    if ((el.videoWidth || el.naturalWidth || 0) === 0) return;
+    if ((el.videoWidth || el.naturalWidth || el.displayWidth || el.codedWidth || 0) === 0) return;
     bgSeg.currentClip = clipId;
     try { await bgSeg.seg.send({ image: el }); } catch { }
   }).finally(() => { bgSeg.pending--; });
@@ -5381,7 +5391,7 @@ function drawAdjust(c, W, H, t) {
   if (adjScratch.height !== H) adjScratch.height = H;
   const a = adjScratch.getContext("2d");
   a.clearRect(0, 0, W, H);
-  a.drawImage(els.preview, 0, 0);
+  a.drawImage(composeCanvas, 0, 0);
   ctx2d.save();
   ctx2d.setTransform(1, 0, 0, 1, 0, 0);
   if (p.shake > 0) { // whole-frame impact shake
@@ -5505,7 +5515,7 @@ function visibleClipsAt(t) {
   return out;
 }
 function drawFrame(t = state.time) {
-  const W = els.preview.width, H = els.preview.height;
+  const W = composeCanvas.width, H = composeCanvas.height;
   ctx2d.setTransform(1, 0, 0, 1, 0, 0);
   ctx2d.filter = "none"; ctx2d.globalAlpha = 1;
   ctx2d.fillStyle = project.background || "#000"; ctx2d.fillRect(0, 0, W, H);
@@ -5802,8 +5812,14 @@ function drawClip(c, W, H, t) {
     src = getSvgImage(c, t);
     if (src) { sw = src.naturalWidth || src.width; sh = src.naturalHeight || src.height; }
   } else if (c.kind === "video") {
-    src = getClipEl(c);
-    if (src) { sw = src.videoWidth; sh = src.videoHeight; }
+    src = runtime.exportFrames.get(c.id) || getClipEl(c);
+    if (typeof VideoFrame === "function" && src instanceof VideoFrame) {
+      sw = src.displayWidth || src.codedWidth;
+      sh = src.displayHeight || src.codedHeight;
+    } else if (src) {
+      sw = src.videoWidth;
+      sh = src.videoHeight;
+    }
   }
   if (src && sw && sh) {
     // source crop (percent per edge)
@@ -6665,6 +6681,53 @@ function endExportWindow() {
 }
 let exportCropCanvas = null;
 let exportCropCtx = null;
+/* OffscreenCanvas export target.
+   The program monitor <canvas> is also owned by the display compositor, so
+   wrapping it in VideoFrame / toBlob forces an extra GPU copy and contends
+   with vsync. OffscreenCanvas runs the same drawFrame compositor without a
+   display mailbox; presentComposeToPreview() blits it to the monitor. */
+let exportOffscreen = null;
+let exportOffscreenCtx = null;
+let lastPreviewBlit = 0;
+function acquireExportCompose(w, h) {
+  if (typeof OffscreenCanvas !== "function") return { canvas: els.preview, ctx: previewCtx };
+  if (!exportOffscreen) {
+    exportOffscreen = new OffscreenCanvas(w, h);
+    try { exportOffscreenCtx = exportOffscreen.getContext("2d", { alpha: false }); }
+    catch { exportOffscreenCtx = null; }
+    if (!exportOffscreenCtx) exportOffscreenCtx = exportOffscreen.getContext("2d");
+  } else if (exportOffscreen.width !== w || exportOffscreen.height !== h) {
+    exportOffscreen.width = w;
+    exportOffscreen.height = h;
+  }
+  if (!exportOffscreenCtx) return { canvas: els.preview, ctx: previewCtx };
+  return { canvas: exportOffscreen, ctx: exportOffscreenCtx };
+}
+function beginExportCompose(w, h) {
+  if (els.preview.width !== w || els.preview.height !== h) {
+    els.preview.width = w;
+    els.preview.height = h;
+  }
+  const t = acquireExportCompose(w, h);
+  composeCanvas = t.canvas;
+  ctx2d = t.ctx;
+  lastPreviewBlit = 0;
+}
+function endExportCompose() {
+  composeCanvas = els.preview;
+  ctx2d = previewCtx;
+}
+function presentComposeToPreview(force) {
+  if (composeCanvas === els.preview) return;
+  const now = performance.now();
+  if (!force && now - lastPreviewBlit < 90) return;
+  lastPreviewBlit = now;
+  previewCtx.setTransform(1, 0, 0, 1, 0, 0);
+  previewCtx.filter = "none";
+  previewCtx.globalAlpha = 1;
+  previewCtx.globalCompositeOperation = "source-over";
+  previewCtx.drawImage(composeCanvas, 0, 0);
+}
 function canvasTaintError(e) {
   const tainted = e && (e.name === "SecurityError" || /taint/i.test(String(e.message || e)));
   return tainted
@@ -6673,12 +6736,13 @@ function canvasTaintError(e) {
 }
 function exportSourceCanvas() {
   const ef = getExportFrame();
-  if (!ef) return els.preview;
+  const src = composeCanvas;
+  if (!ef) return src;
   if (!exportCropCanvas) exportCropCanvas = document.createElement("canvas");
   if (exportCropCanvas.width !== ef.w) exportCropCanvas.width = ef.w;
   if (exportCropCanvas.height !== ef.h) exportCropCanvas.height = ef.h;
   if (!exportCropCtx) exportCropCtx = exportCropCanvas.getContext("2d", { alpha: false });
-  exportCropCtx.drawImage(els.preview, ef.x, ef.y, ef.w, ef.h, 0, 0, ef.w, ef.h);
+  exportCropCtx.drawImage(src, ef.x, ef.y, ef.w, ef.h, 0, 0, ef.w, ef.h);
   return exportCropCanvas;
 }
 let exportSnapOff = null, exportSnapCtx = null;
@@ -6911,6 +6975,305 @@ function createExportUploader(sessId, { batchItems, batchBytes, signal, getError
     },
   };
 }
+
+/* ── Direct WebCodecs source decode ──
+   VideoDecoder consumes elementary samples, not MP4 files. The server exposes
+   the MP4 sample table (PTS/duration/key flag + byte ranges); sample bytes are
+   fetched lazily from the existing Range-capable /media route. A bounded
+   decoder session retains only the frame covering the current timeline tick
+   plus a small amount of decoder reorder/lookahead state. */
+const DECODE_RANGE_BYTES = 4 * 1024 * 1024;
+const DECODE_AHEAD_US = 350_000;
+function base64Bytes(s) {
+  const raw = atob(s);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+function waitDecoderQueue(decoder, max = 4) {
+  try {
+    if (!decoder || decoder.state !== "configured" || decoder.decodeQueueSize <= max)
+      return Promise.resolve();
+  } catch { return Promise.resolve(); }
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      decoder.ondequeue = prev;
+      resolve();
+    };
+    const tick = () => {
+      try {
+        if (decoder.decodeQueueSize <= max || decoder.state !== "configured") done();
+      } catch { done(); }
+    };
+    const prev = decoder.ondequeue;
+    decoder.ondequeue = () => { try { prev?.(); } catch { } tick(); };
+    const poll = setInterval(tick, 20);
+    tick();
+  });
+}
+class ExportVideoDecoder {
+  constructor(clip, index) {
+    this.clip = clip;
+    this.index = index;
+    this.decoder = null;
+    this.config = null;
+    this.input = 0;
+    this.frames = [];
+    this.current = null;
+    this.range = null;
+    this.outputWaiters = [];
+    this.error = null;
+    this.ended = false;
+    this.pump = Promise.resolve();
+    this.durationByTimestamp = new Map(index.samples.map((s) => [s.timestamp, s.duration]));
+  }
+  async init() {
+    const base = {
+      codec: this.index.codec,
+      codedWidth: this.index.width,
+      codedHeight: this.index.height,
+      description: base64Bytes(this.index.description),
+      optimizeForLatency: false,
+    };
+    // Ask for hardware first, but do not reject valid 4:2:2/10-bit H.264 when
+    // Chromium can decode it only in software.
+    const hardware = await VideoDecoder.isConfigSupported({
+      ...base, hardwareAcceleration: "prefer-hardware",
+    });
+    const support = hardware.supported
+      ? hardware
+      : await VideoDecoder.isConfigSupported(base);
+    if (!support.supported) throw new Error(`VideoDecoder does not support ${this.index.codec}`);
+    this.config = { ...base, ...(support.config || {}) };
+    this.decoder = new VideoDecoder({
+      output: (frame) => {
+        this.frames.push(frame);
+        this.frames.sort((a, b) => a.timestamp - b.timestamp);
+        this.wake();
+      },
+      error: (e) => {
+        this.error = e instanceof Error ? e : new Error(String(e));
+        this.wake();
+      },
+    });
+    this.decoder.configure(this.config);
+    this.input = this.keyframeAt(Math.max(0, Math.floor(this.clip.in * 1e6)));
+  }
+  keyframeAt(targetUs) {
+    let at = this.index.samples.findIndex((s) => s.timestamp + s.duration > targetUs);
+    if (at < 0) at = this.index.samples.length - 1;
+    while (at > 0 && !this.index.samples[at].key) at--;
+    return Math.max(0, at);
+  }
+  wake() {
+    const waiters = this.outputWaiters.splice(0);
+    for (const wake of waiters) wake();
+  }
+  async sampleBytes(i) {
+    const s = this.index.samples[i];
+    if (!s) throw new Error("VideoDecoder sample is outside the source");
+    const end = s.offset + s.size;
+    if (!this.range || s.offset < this.range.start || end > this.range.end) {
+      let last = i;
+      let rangeEnd = end;
+      while (last + 1 < this.index.samples.length) {
+        const next = this.index.samples[last + 1];
+        const nextEnd = next.offset + next.size;
+        if (nextEnd - s.offset > DECODE_RANGE_BYTES) break;
+        last++;
+        rangeEnd = Math.max(rangeEnd, nextEnd);
+      }
+      const response = await fetch(this.index.src, {
+        headers: { Range: `bytes=${s.offset}-${rangeEnd - 1}` },
+      });
+      if (!response.ok)
+        throw new Error(`video sample fetch failed (${response.status})`);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let rangeStart = s.offset;
+      if (response.status === 206) {
+        const match = /^bytes\s+(\d+)-(\d+)\//i.exec(response.headers.get("Content-Range") || "");
+        if (!match || Number(match[1]) !== s.offset || bytes.length < rangeEnd - s.offset)
+          throw new Error("video sample server returned an invalid byte range");
+      } else if (response.status === 200) {
+        // Some proxies strip Range. A full-file response is still usable, but
+        // its byte zero is the file's byte zero, not the requested sample.
+        if (bytes.length !== this.index.size)
+          throw new Error("video sample server ignored Range without returning the full file");
+        rangeStart = 0;
+        rangeEnd = bytes.length;
+      } else {
+        throw new Error(`video sample server ignored Range (${response.status})`);
+      }
+      this.range = { start: rangeStart, end: rangeEnd, bytes };
+    }
+    const from = s.offset - this.range.start;
+    // Copy: VideoDecoder may read the chunk asynchronously; a later Range
+    // fetch replaces this.range.bytes.
+    return this.range.bytes.slice(from, from + s.size);
+  }
+  waitForOutput() {
+    if (this.frames.length || this.error || this.ended || renderCancelled) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, 400);
+      this.outputWaiters.push(() => { clearTimeout(timer); resolve(); });
+    });
+  }
+  frameCovers(frame, target) {
+    // Prefer the sample-table presentation hold (consecutive PTS), not the
+    // browser's decode-duration guess — that's how 25 fps media holds on a
+    // 50 fps timeline without advancing a frame early.
+    const duration = this.durationByTimestamp.get(frame.timestamp) || frame.duration || 1;
+    return frame.timestamp <= target && target < frame.timestamp + duration;
+  }
+  select(target) {
+    while (this.frames.length && this.frames[0].timestamp <= target) {
+      const next = this.frames.shift();
+      if (this.current) this.current.close();
+      this.current = next;
+    }
+    return this.current && this.frameCovers(this.current, target) ? this.current : null;
+  }
+  async feedUntil(ptsUs, minChunks = 4) {
+    let fed = 0;
+    while (this.input < this.index.samples.length && fed < 16) {
+      if (renderCancelled) throw new Error("cancelled");
+      if (this.error) throw this.error;
+      await waitDecoderQueue(this.decoder, 8);
+      const s = this.index.samples[this.input];
+      const data = await this.sampleBytes(this.input);
+      this.decoder.decode(new EncodedVideoChunk({
+        type: s.key ? "key" : "delta",
+        timestamp: s.timestamp,
+        duration: s.duration,
+        data,
+      }));
+      this.input++;
+      fed++;
+      if (s.timestamp > ptsUs && fed >= minChunks) break;
+    }
+    if (this.input >= this.index.samples.length && !this.ended) {
+      await this.decoder.flush();
+      this.ended = true;
+    }
+    return fed;
+  }
+  async ensure(targetSeconds) {
+    if (renderCancelled) throw new Error("cancelled");
+    const target = Math.max(0, Math.round(targetSeconds * 1e6));
+    let selected = this.select(target);
+    if (!selected) {
+      while (!this.ended) {
+        if (this.error) throw this.error;
+        if (renderCancelled) throw new Error("cancelled");
+        const fed = await this.queueFeed(target + DECODE_AHEAD_US, 4);
+        if (!this.ended) await this.waitForOutput();
+        selected = this.select(target);
+        if (selected) break;
+        if (!fed && !this.frames.length) break;
+      }
+    }
+    if (!selected) {
+      if (this.current && this.frameCovers(this.current, target)) selected = this.current;
+      else throw new Error(`VideoDecoder produced no frame at ${(target / 1e6).toFixed(3)}s`);
+    }
+    // Keep the pipeline warm so the next timeline tick does not wait on decode.
+    if (!this.ended && this.frames.length < 6) this.queueFeed(target + DECODE_AHEAD_US, 2, true);
+    return selected;
+  }
+  queueFeed(ptsUs, minChunks = 2, swallow = false) {
+    const p = this.pump.then(() => this.feedUntil(ptsUs, minChunks));
+    this.pump = p.catch((e) => { this.error = this.error || e; });
+    return swallow ? this.pump : p;
+  }
+  releaseHeld() {
+    if (this.current) { try { this.current.close(); } catch { } }
+    for (const frame of this.frames) { try { frame.close(); } catch { } }
+    this.frames = [];
+    this.current = null;
+  }
+  close() {
+    this.ended = true;
+    this.wake();
+    try { this.decoder?.close(); } catch { }
+    this.releaseHeld();
+    this.range = null;
+  }
+}
+async function initExportVideoDecoders() {
+  closeExportVideoDecoders();
+  if (!state.connected || typeof VideoDecoder !== "function" ||
+      typeof VideoDecoder.isConfigSupported !== "function" ||
+      typeof EncodedVideoChunk !== "function") return;
+  const indexes = new Map();
+  for (const c of project.clips) {
+    if (c.kind !== "video" || !isTrackEnabled(c.track)) continue;
+    // MediaPipe selfie segmentation accepts HTML image sources, not VideoFrame.
+    if (c.props?.bgRemove) continue;
+    const media = getMedia(c.mediaId);
+    if (!media?.src?.startsWith("/media/")) continue;
+    let indexPromise = indexes.get(media.src);
+    if (!indexPromise) {
+      indexPromise = fetch("/api/video-index?src=" + encodeURIComponent(media.src))
+        .then(async (r) => {
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(body.error || `video index failed (${r.status})`);
+          return body;
+        });
+      indexes.set(media.src, indexPromise);
+    }
+    try {
+      const session = new ExportVideoDecoder(c, await indexPromise);
+      await session.init();
+      runtime.exportDecoders.set(c.id, session);
+    } catch (e) {
+      console.warn(`VideoDecoder fallback for ${c.name || c.id}:`, e);
+    }
+  }
+}
+function closeExportVideoDecoders() {
+  for (const session of runtime.exportDecoders.values()) session.close();
+  runtime.exportDecoders.clear();
+  runtime.exportFrames.clear();
+}
+async function decodeVideosTo(t) {
+  const jobs = [];
+  const failed = [];
+  for (const c of project.clips) {
+    if (c.kind !== "video" || !isTrackEnabled(c.track)) continue;
+    const session = runtime.exportDecoders.get(c.id);
+    if (!session) continue;
+    if (activeAt(c, t)) {
+      jobs.push(session.ensure(mediaTimeAt(c, t)).then((frame) => {
+        runtime.exportFrames.set(c.id, frame);
+      }).catch((error) => {
+        failed.push({ c, session, error });
+      }));
+    } else {
+      runtime.exportFrames.delete(c.id);
+      if (c.start > t && c.start <= t + EXPORT_PREFETCH_S) {
+        jobs.push(session.ensure(mediaTimeAt(c, c.start)).catch(() => {}));
+      } else if (clipEnd(c) <= t) {
+        session.releaseHeld();
+      }
+    }
+  }
+  await Promise.all(jobs);
+  if (failed.length) {
+    for (const { c, session, error } of failed) {
+      console.warn(`VideoDecoder runtime fallback for ${c.name || c.id}:`, error);
+      session.close();
+      runtime.exportDecoders.delete(c.id);
+      runtime.exportFrames.delete(c.id);
+    }
+    return true;
+  }
+  return false;
+}
+
 /* ── Fast / WebCodecs frame sync ──
    HTMLVideoElement has no “step one frame” API — assigning currentTime always
    seeks. On the export hot path a seek-per-frame is the dominant cost, so:
@@ -7183,6 +7546,7 @@ const EXPORT_PREFETCH_S = 1.25;
 function prefetchExportVideos(t) {
   for (const c of project.clips) {
     if (c.kind !== "video" || !isTrackEnabled(c.track)) continue;
+    if (runtime.exportDecoders.has(c.id)) continue;
     if (activeAt(c, t)) continue;
     if (c.start > t + EXPORT_PREFETCH_S || clipEnd(c) <= t) continue;
     const el = getClipEl(c);
@@ -7209,6 +7573,7 @@ async function seekVideosTo(t, { queueBusy } = {}) {
   for (const c of project.clips) {
     if (c.kind !== "video") continue;
     if (!isTrackEnabled(c.track)) continue;
+    if (runtime.exportDecoders.has(c.id)) continue;
     const el = getClipEl(c); if (!el) continue;
     if (!activeAt(c, t)) {
       if (!el.paused) el.pause();
@@ -7344,17 +7709,32 @@ async function renderAudioMix(t0, t1) {
   if (!scheduled) return null;
   return encodeWAV(await off.startRendering());
 }
-/* Frame-exact asset prep for the fast exporter: rasterize the SVG frame for
-   this exact time, and refresh AI person masks synchronously. */
-async function prepareFrameAssets(t) {
+/* Frame-exact export sources: VideoDecoder / HTML video + SVG raster run
+   together; AI person masks wait until the picture for this tick exists. */
+async function prepareSvgAssets(t) {
+  const jobs = [];
+  for (const c of project.clips) {
+    if (!activeAt(c, t) || !isTrackEnabled(c.track) || c.kind !== "svg") continue;
+    jobs.push(prepareSvgFrame(c, t));
+  }
+  if (jobs.length) await Promise.all(jobs);
+}
+async function prepareMaskAssets(t) {
   for (const c of project.clips) {
     if (!activeAt(c, t) || !isTrackEnabled(c.track)) continue;
-    if (c.kind === "svg") await prepareSvgFrame(c, t);
-    if (c.props?.bgRemove && (c.kind === "video" || c.kind === "image")) {
-      const el = c.kind === "video" ? getClipEl(c) : runtime.mediaAux.get(c.mediaId)?.img;
-      if (el) { try { await requestMask(c.id, el, true); } catch { } }
-    }
+    if (!c.props?.bgRemove || (c.kind !== "video" && c.kind !== "image")) continue;
+    const el = c.kind === "video"
+      ? (runtime.exportFrames.get(c.id) || getClipEl(c))
+      : runtime.mediaAux.get(c.mediaId)?.img;
+    if (el) { try { await requestMask(c.id, el, true); } catch { } }
   }
+}
+async function prepareExportSources(t, seekOpts) {
+  const [needHtml] = await Promise.all([
+    decodeVideosTo(t), seekVideosTo(t, seekOpts), prepareSvgAssets(t),
+  ]);
+  if (needHtml) await seekVideosTo(t, seekOpts);
+  await prepareMaskAssets(t);
 }
 async function fastExport() {
   if (state.exporting) return;
@@ -7396,6 +7776,10 @@ async function fastExport() {
     try { await document.fonts.ready; } catch { }
     resetExportCanvases();
     await armExportCors();
+    await initExportVideoDecoders();
+    const w = Math.max(2, project.width | 0 || 1280);
+    const h = Math.max(2, project.height | 0 || 720);
+    beginExportCompose(w, h);
     // JPEG off the compositor thread: snapshot is sync, encode/upload run ahead
     // under backpressure. Awaiting toBlob every frame was slower than ffmpeg.
     const up = createExportUploader(sessId, {
@@ -7426,9 +7810,9 @@ async function fastExport() {
       await up.waitBackpressure(4);
       const t = t0 + f / fps;
       state.time = t;
-      await seekVideosTo(t, { queueBusy });
-      await prepareFrameAssets(t);
+      await prepareExportSources(t, { queueBusy });
       drawFrame(t);
+      presentComposeToPreview(f === frames - 1);
       const snap = snapshotExportFrame();
       pixelsInflight++;
       let jpegP;
@@ -7478,6 +7862,8 @@ async function fastExport() {
     if (msg !== "cancelled") alert("Export failed: " + msg);
   } finally {
     exportAbort = null;
+    closeExportVideoDecoders();
+    endExportCompose();
     restoreExportVideoState();
     endExportWindow();
     state.exporting = false; state.rendering = false;
@@ -7566,10 +7952,6 @@ async function webCodecsExport() {
     // Always encode at project/frame resolution (not display CSS size).
     const w = Math.max(2, project.width | 0 || 1280);
     const h = Math.max(2, project.height | 0 || 720);
-    if (els.preview.width !== w || els.preview.height !== h) {
-      els.preview.width = w;
-      els.preview.height = h;
-    }
     const codec = webCodecsAvcCodec();
     const bitrate = webCodecsBitrate(w, h, fps);
     const bitrateMode = getSetting("webCodecsBitrateMode") === "constant" ? "constant" : "variable";
@@ -7590,6 +7972,8 @@ async function webCodecsExport() {
     try { await document.fonts.ready; } catch { }
     resetExportCanvases();
     await armExportCors();
+    await initExportVideoDecoders();
+    beginExportCompose(w, h);
 
     for (let f = 0; f < frames; f++) {
       if (renderCancelled || signal.aborted) throw new Error("cancelled");
@@ -7600,15 +7984,15 @@ async function webCodecsExport() {
       await waitEncodeQueue(encoder, 4, { signal, getError: () => uploadError });
       const t = t0 + f / fps;
       state.time = t;
-      await seekVideosTo(t, { queueBusy });
-      await prepareFrameAssets(t);
+      await prepareExportSources(t, { queueBusy });
       drawFrame(t);
+      presentComposeToPreview(f === frames - 1);
       // Absolute µs timestamps; duration = delta so average rate stays exact
       // (constant Math.round(1e6/fps) drifts, e.g. 33333µs → avg 1000000/33333).
       const ts = Math.round(f * 1e6 / fps);
       let frame;
       try {
-        frame = new VideoFrame(els.preview, {
+        frame = new VideoFrame(composeCanvas, {
           timestamp: ts,
           duration: Math.round((f + 1) * 1e6 / fps) - ts,
         });
@@ -7645,6 +8029,8 @@ async function webCodecsExport() {
     if (msg !== "cancelled") alert("Export failed: " + msg);
   } finally {
     exportAbort = null;
+    closeExportVideoDecoders();
+    endExportCompose();
     restoreExportVideoState();
     endExportWindow();
     state.exporting = false; state.rendering = false;
