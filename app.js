@@ -6745,22 +6745,18 @@ function exportSourceCanvas() {
   exportCropCtx.drawImage(src, ef.x, ef.y, ef.w, ef.h, 0, 0, ef.w, ef.h);
   return exportCropCanvas;
 }
-let exportSnapOff = null, exportSnapCtx = null;
-/** Synchronous snapshot so the compositor can draw the next frame immediately.
- *  JPEG encode runs off-thread from the ImageBitmap. */
-function snapshotExportFrame() {
+/** Snapshot the composed frame without mutating composeCanvas.
+ *  createImageBitmap copies; transferToImageBitmap on the compose target would
+ *  detach it and break the next drawFrame. */
+async function snapshotExportFrame() {
   const src = exportSourceCanvas();
   try {
-    if (typeof OffscreenCanvas === "function") {
-      if (!exportSnapOff || exportSnapOff.width !== src.width || exportSnapOff.height !== src.height) {
-        exportSnapOff = new OffscreenCanvas(src.width, src.height);
-        exportSnapCtx = exportSnapOff.getContext("2d", { alpha: false });
-      }
-      exportSnapCtx.drawImage(src, 0, 0);
-      if (typeof exportSnapOff.transferToImageBitmap === "function")
-        return { kind: "bmp", bmp: exportSnapOff.transferToImageBitmap() };
+    if (typeof createImageBitmap === "function") {
+      const bmp = await createImageBitmap(src);
+      return { kind: "bmp", bmp };
     }
-    const img = src.getContext("2d").getImageData(0, 0, src.width, src.height);
+    const ctx = src === composeCanvas ? ctx2d : src.getContext("2d");
+    const img = ctx.getImageData(0, 0, src.width, src.height);
     return { kind: "rgba", data: img.data, w: src.width, h: src.height };
   } catch (e) { throw canvasTaintError(e); }
 }
@@ -6848,8 +6844,7 @@ function resetExportCanvases() {
   }
   adjScratch.width = adjScratch.width;
   scratch.width = scratch.width;
-  exportSnapOff = null;
-  exportSnapCtx = null;
+  if (exportOffscreen) exportOffscreen.width = exportOffscreen.width;
 }
 function waitMediaEl(el, ms = 2500) {
   if (el.readyState >= 2 && !(el.error)) return Promise.resolve();
@@ -6901,6 +6896,40 @@ async function armExportCors() {
   }
   if (missing.length)
     toast("No CORS on " + missing.join(", ") + " — blank in the export. Import into the project or add Access-Control-Allow-Origin.");
+}
+/* Poll until `ready()`, then resolve once. Interval + ondequeue both call
+   tick; without a settle guard the promise can resolve and then reject. */
+function waitUntilReady(ready, { cancelled, failed, pollMs = 20, attach, detach } = {}) {
+  const isCancelled = () => !!(cancelled && cancelled());
+  const error = () => (failed ? failed() : null);
+  if (isCancelled()) return Promise.reject(new Error("cancelled"));
+  {
+    const err = error();
+    if (err) return Promise.reject(err);
+  }
+  if (ready()) return Promise.resolve();
+  return new Promise((res, rej) => {
+    let settled = false;
+    let poll;
+    const done = (err) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      try { detach?.(); } catch { }
+      err ? rej(err) : res();
+    };
+    const tick = () => {
+      if (isCancelled()) done(new Error("cancelled"));
+      else {
+        const err = error();
+        if (err) done(err);
+        else if (ready()) done(null);
+      }
+    };
+    try { attach?.(tick); } catch { }
+    poll = setInterval(tick, pollMs);
+    tick();
+  });
 }
 /* Sequential /frame POSTs, batched. Concurrent bodies can still race on ffmpeg
    stdin if they complete out of order, so the client starts each fetch only
@@ -6960,17 +6989,8 @@ function createExportUploader(sessId, { batchItems, batchBytes, signal, getError
     inFlight() { return uploadsInFlight; },
     done() { flush(true); return uploadTail; },
     waitBackpressure(max = 2) {
-      return new Promise((res, rej) => {
-        const tick = () => {
-          if (cancelled()) { clearInterval(poll); rej(new Error("cancelled")); }
-          else {
-            const err = getError();
-            if (err) { clearInterval(poll); rej(err); }
-            else if (uploadsInFlight <= max) { clearInterval(poll); res(); }
-          }
-        };
-        const poll = setInterval(tick, 20);
-        tick();
+      return waitUntilReady(() => uploadsInFlight <= max, {
+        cancelled, failed: getError, pollMs: 20,
       });
     },
   };
@@ -7030,6 +7050,9 @@ class ExportVideoDecoder {
     this.ended = false;
     this.pump = Promise.resolve();
     this.durationByTimestamp = new Map(index.samples.map((s) => [s.timestamp, s.duration]));
+    this.presentationTimes = [...this.durationByTimestamp.keys()].sort((a, z) => a - z);
+    const firstHold = index.samples.find((s) => s.duration > 1)?.duration;
+    this.defaultHoldUs = firstHold || 33_333;
   }
   async init() {
     const base = {
@@ -7122,11 +7145,31 @@ class ExportVideoDecoder {
       this.outputWaiters.push(() => { clearTimeout(timer); resolve(); });
     });
   }
+  holdDuration(ts) {
+    const exact = this.durationByTimestamp.get(ts);
+    if (exact > 0) return exact;
+    const pts = this.presentationTimes;
+    const n = pts.length;
+    if (!n) return 0;
+    let lo = 0, hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pts[mid] < ts) lo = mid + 1;
+      else hi = mid;
+    }
+    const ge = pts[lo];
+    const lt = lo > 0 ? pts[lo - 1] : ge;
+    const nearest = Math.abs(ge - ts) <= Math.abs(lt - ts) ? ge : lt;
+    if (Math.abs(nearest - ts) <= 2000) return this.durationByTimestamp.get(nearest) || 0;
+    return 0;
+  }
   frameCovers(frame, target) {
-    // Prefer the sample-table presentation hold (consecutive PTS), not the
-    // browser's decode-duration guess — that's how 25 fps media holds on a
-    // 50 fps timeline without advancing a frame early.
-    const duration = this.durationByTimestamp.get(frame.timestamp) || frame.duration || 1;
+    // Prefer the sample-table presentation hold (consecutive PTS). A 1 µs
+    // fallback would never cover a timeline tick and force an HTML fallback.
+    let duration = this.holdDuration(frame.timestamp);
+    if (!(duration > 0) && frame.duration > 8000 && frame.duration < 150_000)
+      duration = frame.duration;
+    if (!(duration > 0)) duration = this.defaultHoldUs;
     return frame.timestamp <= target && target < frame.timestamp + duration;
   }
   select(target) {
@@ -7789,14 +7832,10 @@ async function fastExport() {
     const workers = createJpegWorkers(Math.min(3, Math.max(1, (navigator.hardwareConcurrency || 2) - 1)));
     let pixelChain = Promise.resolve();
     let pixelsInflight = 0;
-    const waitPixels = (max) => new Promise((res, rej) => {
-      const tick = () => {
-        if (renderCancelled || signal.aborted) { clearInterval(poll); rej(new Error("cancelled")); }
-        else if (uploadError) { clearInterval(poll); rej(uploadError); }
-        else if (pixelsInflight <= max) { clearInterval(poll); res(); }
-      };
-      const poll = setInterval(tick, 4);
-      tick();
+    const waitPixels = (max) => waitUntilReady(() => pixelsInflight <= max, {
+      cancelled: () => renderCancelled || signal.aborted,
+      failed: () => uploadError,
+      pollMs: 4,
     });
     try {
     for (let f = 0; f < frames; f++) {
@@ -7813,7 +7852,7 @@ async function fastExport() {
       await prepareExportSources(t, { queueBusy });
       drawFrame(t);
       presentComposeToPreview(f === frames - 1);
-      const snap = snapshotExportFrame();
+      const snap = await snapshotExportFrame();
       pixelsInflight++;
       let jpegP;
       if (snap.kind === "bmp") {
@@ -7875,32 +7914,12 @@ async function fastExport() {
 
 /* ── WebCodecs export (browser H.264 → server mux) ── */
 function waitEncodeQueue(encoder, max = 2, { signal, getError } = {}) {
-  const cancelled = () => renderCancelled || !!(signal && signal.aborted);
-  const failed = () => (getError ? getError() : null);
-  if (cancelled()) return Promise.reject(new Error("cancelled"));
-  {
-    const err = failed();
-    if (err) return Promise.reject(err);
-  }
-  if (encoder.encodeQueueSize <= max) return Promise.resolve();
-  return new Promise((res, rej) => {
-    const done = (err) => {
-      clearInterval(poll);
-      encoder.ondequeue = null;
-      err ? rej(err) : res();
-    };
-    const tick = () => {
-      if (cancelled()) done(new Error("cancelled"));
-      else {
-        const err = failed();
-        if (err) done(err);
-        else if (encoder.encodeQueueSize <= max) done(null);
-      }
-    };
-    encoder.ondequeue = tick;
-    // ondequeue alone won't notice Cancel / encoder·upload failure — poll
-    const poll = setInterval(tick, 50);
-    tick();
+  return waitUntilReady(() => encoder.encodeQueueSize <= max, {
+    cancelled: () => renderCancelled || !!(signal && signal.aborted),
+    failed: getError,
+    pollMs: 50,
+    attach: (tick) => { encoder.ondequeue = tick; },
+    detach: () => { encoder.ondequeue = null; },
   });
 }
 async function webCodecsExport() {
