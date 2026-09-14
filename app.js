@@ -814,6 +814,35 @@ function mediaTimeAt(c, t) {
     : e.cum[i0] + (e.cum[i0 + 1] - e.cum[i0]) * frac;
   return c.in + v;
 }
+/** Inverse of mediaTimeAt for a given media-time target, returning the local
+ *  timeline offset within the clip, or null if no unique inverse exists.
+ *  Reuses the same trapezoid integral cache as mediaTimeAt. */
+function localTimeForMedia(c, mediaTarget) {
+  if (!hasSpeedRamp(c)) {
+    const base = clipSpeed(c);
+    return (mediaTarget - c.in) / base;
+  }
+  const base = clipSpeed(c);
+  const key = JSON.stringify(c.keyframes.speed) + "|" + c.duration.toFixed(4) + "|" + base;
+  let e = speedIntCache.get(c.id);
+  if (!e || e.key !== key) {
+    mediaTimeAt(c, c.start); // build cache
+    e = speedIntCache.get(c.id);
+  }
+  if (!e) return null;
+  const target = mediaTarget - c.in;
+  const { cum, step } = e;
+  if (target <= 0) return 0;
+  if (target >= cum[cum.length - 1]) return cum.length <= 1 ? 0 : (cum.length - 1) * step;
+  // Linear search for bracket; cum is monotonic because speed is clamped positive.
+  let i = 1;
+  while (i < cum.length && cum[i] < target) i++;
+  if (i >= cum.length) i = cum.length - 1;
+  const v0 = cum[i - 1], v1 = cum[i];
+  if (Math.abs(v1 - v0) < 1e-9) return null;
+  const frac = (target - v0) / (v1 - v0);
+  return (i - 1 + frac) * step;
+}
 let toastTimer = null;
 function toast(msg) {
   if (!els.toast) return;
@@ -2154,12 +2183,11 @@ function punchTrackRange(trackId, t0, t1) {
           c.keyframes = shiftKF(c.keyframes, 0, c.duration);
         } else if (end - t1 >= MIN_DUR) {
           // Head is the stub → keep the tail, start it at t1.
-          const cut = t1 - c.start;
-          c.in = +(c.in + cut * clipSpeed(c)).toFixed(4);
+          c.in = +(mediaTimeAt(c, t1)).toFixed(4);
           c.duration = +(end - t1).toFixed(4);
           c.start = +t1.toFixed(4);
           c.transitionIn = undefined;
-          c.keyframes = shiftKF(c.keyframes, cut, c.duration);
+          c.keyframes = shiftKF(c.keyframes, t1 - c.start, c.duration);
         } else {
           // Stubs on both sides → effectively inside the window.
           releaseClipEl(c.id);
@@ -2193,12 +2221,11 @@ function punchTrackRange(trackId, t0, t1) {
     }
     // Tail overhang: starts inside the window → trim In to t1
     if (c.start < t1 - eps && end > t1 + eps) {
-      const cut = t1 - c.start;
-      c.in = +(c.in + cut * clipSpeed(c)).toFixed(4);
+      c.in = +(mediaTimeAt(c, t1)).toFixed(4);
       c.duration = +(end - t1).toFixed(4);
       c.start = +t1.toFixed(4);
       c.transitionIn = undefined;
-      c.keyframes = shiftKF(c.keyframes, cut, c.duration);
+      c.keyframes = shiftKF(c.keyframes, t1 - c.start, c.duration);
     }
   }
 }
@@ -2283,6 +2310,10 @@ function replaceSourceAtPlayhead() {
 function applySourceWindowToClip(c, win) {
   const { inn, duration: mediaWin } = win;
   const sp = clipSpeed(c);
+  if (hasSpeedRamp(c)) {
+    toast("Cannot retarget Source In/Out on a clip with a speed ramp");
+    return;
+  }
   const newDur = Math.max(MIN_DUR, mediaWin / sp);
   const oldEnd = clipEnd(c);
   const delta = newDur - c.duration;
@@ -2880,7 +2911,7 @@ function splitClipAt(c, t) {
   const cut = t - c.start;
   const right = {
     ...c, id: "c_" + uid(), props: { ...c.props },
-    start: t, in: c.in + cut * clipSpeed(c), duration: clipEnd(c) - t,
+    start: t, in: +(mediaTimeAt(c, t)).toFixed(4), duration: clipEnd(c) - t,
     keyframes: shiftKF(c.keyframes, cut, clipEnd(c) - t),
     transitionIn: undefined,
     linkedId: undefined,
