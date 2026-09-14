@@ -6820,11 +6820,7 @@ function createJpegWorkers(n) {
     },
   };
 }
-function jpegFromBitmap(bmp, quality) {
-  const c = document.createElement("canvas");
-  c.width = bmp.width; c.height = bmp.height;
-  c.getContext("2d", { alpha: false }).drawImage(bmp, 0, 0);
-  try { bmp.close(); } catch { }
+function canvasToJpeg(c, quality) {
   return new Promise((res, rej) => {
     try {
       c.toBlob((b) => {
@@ -6833,6 +6829,21 @@ function jpegFromBitmap(bmp, quality) {
       }, "image/jpeg", quality);
     } catch (e) { rej(canvasTaintError(e)); }
   });
+}
+function jpegFromBitmap(bmp, quality) {
+  const c = document.createElement("canvas");
+  c.width = bmp.width; c.height = bmp.height;
+  c.getContext("2d", { alpha: false }).drawImage(bmp, 0, 0);
+  try { bmp.close(); } catch { }
+  return canvasToJpeg(c, quality);
+}
+function encodeExportJpeg(snap, { workers, quality }) {
+  if (snap.kind === "bmp")
+    return workers ? workers.encode(snap.bmp, quality) : jpegFromBitmap(snap.bmp, quality);
+  const c = document.createElement("canvas");
+  c.width = snap.w; c.height = snap.h;
+  c.getContext("2d", { alpha: false }).putImageData(new ImageData(snap.data, snap.w, snap.h), 0, 0);
+  return canvasToJpeg(c, quality);
 }
 /** Preview may already be tainted (cross-origin PiP, old data: SVG). Resetting
  *  width clears the bitmap and the origin-clean flag; export redraws each frame. */
@@ -6929,6 +6940,20 @@ function waitUntilReady(ready, { cancelled, failed, pollMs = 20, attach, detach 
     try { attach?.(tick); } catch { }
     poll = setInterval(tick, pollMs);
     tick();
+  });
+}
+function throwIfExportFailed(signal, getError) {
+  if (renderCancelled || (signal && signal.aborted)) throw new Error("cancelled");
+  const err = getError && getError();
+  if (err) throw err;
+}
+function waitEncodeQueue(encoder, max = 2, { signal, getError } = {}) {
+  return waitUntilReady(() => encoder.encodeQueueSize <= max, {
+    cancelled: () => renderCancelled || !!(signal && signal.aborted),
+    failed: getError,
+    pollMs: 50,
+    attach: (tick) => { encoder.ondequeue = tick; },
+    detach: () => { encoder.ondequeue = null; },
   });
 }
 /* Sequential /frame POSTs, batched. Concurrent bodies can still race on ffmpeg
@@ -7803,6 +7828,9 @@ function downloadExportFile(src) {
   a.download = decodeURIComponent(src.split("/").pop());
   a.click();
 }
+function exportFileName() {
+  return project.name.replace(/[^\w\- ]+/g, "") || "export";
+}
 function endCompositorExport() {
   exportAbort = null;
   closeExportVideoDecoders();
@@ -7819,9 +7847,9 @@ function markExportProgress(f, frames, title) {
   els.exportProgress.style.width = pct.toFixed(1) + "%";
   els.exportTitle.textContent = `${title}… ${pct.toFixed(0)}%`;
 }
-/** Shared Fast / WebCodecs session: overlay, audio, /begin, compose, download.
- *  `run` encodes frames; engines only differ there. */
-async function runCompositorExport({ note, beginBody, uploader, run }) {
+/** Shared Fast / WebCodecs session + frame loop.
+ *  Engines only supply wait / encode-one-frame / finish / cleanup. */
+async function runCompositorExport({ note, beginExtra, uploader, progress, startEngine }) {
   if (state.exporting) return;
   pause();
   state.exporting = true; state.rendering = true; renderCancelled = false;
@@ -7838,13 +7866,18 @@ async function runCompositorExport({ note, beginBody, uploader, run }) {
   let sessId = null;
   let uploadError = null;
   const setError = (err) => { if (!uploadError) uploadError = err; };
+  const getError = () => uploadError;
+  let engine = null;
   try {
     els.exportTitle.textContent = "Mixing audio…";
     const wav = await renderAudioMix(t0, t1);
     if (renderCancelled) throw new Error("cancelled");
     const begin = await fetch("/api/export/begin", {
       method: "POST",
-      body: JSON.stringify(beginBody({ fps, wav })),
+      body: JSON.stringify({
+        fps, name: exportFileName(), hasAudio: !!wav,
+        ...beginExtra?.({ fps, wav }),
+      }),
       signal,
     }).then((r) => r.json());
     if (!begin.id) throw new Error(begin.error || "export begin failed");
@@ -7859,9 +7892,22 @@ async function runCompositorExport({ note, beginBody, uploader, run }) {
     await initExportVideoDecoders();
     beginExportCompose(w, h);
     const up = createExportUploader(sessId, {
-      ...uploader, signal, getError: () => uploadError, setError,
+      ...uploader, signal, getError, setError,
     });
-    await run({ signal, t0, frames, fps, w, h, up, setError, getError: () => uploadError });
+    engine = await startEngine({ signal, fps, w, h, up, setError, getError });
+    for (let f = 0; f < frames; f++) {
+      throwIfExportFailed(signal, getError);
+      const t = t0 + f / fps;
+      const queueBusy = engine.queueBusy();
+      if (htmlSeekNeeded(t) && engine.pauseDeep()) pauseExportVideos();
+      await engine.wait();
+      await composeExportTick(t, f, frames, { queueBusy });
+      await engine.encodeFrame(f);
+      markExportProgress(f, frames, progress);
+    }
+    throwIfExportFailed(signal, getError);
+    await engine.finish?.();
+    await up.done();
     if (uploadError) throw uploadError;
     const end = await fetch("/api/export/end?id=" + sessId, { method: "POST", signal }).then((r) => r.json());
     if (!end.src) throw new Error(end.error || "encode failed");
@@ -7871,24 +7917,19 @@ async function runCompositorExport({ note, beginBody, uploader, run }) {
     const msg = e?.name === "AbortError" ? "cancelled" : String(e.message || e);
     if (msg !== "cancelled") alert("Export failed: " + msg);
   } finally {
+    try { engine?.cleanup?.(); } catch { }
     endCompositorExport();
   }
 }
-function exportFileName() {
-  return project.name.replace(/[^\w\- ]+/g, "") || "export";
-}
 async function fastExport() {
+  const profileId = els.exportProfileSel?.value || effectiveEncodeProfileId();
+  const jpegQ = exportProfileMeta(profileId).jpegQuality ?? 0.95;
   await runCompositorExport({
     note: "Rendering frames → ffmpeg. You can switch tabs; export continues.",
-    beginBody: ({ fps, wav }) => ({
-      fps, name: exportFileName(),
-      profile: els.exportProfileSel?.value || effectiveEncodeProfileId(),
-      hasAudio: !!wav,
-    }),
+    progress: "Rendering",
+    beginExtra: () => ({ profile: profileId }),
     uploader: { batchItems: 8, batchBytes: 512 * 1024 },
-    async run({ signal, t0, frames, fps, up, setError, getError }) {
-      const profileId = els.exportProfileSel?.value || effectiveEncodeProfileId();
-      const jpegQ = exportProfileMeta(profileId).jpegQuality ?? 0.95;
+    async startEngine({ signal, up, setError, getError }) {
       // JPEG off the compositor thread: snapshot copies, encode/upload run ahead
       // under backpressure. Awaiting toBlob every frame was slower than ffmpeg.
       const workers = createJpegWorkers(Math.min(3, Math.max(1, (navigator.hardwareConcurrency || 2) - 1)));
@@ -7899,105 +7940,74 @@ async function fastExport() {
         failed: getError,
         pollMs: 4,
       });
-      try {
-        for (let f = 0; f < frames; f++) {
-          if (renderCancelled || signal.aborted) throw new Error("cancelled");
-          if (getError()) throw getError();
-          const t = t0 + f / fps;
-          const queueBusy = pixelsInflight > 6 || up.inFlight() > 4;
-          if (htmlSeekNeeded(t) && pixelsInflight > 4) pauseExportVideos();
-          await waitPixels(6);
-          await up.waitBackpressure(4);
-          await composeExportTick(t, f, frames, { queueBusy });
+      return {
+        queueBusy: () => pixelsInflight > 6 || up.inFlight() > 4,
+        pauseDeep: () => pixelsInflight > 4,
+        wait: async () => { await waitPixels(6); await up.waitBackpressure(4); },
+        async encodeFrame() {
           const snap = await snapshotExportFrame();
           pixelsInflight++;
-          let jpegP;
-          if (snap.kind === "bmp") {
-            jpegP = workers ? workers.encode(snap.bmp, jpegQ) : jpegFromBitmap(snap.bmp, jpegQ);
-          } else {
-            const c = document.createElement("canvas");
-            c.width = snap.w; c.height = snap.h;
-            c.getContext("2d", { alpha: false }).putImageData(new ImageData(snap.data, snap.w, snap.h), 0, 0);
-            jpegP = new Promise((res, rej) => {
-              try {
-                c.toBlob((b) => {
-                  if (!b) return rej(new Error("frame encode failed"));
-                  b.arrayBuffer().then(res, rej);
-                }, "image/jpeg", jpegQ);
-              } catch (e) { rej(canvasTaintError(e)); }
-            });
-          }
+          const jpegP = encodeExportJpeg(snap, { workers, quality: jpegQ });
           pixelChain = pixelChain.then(async () => {
-            if (renderCancelled || signal.aborted) throw new Error("cancelled");
-            if (getError()) throw getError();
+            throwIfExportFailed(signal, getError);
             const buf = await jpegP;
             if (!buf || !(buf.byteLength || buf.size || buf.length)) throw new Error("frame encode failed");
             up.push(buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf);
           }).catch((err) => { setError(err); throw err; }).finally(() => { pixelsInflight--; });
-          markExportProgress(f, frames, "Rendering");
-        }
-        await pixelChain;
-        if (getError()) throw getError();
-        els.exportTitle.textContent = "Encoding…";
-        await up.done();
-      } finally {
-        try { workers?.terminate(); } catch { }
-      }
+        },
+        async finish() {
+          await pixelChain;
+          throwIfExportFailed(signal, getError);
+          els.exportTitle.textContent = "Encoding…";
+        },
+        cleanup() { try { workers?.terminate(); } catch { } },
+      };
     },
   });
 }
 
 /* ── WebCodecs export (browser H.264 → server mux) ── */
-function waitEncodeQueue(encoder, max = 2, { signal, getError } = {}) {
-  return waitUntilReady(() => encoder.encodeQueueSize <= max, {
-    cancelled: () => renderCancelled || !!(signal && signal.aborted),
-    failed: getError,
-    pollMs: 50,
-    attach: (tick) => { encoder.ondequeue = tick; },
-    detach: () => { encoder.ondequeue = null; },
-  });
-}
 async function webCodecsExport() {
   if (state.exporting) return;
   await detectWebCodecs();
   if (!state.webCodecs) { startExport(); return; }
   await runCompositorExport({
     note: "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues.",
-    beginBody: ({ fps, wav }) => ({
-      fps, name: exportFileName(), mode: "annexb", hasAudio: !!wav,
-    }),
+    progress: "Encoding",
+    beginExtra: () => ({ mode: "annexb" }),
     uploader: { batchItems: 12, batchBytes: 128 * 1024 },
-    async run({ signal, t0, frames, fps, w, h, up, setError, getError }) {
+    async startEngine({ signal, fps, w, h, up, setError, getError }) {
       const keyEvery = Math.max(1, Math.round(fps * 2));
       const codec = webCodecsAvcCodec();
       const bitrate = webCodecsBitrate(w, h, fps);
       const bitrateMode = getSetting("webCodecsBitrateMode") === "constant" ? "constant" : "variable";
-      let encoder = null;
+      let encoder = new VideoEncoder({
+        output: (chunk) => {
+          if (renderCancelled || signal.aborted || getError()) return;
+          const buf = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(buf);
+          up.push(buf);
+        },
+        error: (e) => { setError(e); },
+      });
       try {
-        encoder = new VideoEncoder({
-          output: (chunk) => {
-            if (getError() || renderCancelled || signal.aborted) return;
-            const buf = new Uint8Array(chunk.byteLength);
-            chunk.copyTo(buf);
-            up.push(buf);
-          },
-          error: (e) => { setError(e); },
-        });
         encoder.configure({
           codec, width: w, height: h, bitrate, bitrateMode, framerate: fps,
           avc: { format: "annexb" },
           latencyMode: "quality",
         });
-        for (let f = 0; f < frames; f++) {
-          if (renderCancelled || signal.aborted) throw new Error("cancelled");
-          if (getError()) throw getError();
-          const t = t0 + f / fps;
-          const queueBusy = up.inFlight() > 4 || encoder.encodeQueueSize > 4;
-          if (htmlSeekNeeded(t) && (up.inFlight() > 3 || encoder.encodeQueueSize > 3))
-            pauseExportVideos();
+      } catch (e) {
+        try { encoder.close(); } catch { }
+        throw e;
+      }
+      return {
+        queueBusy: () => up.inFlight() > 4 || encoder.encodeQueueSize > 4,
+        pauseDeep: () => up.inFlight() > 3 || encoder.encodeQueueSize > 3,
+        wait: async () => {
           await up.waitBackpressure(4);
           await waitEncodeQueue(encoder, 4, { signal, getError });
-          await composeExportTick(t, f, frames, { queueBusy });
+        },
+        encodeFrame(f) {
           // Absolute µs timestamps; duration = delta so average rate stays exact
           // (constant Math.round(1e6/fps) drifts, e.g. 33333µs → avg 1000000/33333).
           const ts = Math.round(f * 1e6 / fps);
@@ -8013,16 +8023,15 @@ async function webCodecsExport() {
           } finally {
             frame.close();
           }
-          markExportProgress(f, frames, "Encoding");
-        }
-        els.exportTitle.textContent = "Finishing…";
-        await encoder.flush();
-        await up.done();
-        encoder.close();
-        encoder = null;
-      } finally {
-        try { encoder?.close(); } catch { }
-      }
+        },
+        async finish() {
+          els.exportTitle.textContent = "Finishing…";
+          await encoder.flush();
+          encoder.close();
+          encoder = null;
+        },
+        cleanup() { try { encoder?.close(); } catch { } },
+      };
     },
   });
 }
@@ -8060,7 +8069,7 @@ async function startExport() {
     const blob = new Blob(recChunks, { type: mime.split(";")[0] });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = (project.name.replace(/[^\w\- ]+/g, "") || "export") + "." + ext;
+    a.download = exportFileName() + "." + ext;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 30_000);
   };
