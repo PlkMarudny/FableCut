@@ -7066,9 +7066,12 @@ function playAdvanceVideo(el, mt, eps, rate, { keepPlaying } = {}) {
       notePresented(el, presented);
       cleanup();
       // Presented picture is authoritative — currentTime often runs ahead of
-      // the displayed frame; only hard-seek when the picture is still short.
+      // the displayed frame. Accept when within [mt-slop, mt]; hard-seek when
+      // play-ahead overshoots past mt or the picture is still short.
       const pictureShort = presented < mt - slop * 2;
-      if (pictureShort && Math.abs(el.currentTime - mt) > Math.max(eps * 2, 0.008))
+      const pictureOvershoot = presented > mt;
+      if (pictureOvershoot
+        || (pictureShort && Math.abs(el.currentTime - mt) > Math.max(eps * 2, 0.008)))
         hardSeekVideo(el, mt).then(res, rej);
       else res();
     };

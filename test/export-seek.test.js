@@ -113,3 +113,11 @@ test("playAdvanceVideo: tolerates small clock drift when picture is on target", 
   await play(el, 0.02, 0.01, 1, { keepPlaying: false });
   assert.equal(hardSeeks, 0);
 });
+
+test("playAdvanceVideo: hard-seeks when presented picture overshoots target", async () => {
+  let hardSeeks = 0;
+  const play = loadPlay(() => { hardSeeks++; return Promise.resolve(); }).playAdvanceVideo;
+  const el = mockVideo({ currentTime: 0.06, rvfcMediaTime: 0.041 });
+  await play(el, 0.04, 0.01, 1, { keepPlaying: false });
+  assert.equal(hardSeeks, 1);
+});
