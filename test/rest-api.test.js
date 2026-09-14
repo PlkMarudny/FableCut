@@ -5,6 +5,8 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
@@ -250,6 +252,56 @@ test("POST /api/export/frame accepts concatenated RGBA frames", async (t) => {
   assert.match(out.src, /^\/exports\//);
   const file = path.join(dir, "exports", decodeURIComponent(out.src.split("/").pop()));
   assert.ok(fs.existsSync(file), "batched RGBA frames should mux into a finished file");
+});
+
+test("Fast JPEG image2pipe does not duplicate unique frames", async (t) => {
+  const { dir, base } = await boot(t);
+  const ffmpeg = await (await fetch(base + "/api/export/ffmpeg")).json();
+  if (!ffmpeg.available) return;
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fc-jpeg-"));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  const n = 12;
+  const parts = [];
+  for (let i = 0; i < n; i++) {
+    const jpg = path.join(tmp, `in${i}.jpg`);
+    const hex = (v) => v.toString(16).padStart(2, "0");
+    const c = `${hex(i * 18)}${hex(40)}${hex(255 - i * 12)}`;
+    execFileSync("ffmpeg", [
+      "-y", "-hide_banner", "-loglevel", "error",
+      "-f", "lavfi", "-i", `color=c=#${c}:s=64x64:d=0.04`,
+      "-frames:v", "1", jpg,
+    ]);
+    parts.push(fs.readFileSync(jpg));
+  }
+
+  const begin = await fetch(base + "/api/export/begin", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fps: 30, name: "unique-jpeg", profile: "draft", hasAudio: false }),
+  });
+  const sess = await begin.json();
+  assert.equal(begin.status, 200, sess.error);
+
+  const posted = await fetch(base + "/api/export/frame?id=" + encodeURIComponent(sess.id), {
+    method: "POST", body: Buffer.concat(parts),
+  });
+  assert.equal(posted.status, 200, (await posted.json().catch(() => ({}))).error);
+
+  const end = await fetch(base + "/api/export/end?id=" + encodeURIComponent(sess.id), { method: "POST" });
+  const out = await end.json();
+  assert.equal(end.status, 200, out.error);
+  const file = path.join(dir, "exports", decodeURIComponent(out.src.split("/").pop()));
+
+  const ex = path.join(tmp, "ex");
+  fs.mkdirSync(ex);
+  execFileSync("ffmpeg", [
+    "-y", "-hide_banner", "-loglevel", "error", "-i", file, path.join(ex, "f%02d.png"),
+  ]);
+  const pngs = fs.readdirSync(ex).filter((f) => f.endsWith(".png")).sort();
+  assert.equal(pngs.length, n, "output frame count should match unique JPEGs posted");
+  const hashes = pngs.map((f) => crypto.createHash("md5").update(fs.readFileSync(path.join(ex, f))).digest("hex"));
+  assert.equal(new Set(hashes).size, n, "ffmpeg must not duplicate unique JPEG frames");
 });
 
 test("the app shell and its assets are served", async (t) => {

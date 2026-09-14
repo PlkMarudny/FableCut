@@ -64,6 +64,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that omit `panSchema: 1` will be migrated again on the next open.
 
 ### Fixed
+- Fast (and WebCodecs) export no longer repeats video frames. The compositor was
+  snapshotting before a new decoded picture was presented: `currentTime` and
+  `fastSeek` ran ahead of the displayed frame, play-ahead settled a half-frame
+  early, and JPEG/upload backpressure left the element playing so the next tick
+  had to seek back to a keyframe. Export now waits on
+  `requestVideoFrameCallback` mediaTime, seeks with `currentTime`, and pauses
+  during stalls. ffmpeg’s JPEG pipe was already 1:1 — unique frames stay unique.
+- Export play-ahead is less twitchy mid-shot: JPEG/encoder queue depth no longer
+  forces a full pause+seek on every blip (only when the queue is deep or the
+  compositor tick fell behind), and play-ahead no longer hard-seeks just because
+  `currentTime` ran ahead of the presented picture.
+- `waitForPresentedFrame` no longer treats a presentation timeout (or an rvfc
+  callback without `mediaTime`) as success — `hardSeekVideo` retries up to three
+  times instead of recording `currentTime` as the presented frame.
 - Fast / WebCodecs export no longer throws “tainted canvases may not be exported”
   for animated SVG overlays (rasterized via a same-origin blob instead of a
   `data:` URL) or for other-origin footage that sends CORS (reload with
