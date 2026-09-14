@@ -4784,6 +4784,7 @@ function setMonitorMode(mode) {
   }
   state.monitorMode = mode;
   syncMonitorModeUI();
+  scheduleAudioHoldRefresh();
 }
 function releaseSourceEl() {
   const el = runtime.sourceEl;
