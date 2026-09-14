@@ -6967,22 +6967,28 @@ function presentedClose(el, mt, eps) {
   return el._fcPresentedTime != null && Math.abs(el._fcPresentedTime - mt) <= eps;
 }
 function waitForPresentedFrame(el, timeoutMs = 80) {
-  return new Promise((res) => {
+  return new Promise((res, rej) => {
     if (typeof el.requestVideoFrameCallback !== "function") {
       notePresented(el, el.currentTime);
       res();
       return;
     }
     let done = false;
-    const finish = (meta) => {
+    const finishOk = (meta) => {
+      const mediaTime = meta?.mediaTime;
+      if (!Number.isFinite(mediaTime)) return;
       if (done) return;
       done = true;
       clearTimeout(tm);
-      notePresented(el, meta?.mediaTime ?? el.currentTime);
+      notePresented(el, mediaTime);
       res();
     };
-    const tm = setTimeout(() => finish(), timeoutMs);
-    el.requestVideoFrameCallback((_n, meta) => finish(meta));
+    const tm = setTimeout(() => {
+      if (done) return;
+      done = true;
+      rej(new Error("presented frame timeout"));
+    }, timeoutMs);
+    el.requestVideoFrameCallback((_n, meta) => finishOk(meta));
   });
 }
 function assignVideoTime(el, mt, accurate) {
@@ -6992,15 +6998,22 @@ function assignVideoTime(el, mt, accurate) {
   }
   el.currentTime = mt;
 }
-function hardSeekVideo(el, mt) {
-  return new Promise((res) => {
-    const after = () => waitForPresentedFrame(el).then(res);
+function hardSeekVideo(el, mt, attempt = 0) {
+  const hasRvfc = typeof el.requestVideoFrameCallback === "function";
+  const maxAttempts = 3;
+  return new Promise((res, rej) => {
+    const after = () => waitForPresentedFrame(el)
+      .then(res)
+      .catch((err) => {
+        if (attempt + 1 >= maxAttempts) rej(err);
+        else hardSeekVideo(el, mt, attempt + 1).then(res, rej);
+      });
     if (presentedClose(el, mt, 0.002) && el.readyState >= 2) {
       res();
       return;
     }
-    // First paint: paused on the right clock, never presented via rvfc — trust it.
-    if (el._fcPresentedTime == null && el.paused && el.readyState >= 2
+    // No rvfc — paused on the right clock is the only signal we have.
+    if (!hasRvfc && el._fcPresentedTime == null && el.paused && el.readyState >= 2
         && Math.abs(el.currentTime - mt) < 1e-4) {
       notePresented(el, el.currentTime);
       res();
@@ -7028,7 +7041,7 @@ function hardSeekVideo(el, mt) {
 /** Play forward until a *presented* frame reaches mt. Pause afterwards unless
     keepPlaying — a free-running element overruns while JPEG encode/HTTP stalls. */
 function playAdvanceVideo(el, mt, eps, rate, { keepPlaying } = {}) {
-  return new Promise((res) => {
+  return new Promise((res, rej) => {
     let settled = false;
     let rvfcId = null;
     let poll = null;
@@ -7048,15 +7061,15 @@ function playAdvanceVideo(el, mt, eps, rate, { keepPlaying } = {}) {
     };
     const finish = (presented) => {
       if (settled) return;
+      if (!Number.isFinite(presented)) return;
       settled = true;
       notePresented(el, presented);
       cleanup();
       // Presented picture is authoritative — currentTime often runs ahead of
       // the displayed frame; only hard-seek when the picture is still short.
-      const p = Number.isFinite(presented) ? presented : el._fcPresentedTime;
-      const pictureShort = p == null || p < mt - slop * 2;
+      const pictureShort = presented < mt - slop * 2;
       if (pictureShort && Math.abs(el.currentTime - mt) > Math.max(eps * 2, 0.008))
-        hardSeekVideo(el, mt).then(res);
+        hardSeekVideo(el, mt).then(res, rej);
       else res();
     };
     if (presentedClose(el, mt, slop) && el.readyState >= 2) {
@@ -7069,7 +7082,7 @@ function playAdvanceVideo(el, mt, eps, rate, { keepPlaying } = {}) {
       if (settled) return;
       settled = true;
       cleanup();
-      hardSeekVideo(el, mt).then(res);
+      hardSeekVideo(el, mt).then(res, rej);
     }, Math.min(3000, 400 + (remain * 1000) / Math.max(0.1, rate) * 2.5));
     const check = (mediaTime) => {
       // Presented frame only — currentTime finishes half a frame early and
@@ -7096,7 +7109,7 @@ function playAdvanceVideo(el, mt, eps, rate, { keepPlaying } = {}) {
         if (settled) return;
         settled = true;
         cleanup();
-        hardSeekVideo(el, mt).then(res);
+        hardSeekVideo(el, mt).then(res, rej);
       });
     }
   });

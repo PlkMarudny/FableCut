@@ -75,6 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forces a full pause+seek on every blip (only when the queue is deep or the
   compositor tick fell behind), and play-ahead no longer hard-seeks just because
   `currentTime` ran ahead of the presented picture.
+- `waitForPresentedFrame` no longer treats a presentation timeout (or an rvfc
+  callback without `mediaTime`) as success — `hardSeekVideo` retries up to three
+  times instead of recording `currentTime` as the presented frame.
 - Fast / WebCodecs export no longer throws “tainted canvases may not be exported”
   for animated SVG overlays (rasterized via a same-origin blob instead of a
   `data:` URL) or for other-origin footage that sends CORS (reload with
