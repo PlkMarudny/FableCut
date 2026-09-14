@@ -7772,14 +7772,56 @@ async function prepareMaskAssets(t) {
     if (el) { try { await requestMask(c.id, el, true); } catch { } }
   }
 }
+function htmlSeekNeeded(t) {
+  for (const c of project.clips) {
+    if (c.kind !== "video" || !isTrackEnabled(c.track)) continue;
+    if (runtime.exportDecoders.has(c.id)) continue;
+    if (activeAt(c, t)) return true;
+    if (c.start > t && c.start <= t + EXPORT_PREFETCH_S) return true;
+    const el = getClipEl(c);
+    if (el && !el.paused) return true;
+  }
+  return false;
+}
 async function prepareExportSources(t, seekOpts) {
-  const [needHtml] = await Promise.all([
-    decodeVideosTo(t), seekVideosTo(t, seekOpts), prepareSvgAssets(t),
-  ]);
+  const html = htmlSeekNeeded(t);
+  const jobs = [decodeVideosTo(t), prepareSvgAssets(t)];
+  if (html) jobs.push(seekVideosTo(t, seekOpts));
+  const [needHtml] = await Promise.all(jobs);
   if (needHtml) await seekVideosTo(t, seekOpts);
   await prepareMaskAssets(t);
 }
-async function fastExport() {
+async function composeExportTick(t, f, frames, seekOpts) {
+  state.time = t;
+  await prepareExportSources(t, seekOpts);
+  drawFrame(t);
+  presentComposeToPreview(f === frames - 1);
+}
+function downloadExportFile(src) {
+  const a = document.createElement("a");
+  a.href = src;
+  a.download = decodeURIComponent(src.split("/").pop());
+  a.click();
+}
+function endCompositorExport() {
+  exportAbort = null;
+  closeExportVideoDecoders();
+  endExportCompose();
+  restoreExportVideoState();
+  endExportWindow();
+  state.exporting = false; state.rendering = false;
+  els.exportOverlay.classList.add("hidden");
+  els.exportNote.textContent = "Rendering your sequence in real time. Keep this tab focused.";
+  if (runtime.pendingSync) syncFromServer();
+}
+function markExportProgress(f, frames, title) {
+  const pct = ((f + 1) / frames) * 100;
+  els.exportProgress.style.width = pct.toFixed(1) + "%";
+  els.exportTitle.textContent = `${title}… ${pct.toFixed(0)}%`;
+}
+/** Shared Fast / WebCodecs session: overlay, audio, /begin, compose, download.
+ *  `run` encodes frames; engines only differ there. */
+async function runCompositorExport({ note, beginBody, uploader, run }) {
   if (state.exporting) return;
   pause();
   state.exporting = true; state.rendering = true; renderCancelled = false;
@@ -7787,10 +7829,12 @@ async function fastExport() {
   const signal = exportAbort.signal;
   els.exportOverlay.classList.remove("hidden");
   els.exportProgress.style.width = "0%";
-  els.exportNote.textContent = "Rendering frames → ffmpeg. You can switch tabs; export continues.";
+  els.exportNote.textContent = note;
   restoreExportVideoState();
   const { start: t0, end: t1, frames } = beginExportWindow();
   const fps = projectFps();
+  const w = Math.max(2, project.width | 0 || 1280);
+  const h = Math.max(2, project.height | 0 || 720);
   let sessId = null;
   let uploadError = null;
   const setError = (err) => { if (!uploadError) uploadError = err; };
@@ -7798,16 +7842,9 @@ async function fastExport() {
     els.exportTitle.textContent = "Mixing audio…";
     const wav = await renderAudioMix(t0, t1);
     if (renderCancelled) throw new Error("cancelled");
-    const profileId = els.exportProfileSel?.value || effectiveEncodeProfileId();
-    const jpegQ = exportProfileMeta(profileId).jpegQuality ?? 0.95;
     const begin = await fetch("/api/export/begin", {
       method: "POST",
-      body: JSON.stringify({
-        fps,
-        name: project.name.replace(/[^\w\- ]+/g, "") || "export",
-        profile: profileId,
-        hasAudio: !!wav,
-      }),
+      body: JSON.stringify(beginBody({ fps, wav })),
       signal,
     }).then((r) => r.json());
     if (!begin.id) throw new Error(begin.error || "export begin failed");
@@ -7820,96 +7857,94 @@ async function fastExport() {
     resetExportCanvases();
     await armExportCors();
     await initExportVideoDecoders();
-    const w = Math.max(2, project.width | 0 || 1280);
-    const h = Math.max(2, project.height | 0 || 720);
     beginExportCompose(w, h);
-    // JPEG off the compositor thread: snapshot is sync, encode/upload run ahead
-    // under backpressure. Awaiting toBlob every frame was slower than ffmpeg.
     const up = createExportUploader(sessId, {
-      batchItems: 8, batchBytes: 512 * 1024, signal,
-      getError: () => uploadError, setError,
+      ...uploader, signal, getError: () => uploadError, setError,
     });
-    const workers = createJpegWorkers(Math.min(3, Math.max(1, (navigator.hardwareConcurrency || 2) - 1)));
-    let pixelChain = Promise.resolve();
-    let pixelsInflight = 0;
-    const waitPixels = (max) => waitUntilReady(() => pixelsInflight <= max, {
-      cancelled: () => renderCancelled || signal.aborted,
-      failed: () => uploadError,
-      pollMs: 4,
-    });
-    try {
-    for (let f = 0; f < frames; f++) {
-      if (renderCancelled || signal.aborted) throw new Error("cancelled");
-      if (uploadError) throw uploadError;
-      // Let workers run ahead; only pause the decoder when the queue is deep
-      // enough that play-ahead would overrun during the wait (not on every blip).
-      const queueBusy = pixelsInflight > 6 || up.inFlight() > 4;
-      if (pixelsInflight > 4) pauseExportVideos();
-      await waitPixels(6);
-      await up.waitBackpressure(4);
-      const t = t0 + f / fps;
-      state.time = t;
-      await prepareExportSources(t, { queueBusy });
-      drawFrame(t);
-      presentComposeToPreview(f === frames - 1);
-      const snap = await snapshotExportFrame();
-      pixelsInflight++;
-      let jpegP;
-      if (snap.kind === "bmp") {
-        jpegP = workers ? workers.encode(snap.bmp, jpegQ) : jpegFromBitmap(snap.bmp, jpegQ);
-      } else {
-        const c = document.createElement("canvas");
-        c.width = snap.w; c.height = snap.h;
-        c.getContext("2d", { alpha: false }).putImageData(new ImageData(snap.data, snap.w, snap.h), 0, 0);
-        jpegP = new Promise((res, rej) => {
-          try {
-            c.toBlob((b) => {
-              if (!b) return rej(new Error("frame encode failed"));
-              b.arrayBuffer().then(res, rej);
-            }, "image/jpeg", jpegQ);
-          } catch (e) { rej(canvasTaintError(e)); }
-        });
-      }
-      pixelChain = pixelChain.then(async () => {
-        if (renderCancelled || signal.aborted) throw new Error("cancelled");
-        if (uploadError) throw uploadError;
-        const buf = await jpegP;
-        if (!buf || !(buf.byteLength || buf.size || buf.length)) throw new Error("frame encode failed");
-        up.push(buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf);
-      }).catch((err) => { setError(err); throw err; }).finally(() => { pixelsInflight--; });
-      const pct = ((f + 1) / frames) * 100;
-      els.exportProgress.style.width = pct.toFixed(1) + "%";
-      els.exportTitle.textContent = `Rendering… ${pct.toFixed(0)}%`;
-    }
-    await pixelChain;
+    await run({ signal, t0, frames, fps, w, h, up, setError, getError: () => uploadError });
     if (uploadError) throw uploadError;
-    els.exportTitle.textContent = "Encoding…";
-    await up.done();
-    if (uploadError) throw uploadError;
-    } finally {
-      try { workers?.terminate(); } catch { }
-    }
     const end = await fetch("/api/export/end?id=" + sessId, { method: "POST", signal }).then((r) => r.json());
     if (!end.src) throw new Error(end.error || "encode failed");
-    const a = document.createElement("a");
-    a.href = end.src;
-    a.download = decodeURIComponent(end.src.split("/").pop());
-    a.click();
+    downloadExportFile(end.src);
   } catch (e) {
     if (sessId) fetch("/api/export/end?id=" + sessId + "&discard=1", { method: "POST" }).catch(() => { });
     const msg = e?.name === "AbortError" ? "cancelled" : String(e.message || e);
     if (msg !== "cancelled") alert("Export failed: " + msg);
   } finally {
-    exportAbort = null;
-    closeExportVideoDecoders();
-    endExportCompose();
-    restoreExportVideoState();
-    endExportWindow();
-    state.exporting = false; state.rendering = false;
-    els.exportOverlay.classList.add("hidden");
-    els.exportNote.textContent = "Rendering your sequence in real time. Keep this tab focused.";
-    if (runtime.pendingSync) syncFromServer();
+    endCompositorExport();
   }
+}
+function exportFileName() {
+  return project.name.replace(/[^\w\- ]+/g, "") || "export";
+}
+async function fastExport() {
+  await runCompositorExport({
+    note: "Rendering frames → ffmpeg. You can switch tabs; export continues.",
+    beginBody: ({ fps, wav }) => ({
+      fps, name: exportFileName(),
+      profile: els.exportProfileSel?.value || effectiveEncodeProfileId(),
+      hasAudio: !!wav,
+    }),
+    uploader: { batchItems: 8, batchBytes: 512 * 1024 },
+    async run({ signal, t0, frames, fps, up, setError, getError }) {
+      const profileId = els.exportProfileSel?.value || effectiveEncodeProfileId();
+      const jpegQ = exportProfileMeta(profileId).jpegQuality ?? 0.95;
+      // JPEG off the compositor thread: snapshot copies, encode/upload run ahead
+      // under backpressure. Awaiting toBlob every frame was slower than ffmpeg.
+      const workers = createJpegWorkers(Math.min(3, Math.max(1, (navigator.hardwareConcurrency || 2) - 1)));
+      let pixelChain = Promise.resolve();
+      let pixelsInflight = 0;
+      const waitPixels = (max) => waitUntilReady(() => pixelsInflight <= max, {
+        cancelled: () => renderCancelled || signal.aborted,
+        failed: getError,
+        pollMs: 4,
+      });
+      try {
+        for (let f = 0; f < frames; f++) {
+          if (renderCancelled || signal.aborted) throw new Error("cancelled");
+          if (getError()) throw getError();
+          const t = t0 + f / fps;
+          const queueBusy = pixelsInflight > 6 || up.inFlight() > 4;
+          if (htmlSeekNeeded(t) && pixelsInflight > 4) pauseExportVideos();
+          await waitPixels(6);
+          await up.waitBackpressure(4);
+          await composeExportTick(t, f, frames, { queueBusy });
+          const snap = await snapshotExportFrame();
+          pixelsInflight++;
+          let jpegP;
+          if (snap.kind === "bmp") {
+            jpegP = workers ? workers.encode(snap.bmp, jpegQ) : jpegFromBitmap(snap.bmp, jpegQ);
+          } else {
+            const c = document.createElement("canvas");
+            c.width = snap.w; c.height = snap.h;
+            c.getContext("2d", { alpha: false }).putImageData(new ImageData(snap.data, snap.w, snap.h), 0, 0);
+            jpegP = new Promise((res, rej) => {
+              try {
+                c.toBlob((b) => {
+                  if (!b) return rej(new Error("frame encode failed"));
+                  b.arrayBuffer().then(res, rej);
+                }, "image/jpeg", jpegQ);
+              } catch (e) { rej(canvasTaintError(e)); }
+            });
+          }
+          pixelChain = pixelChain.then(async () => {
+            if (renderCancelled || signal.aborted) throw new Error("cancelled");
+            if (getError()) throw getError();
+            const buf = await jpegP;
+            if (!buf || !(buf.byteLength || buf.size || buf.length)) throw new Error("frame encode failed");
+            up.push(buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf);
+          }).catch((err) => { setError(err); throw err; }).finally(() => { pixelsInflight--; });
+          markExportProgress(f, frames, "Rendering");
+        }
+        await pixelChain;
+        if (getError()) throw getError();
+        els.exportTitle.textContent = "Encoding…";
+        await up.done();
+      } finally {
+        try { workers?.terminate(); } catch { }
+      }
+    },
+  });
 }
 
 /* ── WebCodecs export (browser H.264 → server mux) ── */
@@ -7926,137 +7961,70 @@ async function webCodecsExport() {
   if (state.exporting) return;
   await detectWebCodecs();
   if (!state.webCodecs) { startExport(); return; }
-  pause();
-  state.exporting = true; state.rendering = true; renderCancelled = false;
-  exportAbort = new AbortController();
-  const signal = exportAbort.signal;
-  els.exportOverlay.classList.remove("hidden");
-  els.exportProgress.style.width = "0%";
-  els.exportNote.textContent = "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues.";
-  restoreExportVideoState();
-  const { start: t0, end: t1, frames } = beginExportWindow();
-  const fps = projectFps();
-  const keyEvery = Math.max(1, Math.round(fps * 2));
-  let sessId = null;
-  let encoder = null;
-  let uploadError = null;
-  const setError = (err) => { if (!uploadError) uploadError = err; };
-  let up = null;
-  try {
-    els.exportTitle.textContent = "Mixing audio…";
-    const wav = await renderAudioMix(t0, t1);
-    if (renderCancelled) throw new Error("cancelled");
-
-    const begin = await fetch("/api/export/begin", {
-      method: "POST",
-      body: JSON.stringify({
-        fps,
-        name: project.name.replace(/[^\w\- ]+/g, "") || "export",
-        mode: "annexb",
-        hasAudio: !!wav,
-      }),
-      signal,
-    }).then((r) => r.json());
-    if (!begin.id) throw new Error(begin.error || "export begin failed");
-    sessId = begin.id;
-    if (wav) {
-      const r = await fetch("/api/export/audio?id=" + sessId, { method: "POST", body: wav, signal });
-      if (!r.ok) throw new Error("audio upload failed");
-    }
-    up = createExportUploader(sessId, {
-      batchItems: 12, batchBytes: 128 * 1024, signal,
-      getError: () => uploadError, setError,
-    });
-
-    // Always encode at project/frame resolution (not display CSS size).
-    const w = Math.max(2, project.width | 0 || 1280);
-    const h = Math.max(2, project.height | 0 || 720);
-    const codec = webCodecsAvcCodec();
-    const bitrate = webCodecsBitrate(w, h, fps);
-    const bitrateMode = getSetting("webCodecsBitrateMode") === "constant" ? "constant" : "variable";
-    encoder = new VideoEncoder({
-      output: (chunk) => {
-        if (uploadError || renderCancelled || signal.aborted) return;
-        const buf = new Uint8Array(chunk.byteLength);
-        chunk.copyTo(buf);
-        up.push(buf);
-      },
-      error: (e) => { uploadError = e; },
-    });
-    encoder.configure({
-      codec, width: w, height: h, bitrate, bitrateMode, framerate: fps,
-      avc: { format: "annexb" },
-      latencyMode: "quality",
-    });
-    try { await document.fonts.ready; } catch { }
-    resetExportCanvases();
-    await armExportCors();
-    await initExportVideoDecoders();
-    beginExportCompose(w, h);
-
-    for (let f = 0; f < frames; f++) {
-      if (renderCancelled || signal.aborted) throw new Error("cancelled");
-      if (uploadError) throw uploadError;
-      const queueBusy = up.inFlight() > 4 || encoder.encodeQueueSize > 4;
-      if (up.inFlight() > 3 || encoder.encodeQueueSize > 3) pauseExportVideos();
-      await up.waitBackpressure(4);
-      await waitEncodeQueue(encoder, 4, { signal, getError: () => uploadError });
-      const t = t0 + f / fps;
-      state.time = t;
-      await prepareExportSources(t, { queueBusy });
-      drawFrame(t);
-      presentComposeToPreview(f === frames - 1);
-      // Absolute µs timestamps; duration = delta so average rate stays exact
-      // (constant Math.round(1e6/fps) drifts, e.g. 33333µs → avg 1000000/33333).
-      const ts = Math.round(f * 1e6 / fps);
-      let frame;
+  await runCompositorExport({
+    note: "Encoding with WebCodecs → ffmpeg mux. You can switch tabs; export continues.",
+    beginBody: ({ fps, wav }) => ({
+      fps, name: exportFileName(), mode: "annexb", hasAudio: !!wav,
+    }),
+    uploader: { batchItems: 12, batchBytes: 128 * 1024 },
+    async run({ signal, t0, frames, fps, w, h, up, setError, getError }) {
+      const keyEvery = Math.max(1, Math.round(fps * 2));
+      const codec = webCodecsAvcCodec();
+      const bitrate = webCodecsBitrate(w, h, fps);
+      const bitrateMode = getSetting("webCodecsBitrateMode") === "constant" ? "constant" : "variable";
+      let encoder = null;
       try {
-        frame = new VideoFrame(composeCanvas, {
-          timestamp: ts,
-          duration: Math.round((f + 1) * 1e6 / fps) - ts,
+        encoder = new VideoEncoder({
+          output: (chunk) => {
+            if (getError() || renderCancelled || signal.aborted) return;
+            const buf = new Uint8Array(chunk.byteLength);
+            chunk.copyTo(buf);
+            up.push(buf);
+          },
+          error: (e) => { setError(e); },
         });
-      } catch (e) {
-        if (e && (e.name === "SecurityError" || /taint/i.test(String(e.message || e))))
-          throw new Error("Tainted canvas — a clip is from another origin (not /media or /library) without CORS. Import the file into the project, or serve it with Access-Control-Allow-Origin.");
-        throw e;
-      }
-      try {
-        encoder.encode(frame, { keyFrame: f === 0 || f % keyEvery === 0 });
+        encoder.configure({
+          codec, width: w, height: h, bitrate, bitrateMode, framerate: fps,
+          avc: { format: "annexb" },
+          latencyMode: "quality",
+        });
+        for (let f = 0; f < frames; f++) {
+          if (renderCancelled || signal.aborted) throw new Error("cancelled");
+          if (getError()) throw getError();
+          const t = t0 + f / fps;
+          const queueBusy = up.inFlight() > 4 || encoder.encodeQueueSize > 4;
+          if (htmlSeekNeeded(t) && (up.inFlight() > 3 || encoder.encodeQueueSize > 3))
+            pauseExportVideos();
+          await up.waitBackpressure(4);
+          await waitEncodeQueue(encoder, 4, { signal, getError });
+          await composeExportTick(t, f, frames, { queueBusy });
+          // Absolute µs timestamps; duration = delta so average rate stays exact
+          // (constant Math.round(1e6/fps) drifts, e.g. 33333µs → avg 1000000/33333).
+          const ts = Math.round(f * 1e6 / fps);
+          let frame;
+          try {
+            frame = new VideoFrame(composeCanvas, {
+              timestamp: ts,
+              duration: Math.round((f + 1) * 1e6 / fps) - ts,
+            });
+          } catch (e) { throw canvasTaintError(e); }
+          try {
+            encoder.encode(frame, { keyFrame: f === 0 || f % keyEvery === 0 });
+          } finally {
+            frame.close();
+          }
+          markExportProgress(f, frames, "Encoding");
+        }
+        els.exportTitle.textContent = "Finishing…";
+        await encoder.flush();
+        await up.done();
+        encoder.close();
+        encoder = null;
       } finally {
-        frame.close();
+        try { encoder?.close(); } catch { }
       }
-      const pct = ((f + 1) / frames) * 100;
-      els.exportProgress.style.width = pct.toFixed(1) + "%";
-      els.exportTitle.textContent = `Encoding… ${pct.toFixed(0)}%`;
-    }
-    els.exportTitle.textContent = "Finishing…";
-    await encoder.flush();
-    await up.done();
-    if (uploadError) throw uploadError;
-    encoder.close();
-    encoder = null;
-    const end = await fetch("/api/export/end?id=" + sessId, { method: "POST", signal }).then((r) => r.json());
-    if (!end.src) throw new Error(end.error || "mux failed");
-    const a = document.createElement("a");
-    a.href = end.src;
-    a.download = decodeURIComponent(end.src.split("/").pop());
-    a.click();
-  } catch (e) {
-    try { encoder?.close(); } catch { }
-    if (sessId) fetch("/api/export/end?id=" + sessId + "&discard=1", { method: "POST" }).catch(() => { });
-    const msg = e?.name === "AbortError" ? "cancelled" : String(e.message || e);
-    if (msg !== "cancelled") alert("Export failed: " + msg);
-  } finally {
-    exportAbort = null;
-    closeExportVideoDecoders();
-    endExportCompose();
-    restoreExportVideoState();
-    endExportWindow();
-    state.exporting = false; state.rendering = false;
-    els.exportOverlay.classList.add("hidden");
-    els.exportNote.textContent = "Rendering your sequence in real time. Keep this tab focused.";
-    if (runtime.pendingSync) syncFromServer();
-  }
+    },
+  });
 }
 
 /* ── Realtime export (MediaRecorder offline / unsupported fallback) ── */
