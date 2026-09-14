@@ -3825,6 +3825,58 @@ function keyframeTimelineTimes(clips) {
   out.sort((a, b) => a - b);
   return out;
 }
+/** Clip In/Out times used as edit points. Selection wins; otherwise enabled tracks. */
+function editPointTimes() {
+  const clips = state.selIds.size
+    ? selectedClips()
+    : project.clips.filter((c) => isTrackEnabled(c.track));
+  const seen = new Set();
+  const out = [];
+  for (const c of clips) {
+    for (const t of [c.start, clipEnd(c)]) {
+      const v = +(+t).toFixed(4);
+      if (!Number.isFinite(v) || seen.has(v)) continue;
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  out.sort((a, b) => a - b);
+  return out;
+}
+/** Source In/Out (and 0 / duration) as edit points while the Source monitor is active. */
+function sourceEditPointTimes() {
+  const dur = sourceDur();
+  const seen = new Set();
+  const out = [];
+  for (const t of [0, state.source.in, state.source.out, dur]) {
+    if (t == null || !Number.isFinite(+t)) continue;
+    const v = +clamp(+t, 0, Math.max(dur, 0)).toFixed(4);
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  out.sort((a, b) => a - b);
+  return out;
+}
+/** Premiere-style ↑ / ↓: previous / next edit. Selected clip → its In then Out. */
+function goToEditPoint(dir) {
+  const src = isSourceMode();
+  const times = src ? sourceEditPointTimes() : editPointTimes();
+  if (!times.length) { toast(src ? "No Source marks" : "No cuts"); return; }
+  const eps = kfTimeEps();
+  const now = src ? state.source.time : state.time;
+  if (dir > 0) {
+    const next = times.find((t) => t > now + eps);
+    if (next == null) { toast(src ? "Already at Source end" : "Already at last cut"); return; }
+    if (src) setSourceTime(next); else { setTime(next); ensurePlayheadVisible(); }
+  } else {
+    let prev = null;
+    for (const t of times) if (t < now - eps) prev = t;
+    if (prev == null) { toast(src ? "Already at Source start" : "Already at first cut"); return; }
+    if (src) setSourceTime(prev); else { setTime(prev); ensurePlayheadVisible(); }
+  }
+}
+
 /* Jump playhead to previous (−1) or next (+1) keyframe.
    Prefers selected clips; falls back to clips under the playhead.
    Keyboard counterpart to Avid’s Ctrl/Cmd-click snap-to-audio-keyframe. */
@@ -9278,6 +9330,10 @@ window.addEventListener("keydown", (e) => {
   else if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "ArrowLeft" || k === "ArrowRight")) {
     e.preventDefault();
     goToKeyframe(k === "ArrowRight" ? 1 : -1);
+  }
+  else if ((k === "ArrowUp" || k === "ArrowDown") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    goToEditPoint(k === "ArrowDown" ? 1 : -1);
   }
   else if (k === "ArrowLeft") {
     const dt = e.shiftKey ? 1 : 1 / projectFps();

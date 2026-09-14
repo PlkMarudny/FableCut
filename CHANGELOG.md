@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Jump to cut** — `↑` / `↓` move the playhead to the previous / next clip In
+  or Out (selected clip first; otherwise enabled tracks). Source monitor: In /
+  Out marks. Does not replace ← / → frame step, Home / End, or Ctrl/Cmd+←/→
+  keyframe jump.
 - Program Monitor transport: playhead as `current / sequence duration` on the
   left; when IN/OUT are set, a right-side stack of IN, marked duration, OUT.
 - Ctrl/Cmd-click an inspector **slider** to reset that property to its default

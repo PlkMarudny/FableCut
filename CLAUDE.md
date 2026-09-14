@@ -403,6 +403,10 @@ glitch (RGB split + jitter) · pop (overshoot scale — stickers/captions).
   `transitionIn: {type:"fade"}`.
 - A cut/split is just two clips: first with `duration: t`, second with
   `start: +t, in: +t×speed, duration: rest`.
+- **Jump to cut** — `↑` / `↓` move the playhead to the previous / next clip
+  In or Out. Selection first (that clip’s start then end); no selection walks
+  enabled-track cuts. Source monitor: 0 / In / Out / duration. Does not change
+  `project.json`.
 - `bgRemove` and `chromaKey` can combine with all filters; heavy pixel work is
   automatic (only runs when those props are set).
 
@@ -518,6 +522,10 @@ gap). Sync lock applies: linked partners on disabled tracks move with the
 ripple. An unselected clip that merely *overlaps* the deleted range stays put —
 its overlap ends up bridging the shifted-in clip, so a crossfade across the cut
 survives.
+
+**Jump to cut**: select a clip, then ↑ / ↓ — playhead snaps to its In, then
+Out (further taps walk neighboring cuts). No selection → previous / next cut
+on enabled tracks. Source monitor: same keys jump among 0 / In / Out / duration.
 
 **Title card**: `{kind:"text", mediaId:null, track:"V2", props:{text,fontSize,color}}`.
 
