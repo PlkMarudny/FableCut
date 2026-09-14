@@ -4777,6 +4777,10 @@ function releaseSourceEl() {
   const el = runtime.sourceEl;
   if (el) {
     try { el.pause(); el.removeAttribute("src"); el.load(); } catch { }
+    if (el._fcNodes) {
+      for (const n of el._fcNodes) { try { n.disconnect(); } catch { } }
+    }
+    if (el._fcSrc) { try { el._fcSrc.disconnect(); } catch { } }
   }
   runtime.sourceEl = null;
   runtime.sourceHold = null;
@@ -4795,7 +4799,6 @@ function ensureSourceEl(m) {
     el = document.createElement(m.kind === "audio" ? "audio" : "video");
     el.preload = "auto";
     el.playsInline = true;
-    // Element-volume path only — never createMediaElementSource (timeline owns Web Audio).
     el.volume = 1;
     // After each seek settles, apply any newer scrub target (coalesced seeks).
     el.addEventListener("seeked", () => {
@@ -4926,6 +4929,51 @@ function pauseSource() {
   syncPlayButton();
   updateSourceScrub();
 }
+function hookSourceAudio(m, el, audio) {
+  if (el._fcSrc) return;
+  try {
+    const ctx = audio.ctx;
+    const src = ctx.createMediaElementSource(el);
+    el._fcSrc = src;
+    el._fcNodes = [];
+    
+    if (m.kind === "audio") {
+      const trackId = sourceEditTracks(m)[0];
+      const bus = audio.trackBus[trackId] || audio.master;
+      src.connect(bus);
+    } else if (m.kind === "video") {
+      const nCh = Math.max(m.channels || 0, 2);
+      try { src.channelInterpretation = "discrete"; } catch { }
+      const splitter = ctx.createChannelSplitter(nCh);
+      src.connect(splitter);
+      el._fcNodes.push(splitter);
+      
+      const stemTracks = sourceEditTracks(m).slice(1);
+      for (let ch = 0; ch < nCh; ch++) {
+        const trackId = ch < stemTracks.length ? stemTracks[ch] : `A${ch + 1}`;
+        const bus = audio.trackBus[trackId];
+        if (!bus) continue;
+        
+        const g = ctx.createGain();
+        splitter.connect(g, ch);
+        
+        const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+        if (panner) {
+          panner.pan.value = defaultPanForChannel(ch);
+          g.connect(panner);
+          panner.connect(bus);
+          el._fcNodes.push(g, panner);
+        } else {
+          g.connect(bus);
+          el._fcNodes.push(g);
+        }
+      }
+    }
+  } catch (e) {
+    el.volume = 1;
+  }
+}
+
 function playSource() {
   if (!state.source.mediaId) {
     toast("Double-click a clip in Project or the timeline to load Source");
@@ -4937,7 +4985,10 @@ function playSource() {
   const end = state.source.out != null ? Math.min(state.source.out, dur) : dur;
   const start = state.source.in != null ? state.source.in : 0;
   if (state.source.time >= end - 0.01) setSourceTime(start);
-  ensureSourceEl(sourceMedia());
+  const el = ensureSourceEl(sourceMedia());
+  const audio = ensureAudio();
+  if (el) hookSourceAudio(sourceMedia(), el, audio);
+  audio.ctx.resume();
   state.source.playing = true;
   syncPlayButton();
 }
@@ -5874,7 +5925,7 @@ function updateMeterChannel(id, target, dt, attack, release, now) {
   paintMeterSegs(segs, lit, hold);
 }
 function updateMeterUI(dt) {
-  const metering = (state.playing || state.audioHold) && runtime.audio?.meterReady;
+  const metering = (state.playing || state.source.playing || state.audioHold) && runtime.audio?.meterReady;
   if (metering) sampleMasterAnalysers();
   const mode = meterState.mode;
   // Peak: snappy; LUFS already smoothed in-worklet (400 ms); RMS: classic VU feel
