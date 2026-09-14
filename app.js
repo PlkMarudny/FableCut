@@ -4851,6 +4851,7 @@ function setSourceTime(t) {
     seekSourceEl(state.source.time);
   }
   updateSourceScrub();
+  scheduleAudioHoldRefresh();
 }
 function updateSourceScrub() {
   if (!els.sourceScrubHead) return;
@@ -5977,8 +5978,10 @@ function disposeAudioHoldNode(n) {
   try { n.src.stop(); } catch { }
   try { n.src.disconnect(); } catch { }
   try { if (n.src) n.src.buffer = null; } catch { }
-  try { n.gain.disconnect(); } catch { }
+  if (n.gain) { try { n.gain.disconnect(); } catch { } }
+  if (n.gains) { for (const g of n.gains) try { g.disconnect(); } catch { } }
   if (n.panner) { try { n.panner.disconnect(); } catch { } }
+  if (n.panners) { for (const p of n.panners) try { p.disconnect(); } catch { } }
   if (n.split) { try { n.split.disconnect(); } catch { } }
 }
 function stopAudioHoldNodes() {
@@ -5988,7 +5991,7 @@ function stopAudioHoldNodes() {
   audioHoldNodes = [];
 }
 function scheduleAudioHoldRefresh() {
-  if (!state.audioHold || state.playing) return;
+  if (!state.audioHold || state.playing || state.source.playing) return;
   if (audioHoldRaf) return;
   audioHoldRaf = requestAnimationFrame(() => {
     audioHoldRaf = 0;
@@ -6007,18 +6010,79 @@ function sliceAudioFrame(ctx, buf, startSec, durSec) {
   return out;
 }
 function refreshAudioHold() {
-  if (!state.audioHold || state.playing || state.exporting || state.rendering) {
+  if (!state.audioHold || state.playing || state.source.playing || state.exporting || state.rendering) {
     stopAudioHoldNodes();
     return;
   }
   const audio = ensureAudio();
   try { audio.ctx.resume(); } catch { }
-  const t = state.time;
+  const t = isSourceMode() ? state.source.time : state.time;
   const frameDur = 1 / projectFps();
   const gen = ++audioHoldGen;
   // Stop previous voices before starting the new slice
   for (const n of audioHoldNodes) disposeAudioHoldNode(n);
   audioHoldNodes = [];
+
+  if (isSourceMode()) {
+    if (runtime.sourceEl && !runtime.sourceEl.paused) runtime.sourceEl.pause();
+    const m = sourceMedia();
+    if (!m || (m.kind !== "audio" && m.kind !== "video")) return;
+    getAudioBuffer(m).then((buf) => {
+      if (gen !== audioHoldGen || !state.audioHold || state.source.playing) return;
+      if (!(buf.duration > 0) || t >= buf.duration) return;
+      const slice = sliceAudioFrame(audio.ctx, buf, t, frameDur);
+      const src = audio.ctx.createBufferSource();
+      src.buffer = slice;
+      src.loop = true;
+      
+      if (m.kind === "audio") {
+        const trackId = sourceEditTracks(m)[0];
+        const bus = audio.trackBus[trackId] || audio.master;
+        src.connect(bus);
+        const node = { src };
+        try { src.start(0); } catch { disposeAudioHoldNode(node); return; }
+        if (gen !== audioHoldGen || !state.audioHold || state.source.playing) {
+          disposeAudioHoldNode(node);
+          return;
+        }
+        audioHoldNodes.push(node);
+      } else if (m.kind === "video") {
+        const nCh = Math.max(buf.numberOfChannels, 2);
+        const splitter = audio.ctx.createChannelSplitter(nCh);
+        src.connect(splitter);
+        const node = { src, split: splitter, gains: [], panners: [] };
+        
+        const stemTracks = sourceEditTracks(m).slice(1);
+        for (let ch = 0; ch < nCh; ch++) {
+          const trackId = ch < stemTracks.length ? stemTracks[ch] : `A${ch + 1}`;
+          const bus = audio.trackBus[trackId];
+          if (!bus) continue;
+          
+          const g = audio.ctx.createGain();
+          splitter.connect(g, ch);
+          node.gains.push(g);
+          
+          const panner = audio.ctx.createStereoPanner ? audio.ctx.createStereoPanner() : null;
+          if (panner) {
+            panner.pan.value = defaultPanForChannel(ch);
+            g.connect(panner);
+            panner.connect(bus);
+            node.panners.push(panner);
+          } else {
+            g.connect(bus);
+          }
+        }
+        
+        try { src.start(0); } catch { disposeAudioHoldNode(node); return; }
+        if (gen !== audioHoldGen || !state.audioHold || state.source.playing) {
+          disposeAudioHoldNode(node);
+          return;
+        }
+        audioHoldNodes.push(node);
+      }
+    }).catch(() => { });
+    return;
+  }
 
   // Keep media-element preview silent while holding (BufferSource owns the sound).
   for (const el of runtime.clipEls.values()) { if (!el.paused) el.pause(); }
@@ -6067,7 +6131,7 @@ function setAudioHold(on) {
   on = !!on;
   if (on) {
     if (state.exporting || state.rendering) return;
-    if (state.playing) {
+    if (state.playing || state.source.playing) {
       // Pause without going through pause() (that would clear hold).
       state.playing = false;
       pauseSource();
