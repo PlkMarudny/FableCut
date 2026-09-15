@@ -4774,7 +4774,7 @@ function fitVuMeter() {
   }
   const sx = (stage.clientWidth - 4) / naturalW;
   const sy = (stage.clientHeight - 12) / naturalH;
-  const next = Math.min(1, sx, sy);
+  const next = Math.max(0, Math.min(1, sx, sy));
   if (Math.abs(next - vuMeterScale) < 0.001) return;
   vuMeterScale = next;
   meter.style.transform = next >= 0.999 ? "" : "scale(" + next + ")";
