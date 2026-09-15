@@ -597,13 +597,15 @@ const BACKOUT = lift(/const backOut = (\(u\) => \{[^\n]*\});/);
 const TRANS = slice("function evalProps(", "function shiftKF(");
 
 function makeTransSandbox({ W = 1280, H = 720 } = {}) {
+  const composeCanvas = { width: W, height: H };
   return new Function(
-    "DEFAULT_PROPS", "EASE", "FILTER_PRESETS", "backOut", "clamp", "els",
+    "DEFAULT_PROPS", "EASE", "FILTER_PRESETS", "backOut", "clamp", "els", "composeCanvas",
     `${TRANS}\nreturn { evalProps, applyTransition, transOffsetAt };`
   )(
     DEFAULT_PROPS, EASE, { none: {} }, BACKOUT,
     (v, a, b) => Math.min(b, Math.max(a, v)), // clamp, as in app.js
     { preview: { width: W, height: H } },
+    composeCanvas,
   );
 }
 

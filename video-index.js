@@ -174,9 +174,13 @@ function sampleToChunk(b, stsc) {
   let o = stsc.data + 8;
   for (let i = 0; i < count; i++, o += 12) {
     if (o + 12 > stsc.end) throw new Error("Invalid stsc");
+    const descriptionIndex = b.readUInt32BE(o + 8);
+    if (descriptionIndex !== 1)
+      throw new Error("VideoDecoder export does not support multiple MP4 sample descriptions");
     out.push({
       firstChunk: b.readUInt32BE(o),
       samplesPerChunk: b.readUInt32BE(o + 4),
+      descriptionIndex,
     });
   }
   return out;
@@ -226,6 +230,28 @@ function parseVideoSampleEntry(b, stsd) {
   return { codec: avcCodec(description), description, width, height };
 }
 
+/* Sample-table duration is decode timing. Frame holding must follow presentation
+   order (VFR, reordered B-frames). The last hold is that sample's edit-list-
+   normalized presentation end (PTS + stts duration), not the preceding PTS gap. */
+function applyPresentationHolds(samples) {
+  const presentationTimes = [...new Set(samples.map((sample) => sample.timestamp))]
+    .sort((a, z) => a - z);
+  const holdByTimestamp = new Map();
+  for (let i = 0; i < presentationTimes.length - 1; i++)
+    holdByTimestamp.set(presentationTimes[i], presentationTimes[i + 1] - presentationTimes[i]);
+  if (presentationTimes.length) {
+    const last = presentationTimes[presentationTimes.length - 1];
+    let presentationEnd = last;
+    for (const sample of samples) {
+      if (sample.timestamp !== last) continue;
+      presentationEnd = Math.max(presentationEnd, sample.timestamp + sample.duration);
+    }
+    holdByTimestamp.set(last, Math.max(1, presentationEnd - last));
+  }
+  for (const sample of samples)
+    sample.duration = Math.max(1, holdByTimestamp.get(sample.timestamp) || sample.duration);
+}
+
 function parseVideoIndex(file) {
   const stat = fs.statSync(file);
   const fd = fs.openSync(file, "r");
@@ -256,11 +282,11 @@ function parseVideoIndex(file) {
   if (!timescale) throw new Error("MP4 video track has an invalid timescale");
   const minf = requireChild(b, mdia, "minf");
   const stbl = requireChild(b, minf, "stbl");
+  const mapping = sampleToChunk(b, requireChild(b, stbl, "stsc"));
   const sampleEntry = parseVideoSampleEntry(b, requireChild(b, stbl, "stsd"));
   const sizes = sampleSizes(b, requireChild(b, stbl, "stsz"));
   const offsetsBox = child(b, stbl, "co64") || requireChild(b, stbl, "stco");
   const chunks = chunkOffsets(b, offsetsBox);
-  const mapping = sampleToChunk(b, requireChild(b, stbl, "stsc"));
   const durations = expandTiming(expandRunTable(b, requireChild(b, stbl, "stts")), sizes.length);
   const ctts = child(b, stbl, "ctts");
   const compositionOffsets = ctts
@@ -304,20 +330,7 @@ function parseVideoIndex(file) {
   if (presentationStart) {
     for (const sample of samples) sample.timestamp -= presentationStart;
   }
-  // Sample-table duration is decode timing. Frame holding must instead follow
-  // presentation order, especially for VFR and reordered B-frames.
-  const presentationTimes = [...new Set(samples.map((sample) => sample.timestamp))]
-    .sort((a, z) => a - z);
-  const holdByTimestamp = new Map();
-  for (let i = 0; i < presentationTimes.length - 1; i++)
-    holdByTimestamp.set(presentationTimes[i], presentationTimes[i + 1] - presentationTimes[i]);
-  if (presentationTimes.length) {
-    const last = presentationTimes[presentationTimes.length - 1];
-    const prior = presentationTimes[presentationTimes.length - 2];
-    holdByTimestamp.set(last, prior == null ? (samples[0]?.duration || 1) : last - prior);
-  }
-  for (const sample of samples)
-    sample.duration = Math.max(1, holdByTimestamp.get(sample.timestamp) || sample.duration);
+  applyPresentationHolds(samples);
   return {
     codec: sampleEntry.codec,
     description: sampleEntry.description.toString("base64"),
@@ -330,4 +343,4 @@ function parseVideoIndex(file) {
   };
 }
 
-module.exports = { parseVideoIndex };
+module.exports = { parseVideoIndex, sampleToChunk, applyPresentationHolds };

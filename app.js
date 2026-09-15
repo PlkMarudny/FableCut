@@ -5172,7 +5172,7 @@ function applyTransition(p, type, k, W, H, dir) {
    subtracted back out. */
 function transOffsetAt(c, t) {
   const p = { x: 0, y: 0, scale: 1, opacity: 1, volume: 1, rotation: 0, blur: 0, rgbSplit: 0 };
-  const local = t - c.start, W = els.preview.width, H = els.preview.height;
+  const local = t - c.start, W = composeCanvas.width, H = composeCanvas.height;
   const tin = c.transitionIn, tout = c.transitionOut;
   if (tin && tin.duration > 0 && local < tin.duration)
     applyTransition(p, tin.type, 1 - EASE["ease-out"](clamp(local / tin.duration, 0, 1)), W, H, -1);
