@@ -55,6 +55,7 @@ const DEFAULT_PROPS = {
   cropL: 0, cropT: 0, cropR: 0, cropB: 0,      // % trimmed off each source edge
   flipH: false, flipV: false,
   cornerRadius: 0,                             // px, rounded corners (PiP look)
+  shadowBlur: 0, shadowOffsetX: 0, shadowOffsetY: 0, shadowColor: "#000000", // drop shadow (0 = off)
   blend: "normal",                             // canvas blend mode
   chromaKey: "", chromaTolerance: 26, chromaSoftness: 12,  // green-screen key
   bgRemove: false,                             // AI person cut-out (MediaPipe)
@@ -73,7 +74,7 @@ const DEFAULT_PROPS = {
 };
 const ANIMATABLE = ["x", "y", "scale", "rotation", "opacity", "volume", "pan", "speed",
   "brightness", "contrast", "saturation", "hue", "blur", "grayscale", "sepia", "invert",
-  "temperature", "tint", "vignette", "cornerRadius", "shake", "rgbSplit", "grain",
+  "temperature", "tint", "vignette", "cornerRadius", "shadowBlur", "shake", "rgbSplit", "grain",
   "fontSize", "letterSpacing", "glow"];
 const TRANSITIONS = ["none", "fade", "slide-left", "slide-right", "slide-up", "slide-down",
   "zoom", "wipe", "wipe-right", "wipe-up", "wipe-down", "iris", "spin", "blur", "whip",
@@ -3715,6 +3716,10 @@ function renderInspector(lite) {
       ${row("Crop T/B %", `<input type="number" data-k="cropT" min="0" max="95" value="${p.cropT}" style="max-width:58px">
                            <input type="number" data-k="cropB" min="0" max="95" value="${p.cropB}" style="max-width:58px">`, "", "cropT,cropB")}
       ${slider("cornerRadius", 0, 300, 1, p.cornerRadius, "px")}
+      ${slider("shadowBlur", 0, 80, 1, p.shadowBlur, "px")}
+      ${row("Shadow offset", `<input type="number" data-k="shadowOffsetX" value="${fmtInspNum(p.shadowOffsetX)}" style="max-width:58px">
+                           <input type="number" data-k="shadowOffsetY" value="${fmtInspNum(p.shadowOffsetY)}" style="max-width:58px">`, "shadowOffsetX,shadowOffsetY")}
+      ${row("Shadow col.", `<input type="color" data-k="shadowColor" value="${/^#/.test(p.shadowColor) ? p.shadowColor : "#000000"}">`, "", "shadowColor")}
       ${check("Flip H", "flipH", p.flipH)}
       ${check("Flip V", "flipV", p.flipV)}
     </div>`;
@@ -4034,7 +4039,7 @@ const KF_GRAPH_LABEL = {
   volume: "Volume", pan: "Pan", speed: "Speed", brightness: "Bright", contrast: "Contrast",
   saturation: "Sat", hue: "Hue", blur: "Blur", grayscale: "Gray", sepia: "Sepia",
   invert: "Invert", temperature: "Temp", tint: "Tint", vignette: "Vignette",
-  cornerRadius: "Radius", shake: "Shake", rgbSplit: "RGB", grain: "Grain",
+  cornerRadius: "Radius", shadowBlur: "Shadow", shake: "Shake", rgbSplit: "RGB", grain: "Grain",
   fontSize: "Size", letterSpacing: "Track", glow: "Glow",
 };
 function toggleKfGraph(key) {
@@ -5415,6 +5420,27 @@ function hexToRgb(hex) {
   const n = parseInt(String(hex).replace("#", ""), 16) || 0;
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
+function shadowColorCss(p) {
+  const c = p.shadowColor || "#000000";
+  if (/^rgba?\(/i.test(String(c))) return c;
+  const [r, g, b] = hexToRgb(c);
+  return `rgba(${r},${g},${b},0.55)`;
+}
+function setCanvasShadow(ctx, p) {
+  const blur = +p.shadowBlur || 0;
+  if (blur <= 0) return false;
+  ctx.shadowColor = shadowColorCss(p);
+  ctx.shadowBlur = blur;
+  ctx.shadowOffsetX = +p.shadowOffsetX || 0;
+  ctx.shadowOffsetY = +p.shadowOffsetY || blur / 2;
+  return true;
+}
+function clearCanvasShadow(ctx) {
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+}
 function pixelPass(c, p, src, sx, sy, sw, sh, dw, dh) {
   const w = Math.max(2, Math.min(Math.round(dw), 1920));
   const h = Math.max(2, Math.min(Math.round(dh), 1920));
@@ -5819,21 +5845,26 @@ function drawClip(c, W, H, t) {
     else if (p.fit === "none") { dw = cw * sc; dh = ch * sc; }
     else { const f = Math.min(W / cw, H / ch) * sc; dw = cw * f; dh = ch * f; }
     if (p.flipH || p.flipV) ctx2d.scale(p.flipH ? -1 : 1, p.flipV ? -1 : 1);
-    if (p.cornerRadius > 0) {
-      ctx2d.beginPath();
-      ctx2d.roundRect(-dw / 2, -dh / 2, dw, dh, Math.min(+p.cornerRadius, dw / 2, dh / 2));
-      ctx2d.clip();
-    }
     if (p.bgRemove && c.kind === "video") requestMask(c.id, src); // refresh person mask
     if (p.bgRemove && c.kind === "image" && !bgSeg.masks.get(c.id)) requestMask(c.id, src);
-    ctx2d.filter = buildFilter(p);
-    if (needsPixelPass(p, c)) {
-      const processed = pixelPass(c, p, src, sx, sy, cw, ch, dw, dh);
-      ctx2d.drawImage(processed, 0, 0, processed.width, processed.height, -dw / 2, -dh / 2, dw, dh);
-    } else {
-      ctx2d.drawImage(src, sx, sy, cw, ch, -dw / 2, -dh / 2, dw, dh);
+    const processed = needsPixelPass(p, c) ? pixelPass(c, p, src, sx, sy, cw, ch, dw, dh) : null;
+    const roundR = Math.min(+p.cornerRadius || 0, dw / 2, dh / 2);
+    const drawSrc = () => {
+      ctx2d.filter = buildFilter(p);
+      if (processed) ctx2d.drawImage(processed, 0, 0, processed.width, processed.height, -dw / 2, -dh / 2, dw, dh);
+      else ctx2d.drawImage(src, sx, sy, cw, ch, -dw / 2, -dh / 2, dw, dh);
+      ctx2d.filter = "none";
+    };
+    if (roundR > 0) {
+      ctx2d.beginPath();
+      ctx2d.roundRect(-dw / 2, -dh / 2, dw, dh, roundR);
+      ctx2d.clip();
     }
-    ctx2d.filter = "none";
+    if (setCanvasShadow(ctx2d, p)) {
+      drawSrc();
+      clearCanvasShadow(ctx2d);
+      if (roundR > 0) drawSrc(); // crisp top layer; shadow bleeds outside the clip
+    } else drawSrc();
     if (p.vignette > 0) {
       const g = ctx2d.createRadialGradient(0, 0, Math.min(dw, dh) * 0.35, 0, 0, Math.hypot(dw, dh) * 0.55);
       g.addColorStop(0, "rgba(0,0,0,0)");

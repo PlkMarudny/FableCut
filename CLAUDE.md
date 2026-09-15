@@ -253,6 +253,9 @@ Examples in `library/svg/`: `sparkles.svg` (loop), `lower-third.svg`,
 | `fit` | "contain" | contain · cover (fill canvas, crop overflow) · stretch · none (native px) |
 | `cropL` `cropR` `cropT` `cropB` | 0 | % of the source trimmed off each edge |
 | `cornerRadius` | 0 | px, rounded corners — the PiP look |
+| `shadowBlur` | 0 | px drop shadow (0 = off); follows clip alpha (keyed cut-outs cast a silhouette shadow) |
+| `shadowOffsetX` `shadowOffsetY` | 0 | px offset; when `shadowOffsetY` is 0 it defaults to `shadowBlur / 2` |
+| `shadowColor` | `"#000000"` | shadow color (hex or `rgba()`; hex uses 55% opacity) |
 | `flipH`, `flipV` | false | mirror |
 
 **Filter / color** (video/image/svg):
@@ -353,7 +356,7 @@ footage. Example: 0.3 s impact shake over everything =
 
 **Animatable props** (usable in `keyframes`): x, y, scale, rotation, opacity,
 volume, pan, speed, brightness, contrast, saturation, hue, blur, grayscale, sepia,
-invert, temperature, tint, vignette, cornerRadius, shake, rgbSplit, grain,
+invert, temperature, tint, vignette, cornerRadius, shadowBlur, shake, rgbSplit, grain,
 fontSize, letterSpacing, glow.
 
 **Transition types**: fade · slide-left/right/up/down · zoom · wipe (=wipe-left)
@@ -502,7 +505,7 @@ background footage on V1.
 `props: {bgRemove:true}` — then put anything behind it on V1.
 
 **Picture-in-picture**: clip on V3 with
-`props: {scale:0.35, x:380, y:-200, cornerRadius:24}` — add
+`props: {scale:0.35, x:380, y:-200, cornerRadius:24, shadowBlur:28, shadowOffsetY:14}` — add
 `transitionIn: {type:"slide-right", duration:0.5}` to fly it in.
 
 **Slow motion / timelapse**: `props.speed: 0.5` (half speed) or `4` (4×).

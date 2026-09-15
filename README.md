@@ -125,7 +125,7 @@ same time.
 - Full grade controls: brightness/contrast/saturation/hue, **temperature & tint**,
   blur, grayscale/sepia/invert, **vignette**, animated **film grain**
 - Blend modes (screen, multiply, overlay…), fit modes (contain/cover/stretch),
-  per-edge cropping, corner radius, flip H/V
+  per-edge cropping, corner radius, **drop shadow**, flip H/V
 - **Chroma key** (green screen) with tolerance/softness + spill suppression
 - **AI background removal** (person cut-out, in-browser via MediaPipe)
 
